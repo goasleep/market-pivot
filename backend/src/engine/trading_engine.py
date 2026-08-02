@@ -131,7 +131,9 @@ class TradingEngine:
         trade_date = trade_date or self._current_date
         pos = self._find_position(ticker)
         if not pos or pos.available_shares < MIN_LOT:
-            logger.warning(f"Sell {ticker}: no position or insufficient available shares (available={pos.available_shares if pos else 0}, frozen={pos.frozen_shares if pos else 0})")
+            logger.warning(
+                f"Sell {ticker}: no position or insufficient available shares (available={pos.available_shares if pos else 0}, frozen={pos.frozen_shares if pos else 0})"
+            )
             return None
 
         shares = min(shares, pos.available_shares)
