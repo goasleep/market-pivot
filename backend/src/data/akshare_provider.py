@@ -13,11 +13,10 @@ Enhancements over basic version:
 - Exponential backoff retry
 """
 
-import sqlite3
-import time
 import json
 import random
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -26,7 +25,7 @@ import pandas as pd
 from loguru import logger
 
 from config import settings
-
+from data.database import SQLiteDatabase
 
 # ---------------------------------------------------------------------------
 # Circuit Breaker
@@ -135,50 +134,29 @@ class DataCache:
 
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._init_db()
-
-    def _init_db(self):
-        with self._lock, sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS cache (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    timestamp REAL NOT NULL
-                )
-            """)
-            conn.commit()
+        self._database = SQLiteDatabase(db_path)
 
     def get(self, key: str, ttl: int = 3600) -> Any | None:
-        with self._lock, sqlite3.connect(self.db_path) as conn:
-            row = conn.execute("SELECT value, timestamp FROM cache WHERE key = ?", (key,)).fetchone()
-            if row is None:
-                return None
-            value_str, ts = row
-            if time.time() - ts > ttl:
-                return None
-            return json.loads(value_str)
+        row = self._database.get_cache(key)
+        if row is None:
+            return None
+        value_str, timestamp = row
+        if time.time() - timestamp > ttl:
+            return None
+        return json.loads(value_str)
 
     def set(self, key: str, value: Any):
-        with self._lock, sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO cache (key, value, timestamp) VALUES (?, ?, ?)",
-                (key, json.dumps(value, ensure_ascii=False, default=str), time.time()),
-            )
-            conn.commit()
+        self._database.set_cache(key, value)
 
     def clear(self):
-        with self._lock, sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM cache")
-            conn.commit()
+        self._database.clear_cache()
 
 
 # ---------------------------------------------------------------------------
 # Singleton instances
 # ---------------------------------------------------------------------------
 
-_cache = DataCache(settings.cache_db_path)
+_cache = DataCache(settings.database_file_path)
 
 # One breaker per data category
 _breakers: dict[str, CircuitBreaker] = {

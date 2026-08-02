@@ -76,7 +76,7 @@ make down
 ```
 
 Docker 启动后访问 http://localhost:5173，后端健康检查地址为
-http://localhost:8000/api/health。DeepSeek 配置从根目录 `.env` 读取；可通过
+http://localhost:8000/api/health。DeepSeek 配置和运行数据统一由后端 SQLite 数据库管理；可通过
 `FRONTEND_PORT` 和 `BACKEND_PORT` 修改映射端口。
 
 ## 项目结构

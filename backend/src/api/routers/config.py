@@ -1,12 +1,12 @@
 """LLM configuration router — GET/PUT /api/config/llm.
 
 Allows the frontend to read and update LLM settings (API key, model, etc.)
-at runtime. Changes are persisted to a JSON file and take effect immediately.
+at runtime. Changes are persisted to the shared SQLite database and take effect immediately.
 """
 
 from fastapi import APIRouter
-from pydantic import BaseModel
 from loguru import logger
+from pydantic import BaseModel
 
 from config import get_llm_config, save_llm_config
 from llm.deepseek import MODEL_CONFIGS
@@ -58,7 +58,7 @@ async def get_llm_settings():
 
 @router.put("/llm", response_model=LLMConfigResponse)
 async def update_llm_settings(update: LLMConfigUpdate):
-    """Update LLM configuration. Persists to file, hot-reloads immediately."""
+    """Update LLM configuration. Persists to SQLite, hot-reloads immediately."""
     # Build updates dict, skipping empty/null fields
     updates = {}
     if update.api_key:

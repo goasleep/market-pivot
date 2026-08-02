@@ -31,7 +31,7 @@ make down                            # Stop Docker Compose services
 
 Copy `.env.example` to `.env` and provide the DeepSeek settings before running the backend. Keep API keys local.
 
-Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` to trace Stock Agent and LangGraph runs. Use a project name in `LANGSMITH_PROJECT`; never commit the key.
+Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` to trace Stock Agent and LangGraph runs. Use a project name in `LANGSMITH_PROJECT`; never commit the key. Persistent cache and application settings share the SQLite database configured by `DATABASE_PATH`.
 
 For a containerized environment, use `make up`; Compose builds `backend/Dockerfile` and `frontend/Dockerfile`, persists backend data from `backend/data/`, and proxies frontend `/api` requests to the backend service.
 

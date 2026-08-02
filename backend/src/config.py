@@ -3,13 +3,16 @@
 import json
 import os
 from pathlib import Path
-from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from loguru import logger
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from data.database import SQLiteDatabase
 
-# --- LLM config persistence (JSON file, hot-reloadable) ---
+# --- LLM config persistence (SQLite, hot-reloadable) ---
 
-_LLM_CONFIG_PATH = Path(__file__).parent.parent / "data" / "llm_config.json"
+_LEGACY_LLM_CONFIG_PATH = Path(__file__).parent.parent / "data" / "llm_config.json"
+_LLM_SETTINGS_KEY = "llm_config"
 
 _LLM_CONFIG_DEFAULTS = {
     "api_key": "",
@@ -21,29 +24,25 @@ _LLM_CONFIG_DEFAULTS = {
 
 
 def _load_llm_config() -> dict:
-    """Load LLM config from JSON file, falling back to env vars / defaults."""
+    """Load LLM config from SQLite, falling back to env vars / defaults."""
     # Start with env defaults
     config = dict(_LLM_CONFIG_DEFAULTS)
     config["api_key"] = settings.deepseek_api_key
     config["base_url"] = settings.deepseek_base_url
     config["model"] = settings.deepseek_model
 
-    # Override with persisted JSON if it exists
-    if _LLM_CONFIG_PATH.exists():
-        try:
-            persisted = json.loads(_LLM_CONFIG_PATH.read_text(encoding="utf-8"))
-            for key in _LLM_CONFIG_DEFAULTS:
-                if key in persisted:
-                    config[key] = persisted[key]
-            logger.debug(f"Loaded LLM config from {_LLM_CONFIG_PATH}")
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"Failed to load LLM config file: {e}, using env defaults")
+    # Override with the persisted SQLite setting
+    persisted = database.get_setting(_LLM_SETTINGS_KEY)
+    if isinstance(persisted, dict):
+        for key in _LLM_CONFIG_DEFAULTS:
+            if key in persisted:
+                config[key] = persisted[key]
 
     return config
 
 
 def get_llm_config() -> dict:
-    """Get current LLM configuration (hot-reads from file each time)."""
+    """Get current LLM configuration (hot-reads from SQLite each time)."""
     return _load_llm_config()
 
 
@@ -67,10 +66,9 @@ def save_llm_config(updates: dict) -> dict:
                 continue
             current[key] = val
 
-    # Persist to file
-    _LLM_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _LLM_CONFIG_PATH.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
-    logger.info(f"LLM config saved to {_LLM_CONFIG_PATH} (model={current['model']})")
+    # Persist alongside the data cache in the shared SQLite database
+    database.set_setting(_LLM_SETTINGS_KEY, current)
+    logger.info(f"LLM config saved to SQLite (model={current['model']})")
 
     return current
 
@@ -91,8 +89,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    # Data cache
-    data_cache_path: str = "./data/cache.db"
+    # Unified SQLite database (cache, settings, and future trading records)
+    database_path: str = "./data/cache.db"
+    data_cache_path: str | None = None  # backwards-compatible legacy environment variable
 
     # LangSmith observability
     langsmith_tracing: bool = False
@@ -101,13 +100,34 @@ class Settings(BaseSettings):
     langsmith_endpoint: str = "https://api.smith.langchain.com"
 
     @property
-    def cache_db_path(self) -> Path:
-        p = Path(self.data_cache_path)
+    def database_file_path(self) -> Path:
+        p = Path(self.data_cache_path or self.database_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
 
 settings = Settings()
+database = SQLiteDatabase(settings.database_file_path)
+
+
+def _migrate_legacy_llm_config() -> None:
+    """Import the old JSON config once, then remove the legacy file."""
+    if database.get_setting(_LLM_SETTINGS_KEY) is not None or not _LEGACY_LLM_CONFIG_PATH.exists():
+        return
+
+    try:
+        legacy = json.loads(_LEGACY_LLM_CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(legacy, dict):
+            return
+        migrated = {key: legacy[key] for key in _LLM_CONFIG_DEFAULTS if key in legacy}
+        database.set_setting(_LLM_SETTINGS_KEY, migrated)
+        _LEGACY_LLM_CONFIG_PATH.unlink()
+        logger.info("Migrated LLM config from JSON into the shared SQLite database")
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(f"Failed to migrate legacy LLM config: {exc}")
+
+
+_migrate_legacy_llm_config()
 
 
 def configure_langsmith() -> None:

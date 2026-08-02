@@ -10,3 +10,4 @@ __pycache__/
 backend/data/llm_config.json
 .vite/
 *.tsbuildinfo
+.codegraph/
