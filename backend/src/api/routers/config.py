@@ -11,7 +11,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from config import get_llm_config, save_llm_config
-from llm.deepseek import MODEL_CONFIGS
+from llm import MODEL_CONFIGS
 
 router = APIRouter()
 

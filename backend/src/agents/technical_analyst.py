@@ -6,7 +6,7 @@ Analyzes technical indicators: MACD, RSI, KDJ, Bollinger Bands, MA, volume.
 import pandas as pd
 from loguru import logger
 
-from llm.deepseek import chat_json
+from llm import LLMService, get_llm_service
 from models.schemas import AgentReport, Decision, MarketContext
 from strategies.skill_manager import get_strategy_instructions
 
@@ -34,6 +34,7 @@ async def analyze(
     days: int = 120,
     strategy_name: str | None = None,
     context: MarketContext | None = None,
+    llm: LLMService | None = None,
 ) -> AgentReport:
     """Run technical analysis on a stock.
 
@@ -78,7 +79,8 @@ Signal: buy if technicals suggest upward momentum, sell if downward, hold if mix
 
     try:
         system_prompt = _build_system_prompt(strategy_name, context.market_regime if context else None)
-        result = await chat_json(prompt, system=system_prompt)
+        llm_service = llm or get_llm_service()
+        result = await llm_service.chat_json(prompt, system=system_prompt)
         return AgentReport(
             agent_name="technical",
             signal=Decision(result.get("signal", "hold")),

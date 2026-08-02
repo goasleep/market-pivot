@@ -17,7 +17,7 @@ _LLM_SETTINGS_KEY = "llm_config"
 _LLM_CONFIG_DEFAULTS = {
     "api_key": "",
     "base_url": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat",
+    "model": "deepseek-v4-flash",
     "temperature": 0.3,
     "max_tokens": 8192,
 }
@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     # DeepSeek API
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-v4-flash"
 
     # Server
     host: str = "0.0.0.0"

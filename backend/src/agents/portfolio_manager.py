@@ -6,7 +6,7 @@ Outputs a structured DecisionDashboard with 6 blocks.
 
 from loguru import logger
 
-from llm.deepseek import chat_json
+from llm import LLMService, get_llm_service
 from models.schemas import (
     AgentReport,
     BattlePlan,
@@ -145,6 +145,7 @@ async def decide(
     current_price: float = 0.0,
     strategy_name: str | None = None,
     market_regime: str | None = None,
+    llm: LLMService | None = None,
 ) -> TradeDecision:
     """Make final trading decision with structured dashboard.
 
@@ -199,7 +200,8 @@ Make your final decision as JSON.
             market_regime=market_regime,
         )
         full_system = SYSTEM_PROMPT + strategy_text
-        result = await chat_json(prompt, system=full_system)
+        llm_service = llm or get_llm_service()
+        result = await llm_service.chat_json(prompt, system=full_system)
         dashboard = _parse_dashboard(result)
         position_size = result.get("position_size")
         if position_size is not None and risk_report:

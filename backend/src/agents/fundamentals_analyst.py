@@ -7,7 +7,7 @@ import asyncio
 
 from loguru import logger
 
-from llm.deepseek import chat_json
+from llm import LLMService, get_llm_service
 from models.schemas import AgentReport, Decision, MarketContext
 
 SYSTEM_PROMPT = """You are a professional A-share fundamentals analyst.
@@ -23,7 +23,11 @@ You must respond with valid JSON in this format:
 }"""
 
 
-async def analyze(ticker: str, context: MarketContext | None = None) -> AgentReport:
+async def analyze(
+    ticker: str,
+    context: MarketContext | None = None,
+    llm: LLMService | None = None,
+) -> AgentReport:
     """Run fundamentals analysis on a stock."""
     logger.info(f"[FundamentalsAgent] Analyzing {ticker}")
 
@@ -63,7 +67,8 @@ Signal: buy if undervalued with strong fundamentals, sell if overvalued or deter
 """
 
     try:
-        result = await chat_json(prompt, system=SYSTEM_PROMPT)
+        llm_service = llm or get_llm_service()
+        result = await llm_service.chat_json(prompt, system=SYSTEM_PROMPT)
         return AgentReport(
             agent_name="fundamentals",
             signal=Decision(result.get("signal", "hold")),

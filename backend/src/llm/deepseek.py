@@ -1,22 +1,18 @@
-"""DeepSeek LLM adapter using OpenAI-compatible API.
+"""DeepSeek provider implementation backed by LangChain's ChatDeepSeek."""
 
-Supports:
-- deepseek-chat: general purpose chat model
-- deepseek-reasoner: reasoning model (R1)
-
-Configuration is hot-reloadable: reads from config.get_llm_config() on each
-call, so settings changed via the UI API take effect immediately without restart.
-"""
-
-import asyncio
-
-from loguru import logger
-from openai import AsyncOpenAI
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_deepseek import ChatDeepSeek
 
 from config import get_llm_config
 
-# Default model presets (temperature & max_tokens defaults per model)
+# Model presets are provider metadata. The active model and runtime parameters
+# still come from the hot-reloadable LLM configuration.
 MODEL_CONFIGS = {
+    "deepseek-v4-flash": {
+        "max_tokens": 8192,
+        "temperature": 0.3,
+        "description": "DeepSeek V4 Flash for fast general-purpose analysis",
+    },
     "deepseek-chat": {
         "max_tokens": 8192,
         "temperature": 0.3,
@@ -30,141 +26,32 @@ MODEL_CONFIGS = {
 }
 
 
-def get_client() -> AsyncOpenAI:
-    """Create a fresh AsyncOpenAI client using current config.
-
-    No singleton caching — config may change at runtime via the UI.
-    """
-    cfg = get_llm_config()
-    return AsyncOpenAI(
-        api_key=cfg["api_key"],
-        base_url=cfg["base_url"],
-    )
-
-
-async def chat(
-    prompt: str,
-    system: str = "",
+def get_chat_model(
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
-) -> str:
-    """Simple chat completion.
+) -> BaseChatModel:
+    """Create a LangChain chat model from the current application config.
 
-    Args:
-        prompt: User message
-        system: System prompt
-        model: Model name (default from config)
-        temperature: Sampling temperature
-        max_tokens: Max output tokens
-
-    Returns:
-        Response text
+    A fresh model is created for every logical call so changes made through
+    the settings API take effect without restarting the backend.
     """
-    cfg = await asyncio.to_thread(get_llm_config)
-    model = model or cfg["model"]
+    cfg = get_llm_config()
+    selected_model = model or cfg["model"]
+    preset = MODEL_CONFIGS.get(selected_model, {})
 
-    # Use model preset defaults, then override with config values, then explicit args
-    preset = MODEL_CONFIGS.get(model, {})
-    temperature = temperature if temperature is not None else cfg.get("temperature", preset.get("temperature", 0.3))
-    max_tokens = max_tokens or cfg.get("max_tokens", preset.get("max_tokens", 8192))
-
-    client = AsyncOpenAI(
-        api_key=cfg["api_key"],
-        base_url=cfg["base_url"],
+    effective_temperature = (
+        temperature if temperature is not None else cfg.get("temperature", preset.get("temperature", 0.3))
     )
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
-
-    try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        content = response.choices[0].message.content or ""
-        logger.debug(f"LLM response ({model}): {len(content)} chars")
-        return content
-    except Exception as e:
-        logger.error(f"LLM call failed: {e}")
-        raise
-
-
-async def chat_json(
-    prompt: str,
-    system: str = "",
-    model: str | None = None,
-) -> dict:
-    """Chat completion expecting JSON response.
-
-    The prompt should instruct the model to return valid JSON.
-    Uses json enforcement via system message suffix.
-    """
-    if system:
-        system = system + "\n\nYou must respond with valid JSON only, no markdown, no explanation."
-    else:
-        system = "You must respond with valid JSON only, no markdown, no explanation."
-
-    raw = await chat(prompt, system=system, model=model, temperature=0.0)
-
-    # Strip markdown code fences if present
-    raw = raw.strip()
-    if raw.startswith("```"):
-        lines = raw.split("\n")
-        # Remove first and last line (fences)
-        lines = [line for line in lines if not line.startswith("```")]
-        raw = "\n".join(lines)
-
-    import json
-
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON parse failed: {e}\nRaw: {raw[:500]}")
-        return {"error": "json_parse_failed", "raw": raw[:500]}
-
-
-async def chat_langchain(
-    messages: list[dict],
-    model: str | None = None,
-    temperature: float = 0.3,
-) -> str:
-    """LangChain-compatible chat using langchain-openai ChatOpenAI.
-
-    Args:
-        messages: List of {"role": "...", "content": "..."} dicts
-        model: Model name
-        temperature: Sampling temperature
-
-    Returns:
-        Response text
-    """
-    from langchain_openai import ChatOpenAI
-
-    cfg = await asyncio.to_thread(get_llm_config)
-    model = model or cfg["model"]
-    llm = ChatOpenAI(
-        model=model,
-        api_key=cfg["api_key"],
-        base_url=cfg["base_url"],
-        temperature=temperature,
+    effective_max_tokens = (
+        max_tokens if max_tokens is not None else cfg.get("max_tokens", preset.get("max_tokens", 8192))
     )
 
-    lc_messages = []
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-
-    for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if role == "system":
-            lc_messages.append(SystemMessage(content=content))
-        elif role == "assistant":
-            lc_messages.append(AIMessage(content=content))
-        else:
-            lc_messages.append(HumanMessage(content=content))
-
-    response = await llm.ainvoke(lc_messages)
-    return response.content
+    return ChatDeepSeek(
+        model=selected_model,
+        api_key=cfg["api_key"],
+        base_url=cfg["base_url"],
+        temperature=effective_temperature,
+        max_tokens=effective_max_tokens,
+        max_retries=2,
+    )

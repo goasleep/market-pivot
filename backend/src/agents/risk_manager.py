@@ -5,7 +5,7 @@ Assesses overall risk and suggests position sizing and stop-loss.
 
 from loguru import logger
 
-from llm.deepseek import chat_json
+from llm import LLMService, get_llm_service
 from models.schemas import AgentReport, Decision
 
 SYSTEM_PROMPT = """You are a professional A-share risk manager.
@@ -27,6 +27,7 @@ async def assess(
     ticker: str,
     agent_reports: dict[str, AgentReport],
     debate_report: AgentReport | None = None,
+    llm: LLMService | None = None,
 ) -> AgentReport:
     """Run risk assessment based on all agent reports."""
     logger.info(f"[RiskManager] Assessing {ticker}")
@@ -55,7 +56,8 @@ Conservative when signals conflict, more confident when signals align.
 """
 
     try:
-        result = await chat_json(prompt, system=SYSTEM_PROMPT)
+        llm_service = llm or get_llm_service()
+        result = await llm_service.chat_json(prompt, system=SYSTEM_PROMPT)
         return AgentReport(
             agent_name="risk_manager",
             signal=Decision(result.get("signal", "hold")),

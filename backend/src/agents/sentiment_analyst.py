@@ -5,7 +5,7 @@ Analyzes news sentiment and market sentiment for a stock.
 
 from loguru import logger
 
-from llm.deepseek import chat_json
+from llm import LLMService, get_llm_service
 from models.schemas import AgentReport, Decision, MarketContext
 
 SYSTEM_PROMPT = """You are a professional A-share market sentiment analyst.
@@ -22,7 +22,12 @@ You must respond with valid JSON in this format:
 }"""
 
 
-async def analyze(ticker: str, num_news: int = 10, context: MarketContext | None = None) -> AgentReport:
+async def analyze(
+    ticker: str,
+    num_news: int = 10,
+    context: MarketContext | None = None,
+    llm: LLMService | None = None,
+) -> AgentReport:
     """Run sentiment analysis on a stock based on recent news."""
     logger.info(f"[SentimentAgent] Analyzing {ticker}")
 
@@ -57,7 +62,8 @@ Signal: buy if sentiment is strongly positive, sell if strongly negative, hold i
 """
 
     try:
-        result = await chat_json(prompt, system=SYSTEM_PROMPT)
+        llm_service = llm or get_llm_service()
+        result = await llm_service.chat_json(prompt, system=SYSTEM_PROMPT)
         return AgentReport(
             agent_name="sentiment",
             signal=Decision(result.get("signal", "hold")),
