@@ -1,0 +1,35 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      DEEPSEEK_BASE_URL: "${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}"
+      DEEPSEEK_MODEL: "${DEEPSEEK_MODEL:-deepseek-chat}"
+      DATA_CACHE_PATH: /app/data/cache.db
+      LANGSMITH_TRACING: "${LANGSMITH_TRACING:-false}"
+      LANGSMITH_API_KEY: "${LANGSMITH_API_KEY:-}"
+      LANGSMITH_PROJECT: "${LANGSMITH_PROJECT:-a-share-agent}"
+      LANGSMITH_ENDPOINT: "${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}"
+    volumes:
+      - ./backend/data:/app/data
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"

@@ -1,0 +1,43 @@
+"""FastAPI application entry point."""
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from api.routers import analysis, backtest, portfolio, health, chat, config
+
+app = FastAPI(
+    title="A-Share Agent API",
+    description="AI Agent 驱动的 A 股模拟交易系统",
+    version="0.3.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(health.router, prefix="/api", tags=["health"])
+app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
+app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
+app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
+app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
+app.include_router(config.router, prefix="/api/config", tags=["config"])
+
+
+@app.get("/api/strategies", tags=["strategies"])
+async def list_strategies():
+    """List all available trading strategies."""
+    from strategies.skill_manager import list_strategies as _list
+
+    return {"strategies": _list()}
+
+
+@app.get("/api/system/status", tags=["system"])
+async def system_status():
+    """Get system status including circuit breaker states."""
+    from data.akshare_provider import get_breaker_status
+
+    return {"circuit_breakers": get_breaker_status()}

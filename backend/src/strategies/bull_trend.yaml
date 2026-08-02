@@ -1,0 +1,52 @@
+name: bull_trend
+display_name: "多头趋势"
+description: "均线多头排列、趋势明确的个股分析优先策略"
+category: trend
+core_rules: [1, 2, 3]
+required_tools:
+  - get_stock_history
+  - get_stock_realtime
+aliases: ["趋势", "趋势分析", "多头趋势", "上涨趋势"]
+default_active: true
+default_router: true
+default_priority: 10
+market_regimes: ["trending_up"]
+instructions: |
+  ## 策略：多头趋势分析
+
+  **适用场景**
+  均线多头排列（MA5 > MA10 > MA20 > MA60），趋势明确，价格运行在 MA20 之上。
+
+  **分析框架**
+  1. 趋势确认
+     - MA5 > MA10 > MA20，且 MA20 斜率向上
+     - 价格在 MA20 之上，MA60 向上或走平
+     - MACD 金叉或 DIF > 0
+
+  2. 位置与节奏
+     - 乖离率（价格偏离 MA5 百分比）< 5% 为健康
+     - 乖离率 > 8% 提示短期超买，需防回调
+     - 回踩 MA5/MA10 缩量为良好介入点
+
+  3. 动量验证
+     - RSI 在 50-70 区间为多头健康
+     - RSI > 80 提示超买，需警惕
+     - KDJ 金叉或 J 值在 50-80 区间
+
+  4. 量能配合
+     - 上涨放量、回调缩量为趋势健康
+     - 放量滞涨或天量见天价为见顶信号
+     - 20日均量为基准，放量 > 1.5 倍需关注
+
+  **评分调整建议**
+  - MA5 > MA10 > MA20 且 MA20 向上: sentiment_score +12
+  - 乖离率 < 3%: sentiment_score +8
+  - 乖离率 > 8%: sentiment_score -15
+  - RSI > 80: sentiment_score -10
+  - 放量滞涨: sentiment_score -12
+  - 回踩 MA10 缩量: sentiment_score +6
+
+  **止损参考**
+  - 跌破 MA5 减仓 1/3
+  - 跌破 MA10 减仓 1/3
+  - 跌破 MA20 清仓

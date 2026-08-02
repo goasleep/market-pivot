@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.pyc
+__pycache__/
+.venv/
+*.egg-info/
+**/data/cache.db
+**/*-journal
+backend/data/llm_config.json
+.vite/
+*.tsbuildinfo

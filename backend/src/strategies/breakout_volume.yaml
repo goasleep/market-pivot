@@ -1,0 +1,51 @@
+name: breakout_volume
+display_name: "放量突破"
+description: "价格突破关键阻力位且成交量放大的突破策略"
+category: pattern
+core_rules: [2, 3, 5]
+required_tools:
+  - get_stock_history
+  - get_stock_realtime
+aliases: ["突破", "放量突破", "阻力突破", "箱体突破"]
+default_active: false
+default_router: true
+default_priority: 15
+market_regimes: ["trending_up", "sideways"]
+instructions: |
+  ## 策略：放量突破
+
+  **适用场景**
+  价格在箱体或三角形整理后，放量突破上轨阻力位，开启新一轮上涨。
+
+  **分析框架**
+  1. 突破确认
+     - 突破前高、箱体上轨或三角形上边
+     - 突破当日涨幅 > 3%
+     - 收盘价站上阻力位 2% 以上（过滤假突破）
+
+  2. 量能验证
+     - 突破日成交量 > 20日均量 1.5 倍
+     - 突破日成交量 > 前一日 2 倍更佳
+     - 突破后次日不缩量（维持 > 均量 80%）
+
+  3. 突破质量
+     - 突破后回踩确认（3 日内回踩不破突破位）
+     - 突破缺口不回补为强势
+     - 多周期共振（日/周线同时突破）更可靠
+
+  4. 风险控制
+     - 假突破（突破后 3 日内跌回阻力位下方）需立即止损
+     - 突破时乖离率过大（> 8%）追高风险高
+     - 大盘弱势下的突破成功率降低
+
+  **评分调整建议**
+  - 放量突破 + 涨幅 > 5%: sentiment_score +15
+  - 突破后回踩不破: sentiment_score +10
+  - 多周期共振突破: sentiment_score +12
+  - 突破日量比 > 2.0: sentiment_score +8
+  - 突破后 3 日跌回: sentiment_score -18
+  - 乖离率 > 8% 追高: sentiment_score -10
+
+  **止损参考**
+  - 跌破突破位止损
+  - 突破后回踩确认失败，3 日内清仓

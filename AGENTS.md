@@ -1,0 +1,52 @@
+# Repository Guidelines
+
+## Project Structure & Module Organization
+
+This pnpm monorepo contains an A-share AI trading simulation system.
+
+- `backend/src/api/` contains FastAPI routes; `agents/` contains roles; `data/` wraps AkShare and caching; `engine/` contains backtesting and paper trading; `graph/` defines LangGraph workflows; `models/` contains schemas; and `llm/` contains the DeepSeek adapter.
+- `backend/src/agents/stock_agent.py` routes conversational stock tasks such as analysis, quotes, history, news, strategies, and follow-up questions.
+- `frontend/src/` contains the React application, organized into `pages/`, `components/`, `api/`, `types/`, and `router/`.
+- Runtime/cache data is under `backend/data/`. Do not commit secrets, generated caches, or `__pycache__/` files.
+
+## Build, Test, and Development Commands
+
+From the repository root:
+
+```bash
+pnpm install                         # Install JavaScript dependencies
+cd backend && uv sync              # Install Python dependencies
+pnpm dev                             # Run frontend and backend together
+pnpm dev:frontend                    # Run Vite at port 5173
+pnpm dev:backend                     # Run FastAPI with reload at port 8000
+pnpm build:frontend                  # Type-check and build the frontend
+pnpm lint                            # Run frontend ESLint
+pnpm format                          # Format frontend TypeScript/TSX
+cd backend && uv run ruff check src
+cd backend && uv run pytest
+make setup                           # Initialize .env and install pnpm/uv dependencies
+make up                              # Build Docker images and start both services
+make down                            # Stop Docker Compose services
+```
+
+Copy `.env.example` to `.env` and provide the DeepSeek settings before running the backend. Keep API keys local.
+
+Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` to trace Stock Agent and LangGraph runs. Use a project name in `LANGSMITH_PROJECT`; never commit the key.
+
+For a containerized environment, use `make up`; Compose builds `backend/Dockerfile` and `frontend/Dockerfile`, persists backend data from `backend/data/`, and proxies frontend `/api` requests to the backend service.
+
+## Coding Style & Naming Conventions
+
+Use 2 spaces for TypeScript/TSX and the existing functional React style. Use `PascalCase` for components, `camelCase` for variables/hooks/API functions, 4 spaces for Python, and `snake_case` for Python modules/functions/variables. Use `PascalCase` for classes and Pydantic models. Keep Python lines within Ruff’s 120-character limit.
+
+## Testing Guidelines
+
+No tests are currently checked in. Add backend tests under `backend/tests/` using `pytest` (and `pytest-asyncio` for async endpoints), named like `test_backtester.py` or `test_<behavior>`. Frontend changes should pass the TypeScript build and lint commands; add focused tests for non-trivial UI or state logic.
+
+## Commit & Pull Request Guidelines
+
+Git history is not available in this checkout, so no project-specific convention can be verified. Use short, imperative subjects such as `Add portfolio risk limits` or `Fix chat stream handling`. Keep commits focused. Pull requests should explain the change, list validation commands, link an issue when relevant, and include screenshots for visible frontend changes. Call out configuration, API, cache, or schema changes.
+
+## Security & Configuration Tips
+
+Treat DeepSeek credentials and cached market data as local configuration. Never hard-code keys or commit `.env` files. Changes to trading, backtesting, or external data access should preserve the research-only disclaimer and safely handle missing or stale data.

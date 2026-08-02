@@ -1,0 +1,52 @@
+name: shrink_pullback
+display_name: "缩量回踩"
+description: "上涨趋势中缩量回踩关键均线的低吸策略"
+category: trend
+core_rules: [1, 2, 4]
+required_tools:
+  - get_stock_history
+  - get_stock_realtime
+aliases: ["回踩", "缩量回调", "低吸", "回调买入"]
+default_active: false
+default_router: true
+default_priority: 20
+market_regimes: ["trending_up", "sideways"]
+instructions: |
+  ## 策略：缩量回踩低吸
+
+  **适用场景**
+  处于上涨趋势中，价格短期回调至关键均线（MA5/MA10/MA20）附近，且成交量萎缩。
+
+  **分析框架**
+  1. 趋势前提
+     - 大趋势向上：MA20 向上，价格在 MA60 之上
+     - 前期有过一段上涨（至少 5% 以上涨幅）
+     - 当前处于回调阶段
+
+  2. 回踩位置
+     - 回踩 MA5：短期强势股，回踩概率较低
+     - 回踩 MA10：中等回调，常见介入位
+     - 回踩 MA20：深度回调，但只要趋势不破仍可关注
+     - 回踩 MA60：趋势可能转弱，需谨慎
+
+  3. 量能验证
+     - 回调期间成交量明显萎缩（< 20日均量的 70%）
+     - 回踩日出现地量更佳
+     - 回踩后放量反弹为确认信号
+
+  4. K 线形态
+     - 回踩位出现长下影线（锤子线/十字星）
+     - 底部反转 K 线（早晨之星、刺透形态）
+     - MACD 柱缩短，DIF 未死叉 DEA
+
+  **评分调整建议**
+  - 回踩 MA10 且缩量 < 50%: sentiment_score +15
+  - 回踩 MA20 且缩量 < 60%: sentiment_score +10
+  - 回踩位出现锤子线: sentiment_score +8
+  - MACD 柱由长缩短: sentiment_score +5
+  - 回调放量（> 均量）: sentiment_score -12
+  - 跌破 MA20: sentiment_score -15
+
+  **止损参考**
+  - 介入后跌破回踩均线 3% 止损
+  - 放量跌破 MA20 立即止损
