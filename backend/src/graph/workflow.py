@@ -7,25 +7,28 @@ Flow:
                → portfolio_manager (final decision)
 """
 
-import asyncio
-from typing import TypedDict, Any
+import operator
+from typing import Annotated, Any, TypedDict
+
+from langgraph.graph import END, StateGraph
 from loguru import logger
 
-from langgraph.graph import StateGraph, END
-
-from models.schemas import AgentReport, TradeDecision
-from data.akshare_provider import get_stock_history, get_stock_realtime
-from agents.technical_analyst import analyze as tech_analyze
-from agents.fundamentals_analyst import analyze as fund_analyze
-from agents.sentiment_analyst import analyze as sent_analyze
 from agents.debate_room import debate
-from agents.risk_manager import assess as risk_assess
+from agents.fundamentals_analyst import analyze as fund_analyze
 from agents.portfolio_manager import decide as pm_decide
+from agents.risk_manager import assess as risk_assess
+from agents.sentiment_analyst import analyze as sent_analyze
+from agents.technical_analyst import analyze as tech_analyze
+from data.market_context import build_market_context
+from models.schemas import AgentReport, MarketContext, TradeDecision
 
 
 class WorkflowState(TypedDict, total=False):
     ticker: str
     current_price: float
+    as_of_date: str | None
+    market_context: MarketContext
+    is_backtest: bool
     stock_data: dict[str, Any]
     strategy_name: str  # optional strategy override
     technical_report: AgentReport
@@ -35,7 +38,7 @@ class WorkflowState(TypedDict, total=False):
     debate_report: AgentReport
     risk_report: AgentReport
     final_decision: TradeDecision
-    progress: list[dict[str, str]]
+    progress: Annotated[list[dict[str, str]], operator.add]
 
 
 # --- Node functions ---
@@ -46,40 +49,51 @@ async def fetch_market_data(state: WorkflowState) -> dict:
     ticker = state["ticker"]
     logger.info(f"[Graph] Fetching market data for {ticker}")
 
-    rt = get_stock_realtime(ticker)
-    price = rt.get("price", 0.0)
+    context = state.get("market_context")
+    if context is None:
+        context = await build_market_context(
+            ticker,
+            as_of_date=state.get("as_of_date"),
+            current_price=state.get("current_price"),
+        )
+    price = context.current_price
 
     return {
+        "market_context": context,
+        "stock_data": context.realtime,
         "current_price": price,
-        "stock_data": rt,
-        "progress": state.get("progress", []) + [{"stage": "market_data", "message": f"Current price: {price}"}],
+        "progress": [{"stage": "market_data", "message": f"Current price: {price}"}],
     }
 
 
 async def run_technical(state: WorkflowState) -> dict:
     """Node 2a: Technical analysis."""
-    report = await tech_analyze(state["ticker"], strategy_name=state.get("strategy_name"))
+    report = await tech_analyze(
+        state["ticker"],
+        strategy_name=state.get("strategy_name"),
+        context=state.get("market_context"),
+    )
     return {
         "technical_report": report,
-        "progress": state.get("progress", []) + [{"stage": "technical", "message": report.reasoning[:80]}],
+        "progress": [{"stage": "technical", "message": report.reasoning[:80]}],
     }
 
 
 async def run_fundamentals(state: WorkflowState) -> dict:
     """Node 2b: Fundamentals analysis."""
-    report = await fund_analyze(state["ticker"])
+    report = await fund_analyze(state["ticker"], context=state.get("market_context"))
     return {
         "fundamentals_report": report,
-        "progress": state.get("progress", []) + [{"stage": "fundamentals", "message": report.reasoning[:80]}],
+        "progress": [{"stage": "fundamentals", "message": report.reasoning[:80]}],
     }
 
 
 async def run_sentiment(state: WorkflowState) -> dict:
     """Node 2c: Sentiment analysis."""
-    report = await sent_analyze(state["ticker"])
+    report = await sent_analyze(state["ticker"], context=state.get("market_context"))
     return {
         "sentiment_report": report,
-        "progress": state.get("progress", []) + [{"stage": "sentiment", "message": report.reasoning[:80]}],
+        "progress": [{"stage": "sentiment", "message": report.reasoning[:80]}],
     }
 
 
@@ -97,7 +111,7 @@ async def merge_analysts(state: WorkflowState) -> dict:
     return {
         "analyst_reports": reports,
         "debate_report": debate_report,
-        "progress": state.get("progress", []) + [{"stage": "debate", "message": debate_report.reasoning[:80]}],
+        "progress": [{"stage": "debate", "message": debate_report.reasoning[:80]}],
     }
 
 
@@ -110,7 +124,7 @@ async def run_risk(state: WorkflowState) -> dict:
     )
     return {
         "risk_report": report,
-        "progress": state.get("progress", []) + [{"stage": "risk", "message": report.reasoning[:80]}],
+        "progress": [{"stage": "risk", "message": report.reasoning[:80]}],
     }
 
 
@@ -123,10 +137,11 @@ async def run_portfolio_manager(state: WorkflowState) -> dict:
         state.get("risk_report"),
         state.get("current_price", 0.0),
         strategy_name=state.get("strategy_name"),
+        market_regime=(state.get("market_context").market_regime if state.get("market_context") else None),
     )
     return {
         "final_decision": decision,
-        "progress": state.get("progress", []) + [{"stage": "portfolio", "message": decision.reasoning[:80]}],
+        "progress": [{"stage": "portfolio", "message": decision.reasoning[:80]}],
     }
 
 

@@ -1,8 +1,7 @@
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { TrendingUp, TrendingDown, Wallet, Activity, Brain, Shield, Zap } from "lucide-react";
+import { TrendingUp, Wallet, Activity, Brain } from "lucide-react";
 import { getStrategies, getSystemStatus, type StrategyInfo } from "@/api";
 
 export function DashboardPage() {

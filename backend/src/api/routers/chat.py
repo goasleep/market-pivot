@@ -1,5 +1,6 @@
 """Stock Agent chat API with SSE text and inline widgets."""
 
+import asyncio
 import json
 from typing import Literal
 
@@ -15,10 +16,10 @@ from agents.stock_agent import (
     stock_agent,
 )
 from data.akshare_provider import (
+    async_get_stock_history,
+    async_get_stock_news,
+    async_get_stock_realtime,
     get_breaker_status,
-    get_stock_history,
-    get_stock_news,
-    get_stock_realtime,
 )
 from strategies.skill_manager import list_strategies
 from widgets.renderer import (
@@ -125,22 +126,34 @@ async def _analysis_events(request: StockAgentRequest):
     assert ticker is not None
 
     yield _event("text", {"text": f"股票 Agent：开始分析 {ticker}。"})
-    realtime, result = await stock_agent.analyze(request)
-
-    if realtime:
-        yield _event("widget", {"type": "stock_card", "html": render_stock_card(realtime)})
-
     stages = [stage.copy() for stage in PIPELINE_STAGES]
-    stages[0]["status"] = "running"
-    yield _event(
-        "widget",
-        {"type": "agent_pipeline", "html": render_agent_pipeline(stages, "market_data")},
-    )
+    stage_names = {"merge_debate": "debate"}
+    accumulated: dict = {}
+    realtime_sent = False
+    async for update in stock_agent.analyze_stream(request):
+        if not realtime_sent and update.get("realtime"):
+            yield _event(
+                "widget",
+                {"type": "stock_card", "html": render_stock_card(update["realtime"])},
+            )
+            realtime_sent = True
 
-    decision = result.get("final_decision")
-    for stage in stages:
-        stage["status"] = "done"
-    yield _event("widget", {"type": "agent_pipeline", "html": render_agent_pipeline(stages)})
+        node = stage_names.get(update["node"], update["node"])
+        for stage in stages:
+            if stage["name"] == node:
+                stage["status"] = "done"
+                break
+        current_stage = next(
+            (stage["name"] for stage in stages if stage["status"] == "pending"),
+            "",
+        )
+        yield _event(
+            "widget",
+            {"type": "agent_pipeline", "html": render_agent_pipeline(stages, current_stage)},
+        )
+        accumulated = update.get("state", accumulated)
+
+    decision = accumulated.get("final_decision")
 
     if not decision:
         yield _event("text", {"text": "分析流程完成，但没有返回最终决策。"})
@@ -214,7 +227,8 @@ async def chat_send(req: ChatRequest):
 
         if request.intent == StockIntent.STRATEGIES:
             yield _event("text", {"text": "当前可用的选股与交易策略："})
-            yield _event("widget", {"type": "strategy_selector", "html": render_strategy_selector(list_strategies())})
+            strategies = await asyncio.to_thread(list_strategies)
+            yield _event("widget", {"type": "strategy_selector", "html": render_strategy_selector(strategies)})
             yield _done()
             return
 
@@ -245,7 +259,7 @@ async def chat_send(req: ChatRequest):
         ticker = request.ticker
         try:
             if request.intent == StockIntent.QUOTE:
-                quote = get_stock_realtime(ticker)
+                quote = await async_get_stock_realtime(ticker)
                 if quote:
                     yield _event("widget", {"type": "stock_card", "html": render_stock_card(quote)})
                     yield _event("text", {"text": _quote_text(ticker, quote)})
@@ -255,7 +269,7 @@ async def chat_send(req: ChatRequest):
                 return
 
             if request.intent == StockIntent.HISTORY:
-                history = get_stock_history(ticker)
+                history = await async_get_stock_history(ticker)
                 if not history.empty:
                     prices = history.tail(30)["close"].tolist()
                     yield _event("widget", {"type": "mini_chart", "html": render_mini_chart(prices)})
@@ -264,7 +278,7 @@ async def chat_send(req: ChatRequest):
                 return
 
             if request.intent == StockIntent.NEWS:
-                yield _event("text", {"text": _news_text(ticker, get_stock_news(ticker))})
+                yield _event("text", {"text": _news_text(ticker, await async_get_stock_news(ticker))})
                 yield _done()
                 return
 
@@ -294,7 +308,8 @@ async def chat_send(req: ChatRequest):
 @router.get("/widgets/strategies")
 async def get_strategy_widget():
     """Get the strategy selector widget."""
-    return {"html": render_strategy_selector(list_strategies())}
+    strategies = await asyncio.to_thread(list_strategies)
+    return {"html": render_strategy_selector(strategies)}
 
 
 @router.get("/widgets/breakers")
@@ -306,7 +321,7 @@ async def get_breaker_widget():
 @router.get("/widgets/mini_chart/{ticker}")
 async def get_mini_chart_widget(ticker: str):
     """Get a mini sparkline chart for a stock."""
-    history = get_stock_history(ticker)
+    history = await async_get_stock_history(ticker)
     if history.empty:
         return {"html": '<div style="color:#94a3b8;font-size:12px">No data</div>'}
     return {"html": render_mini_chart(history.tail(30)["close"].tolist())}

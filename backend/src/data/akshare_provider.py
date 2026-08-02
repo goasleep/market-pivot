@@ -13,6 +13,7 @@ Enhancements over basic version:
 - Exponential backoff retry
 """
 
+import asyncio
 import json
 import random
 import threading
@@ -519,3 +520,26 @@ def get_stock_list() -> list[dict]:
 def get_breaker_status() -> dict[str, str]:
     """Get status of all circuit breakers (for monitoring API)."""
     return {name: breaker.state for name, breaker in _breakers.items()}
+
+
+# Async adapters keep the legacy synchronous provider usable while ensuring
+# FastAPI and LangGraph async paths never block the event loop on AkShare,
+# SQLite, retry backoff, or rate-limit sleeps.
+async def async_get_stock_history(*args, **kwargs) -> pd.DataFrame:
+    return await asyncio.to_thread(get_stock_history, *args, **kwargs)
+
+
+async def async_get_stock_realtime(*args, **kwargs) -> dict:
+    return await asyncio.to_thread(get_stock_realtime, *args, **kwargs)
+
+
+async def async_get_financial_data(*args, **kwargs) -> dict:
+    return await asyncio.to_thread(get_financial_data, *args, **kwargs)
+
+
+async def async_get_stock_news(*args, **kwargs) -> list[dict]:
+    return await asyncio.to_thread(get_stock_news, *args, **kwargs)
+
+
+async def async_get_stock_list(*args, **kwargs) -> list[dict]:
+    return await asyncio.to_thread(get_stock_list, *args, **kwargs)

@@ -3,7 +3,8 @@ import type {
   BacktestResult,
   Portfolio,
   SSEProgress,
-  DashboardData,
+  SimulationAccountConfig,
+  SimulationOrder,
 } from "@/types";
 
 const BASE_URL = "/api";
@@ -38,7 +39,7 @@ export function streamAnalysis(
     onComplete(JSON.parse(e.data));
     es.close();
   });
-  es.onerror = (e) => {
+  es.onerror = () => {
     onError(es);
     es.close();
   };
@@ -52,6 +53,8 @@ export async function runBacktest(params: {
   end_date: string;
   initial_capital?: number;
   decision_interval?: number;
+  fill_time?: "next_open" | "same_close";
+  strategy?: string;
 }): Promise<BacktestResult> {
   const res = await fetch(`${BASE_URL}/backtest/run`, {
     method: "POST",
@@ -62,6 +65,8 @@ export async function runBacktest(params: {
       end_date: params.end_date,
       initial_capital: params.initial_capital ?? 1_000_000,
       decision_interval: params.decision_interval ?? 1,
+      fill_time: params.fill_time ?? "next_open",
+      strategy: params.strategy,
     }),
   });
   if (!res.ok) throw new Error(`Backtest failed: ${res.statusText}`);
@@ -71,6 +76,76 @@ export async function runBacktest(params: {
 export async function getPortfolio(): Promise<Portfolio> {
   const res = await fetch(`${BASE_URL}/portfolio/`);
   if (!res.ok) throw new Error(`Failed to fetch portfolio: ${res.statusText}`);
+  return res.json();
+}
+
+export async function getSimulationAccounts(): Promise<Portfolio[]> {
+  const res = await fetch(`${BASE_URL}/portfolio/accounts`);
+  if (!res.ok) throw new Error(`Failed to fetch simulation accounts: ${res.statusText}`);
+  const data = await res.json();
+  return data.accounts;
+}
+
+export async function updateSimulationConfig(
+  accountId: string,
+  config: SimulationAccountConfig
+): Promise<Portfolio> {
+  const res = await fetch(`${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ config }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Failed to update simulation config: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function resetSimulationAccount(accountId = "default"): Promise<Portfolio> {
+  const res = await fetch(`${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/reset`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Failed to reset simulation account: ${res.statusText}`);
+  return res.json();
+}
+
+export async function updateExternalSimulationConfig(
+  accountId: string,
+  external: Record<string, unknown>
+): Promise<Portfolio> {
+  const res = await fetch(`${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/external`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(external),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Failed to update external simulation config: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function createSimulationOrder(
+  accountId: string,
+  order: {
+    ticker: string;
+    side: "buy" | "sell";
+    shares: number;
+    price?: number;
+    fill_immediately?: boolean;
+    trade_date?: string;
+  }
+): Promise<SimulationOrder> {
+  const res = await fetch(`${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/orders`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(order),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Failed to create simulation order: ${res.statusText}`);
+  }
   return res.json();
 }
 

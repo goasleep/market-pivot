@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ChatMessage, type ChatMessageData } from "@/components/chat/ChatMessage";
@@ -87,7 +86,6 @@ export function ChatPage() {
 
               // Parse SSE format: event: xxx\ndata: xxx
               if (line.startsWith("event:")) {
-                const eventType = line.slice(6).trim();
                 // Find the corresponding data line
                 continue;
               }

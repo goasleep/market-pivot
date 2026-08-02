@@ -7,12 +7,9 @@ Features:
 - Buy/sell execution with fee calculation
 """
 
-from datetime import datetime, date
-from typing import Literal
 from loguru import logger
 
-from models.schemas import Position, TradeRecord, TradeDecision, Decision, PortfolioState
-
+from models.schemas import Decision, PortfolioState, Position, SimulationAccountConfig, TradeRecord
 
 # A-share trading cost constants
 BUY_COMMISSION_RATE = 0.0003  # 0.03%
@@ -26,12 +23,19 @@ MIN_LOT = 100  # minimum 100 shares
 class TradingEngine:
     """Core trading engine for A-share simulation."""
 
-    def __init__(self, initial_capital: float = 1_000_000.0):
-        self.portfolio = PortfolioState(
+    def __init__(
+        self,
+        initial_capital: float = 1_000_000.0,
+        rules: SimulationAccountConfig | None = None,
+        portfolio: PortfolioState | None = None,
+        current_date: str = "",
+    ):
+        self.rules = rules or SimulationAccountConfig(initial_cash=initial_capital)
+        self.portfolio = portfolio or PortfolioState(
             cash=initial_capital,
             initial_capital=initial_capital,
         )
-        self._current_date: str = ""
+        self._current_date: str = current_date
 
     def set_date(self, d: str):
         """Set current simulation date and release frozen shares (T+1 settlement).
@@ -59,28 +63,35 @@ class TradingEngine:
         - No stamp tax on buy
         """
         trade_date = trade_date or self._current_date
-        shares = (shares // MIN_LOT) * MIN_LOT  # round down to nearest 100
-        if shares < MIN_LOT:
-            logger.warning(f"Buy {ticker}: shares < {MIN_LOT}, skipping")
+        if price <= 0:
+            return None
+        min_lot = self.rules.min_lot
+        shares = (shares // min_lot) * min_lot  # round down to the configured lot size
+        if shares < min_lot:
+            logger.warning(f"Buy {ticker}: shares < {min_lot}, skipping")
             return None
 
-        amount = shares * price
-        commission = max(amount * BUY_COMMISSION_RATE, MIN_COMMISSION)
-        transfer_fee = amount * TRANSFER_FEE_RATE
+        execution_price = price * (1 + self.rules.slippage_bps / 10_000)
+        amount = shares * execution_price
+        commission = max(amount * self.rules.buy_commission_rate, self.rules.minimum_commission)
+        transfer_fee = amount * self.rules.transfer_fee_rate
         total_cost = amount + commission + transfer_fee
 
         if total_cost > self.portfolio.cash:
             # Adjust shares to fit budget
-            max_affordable = int(self.portfolio.cash / (price * (1 + BUY_COMMISSION_RATE + TRANSFER_FEE_RATE)))
-            shares = (max_affordable // MIN_LOT) * MIN_LOT
-            if shares < MIN_LOT:
+            max_affordable = int(
+                self.portfolio.cash
+                / (execution_price * (1 + self.rules.buy_commission_rate + self.rules.transfer_fee_rate))
+            )
+            shares = (max_affordable // min_lot) * min_lot
+            if shares < min_lot:
                 logger.warning(
                     f"Buy {ticker}: insufficient funds (need {total_cost:.2f}, have {self.portfolio.cash:.2f})"
                 )
                 return None
-            amount = shares * price
-            commission = max(amount * BUY_COMMISSION_RATE, MIN_COMMISSION)
-            transfer_fee = amount * TRANSFER_FEE_RATE
+            amount = shares * execution_price
+            commission = max(amount * self.rules.buy_commission_rate, self.rules.minimum_commission)
+            transfer_fee = amount * self.rules.transfer_fee_rate
             total_cost = amount + commission + transfer_fee
 
         # Update position — new shares are frozen (T+1: cannot sell today)
@@ -95,7 +106,7 @@ class TradingEngine:
                 Position(
                     ticker=ticker,
                     shares=shares,
-                    avg_cost=price,
+                    avg_cost=execution_price,
                     available_shares=0,
                     frozen_shares=shares,
                 )
@@ -110,13 +121,13 @@ class TradingEngine:
             action=Decision.BUY,
             ticker=ticker,
             shares=shares,
-            price=price,
+            price=execution_price,
             amount=amount,
             commission=commission,
             tax=0.0,
         )
         self.portfolio.trades.append(trade)
-        logger.info(f"BUY {ticker} {shares}@{price:.2f} cost={total_cost:.2f} cash={self.portfolio.cash:.2f}")
+        logger.info(f"BUY {ticker} {shares}@{execution_price:.2f} cost={total_cost:.2f} cash={self.portfolio.cash:.2f}")
         return trade
 
     def sell(self, ticker: str, shares: int, price: float, trade_date: str = "") -> TradeRecord | None:
@@ -129,27 +140,32 @@ class TradingEngine:
         - T+1: can only sell shares bought before today (enforced via available_shares/frozen_shares)
         """
         trade_date = trade_date or self._current_date
+        if price <= 0:
+            return None
         pos = self._find_position(ticker)
-        if not pos or pos.available_shares < MIN_LOT:
+        min_lot = self.rules.min_lot
+        if not pos or pos.available_shares <= 0:
             logger.warning(
-                f"Sell {ticker}: no position or insufficient available shares (available={pos.available_shares if pos else 0}, frozen={pos.frozen_shares if pos else 0})"
+                f"Sell {ticker}: no position or insufficient available shares "
+                f"(available={pos.available_shares if pos else 0}, frozen={pos.frozen_shares if pos else 0})"
             )
             return None
 
         shares = min(shares, pos.available_shares)
-        shares = (shares // MIN_LOT) * MIN_LOT
-        if shares < MIN_LOT:
-            # If selling all remaining and < 100, allow it (odd lot cleanup)
-            if pos.available_shares < MIN_LOT:
+        shares = (shares // min_lot) * min_lot
+        if shares < min_lot:
+            # Odd-lot cleanup is allowed only when closing the entire holding.
+            if shares == pos.available_shares:
                 shares = pos.available_shares
             else:
-                logger.warning(f"Sell {ticker}: shares < {MIN_LOT} after rounding")
+                logger.warning(f"Sell {ticker}: shares < {min_lot} after rounding")
                 return None
 
-        amount = shares * price
-        commission = max(amount * SELL_COMMISSION_RATE, MIN_COMMISSION)
-        stamp_tax = amount * STAMP_TAX_RATE
-        transfer_fee = amount * TRANSFER_FEE_RATE
+        execution_price = price * (1 - self.rules.slippage_bps / 10_000)
+        amount = shares * execution_price
+        commission = max(amount * self.rules.sell_commission_rate, self.rules.minimum_commission)
+        stamp_tax = amount * self.rules.stamp_tax_rate
+        transfer_fee = amount * self.rules.transfer_fee_rate
         net_proceeds = amount - commission - stamp_tax - transfer_fee
 
         # Update position — deduct from available shares
@@ -167,13 +183,16 @@ class TradingEngine:
             action=Decision.SELL,
             ticker=ticker,
             shares=shares,
-            price=price,
+            price=execution_price,
             amount=amount,
             commission=commission,
             tax=stamp_tax,
         )
         self.portfolio.trades.append(trade)
-        logger.info(f"SELL {ticker} {shares}@{price:.2f} net={net_proceeds:.2f} cash={self.portfolio.cash:.2f}")
+        logger.info(
+            f"SELL {ticker} {shares}@{execution_price:.2f} "
+            f"net={net_proceeds:.2f} cash={self.portfolio.cash:.2f}"
+        )
         return trade
 
     def update_prices(self, price_map: dict[str, float]):
@@ -196,11 +215,32 @@ class TradingEngine:
 
     def reset(self, initial_capital: float = 1_000_000.0):
         """Reset portfolio to initial state."""
+        self.rules = self.rules.model_copy(update={"initial_cash": initial_capital})
         self.portfolio = PortfolioState(
             cash=initial_capital,
             initial_capital=initial_capital,
         )
         self._current_date = ""
+
+    def seed_position(self, ticker: str, shares: int, price: float) -> None:
+        """Add a pre-existing holding while preserving total initial assets."""
+        shares = int(shares)
+        if shares <= 0 or price <= 0:
+            return
+        amount = shares * price
+        if amount > self.portfolio.cash:
+            raise ValueError("Initial position value exceeds initial capital")
+        self.portfolio.cash -= amount
+        self.portfolio.positions.append(
+            Position(
+                ticker=ticker,
+                shares=shares,
+                avg_cost=price,
+                current_price=price,
+                available_shares=shares,
+                frozen_shares=0,
+            )
+        )
 
     def _find_position(self, ticker: str) -> Position | None:
         for p in self.portfolio.positions:
@@ -215,8 +255,13 @@ class TimeAwareTradingEngine(TradingEngine):
     Ensures that the agent can only see data up to the current simulation date.
     """
 
-    def __init__(self, initial_capital: float = 1_000_000.0):
-        super().__init__(initial_capital)
+    def __init__(
+        self,
+        initial_capital: float = 1_000_000.0,
+        rules: SimulationAccountConfig | None = None,
+        portfolio: PortfolioState | None = None,
+    ):
+        super().__init__(initial_capital, rules=rules, portfolio=portfolio)
         self._available_dates: list[str] = []
         self._date_index: int = 0
 

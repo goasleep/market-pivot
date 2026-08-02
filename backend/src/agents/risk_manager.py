@@ -4,9 +4,9 @@ Assesses overall risk and suggests position sizing and stop-loss.
 """
 
 from loguru import logger
-from models.schemas import AgentReport, Decision
-from llm.deepseek import chat_json
 
+from llm.deepseek import chat_json
+from models.schemas import AgentReport, Decision
 
 SYSTEM_PROMPT = """You are a professional A-share risk manager.
 You assess risk levels and recommend position sizing, stop-loss, and risk controls.

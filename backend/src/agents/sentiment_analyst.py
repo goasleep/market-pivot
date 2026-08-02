@@ -4,10 +4,9 @@ Analyzes news sentiment and market sentiment for a stock.
 """
 
 from loguru import logger
-from models.schemas import AgentReport, Decision
-from data.akshare_provider import get_stock_news
-from llm.deepseek import chat_json
 
+from llm.deepseek import chat_json
+from models.schemas import AgentReport, Decision, MarketContext
 
 SYSTEM_PROMPT = """You are a professional A-share market sentiment analyst.
 You analyze news articles, market sentiment, and public opinion to gauge market mood.
@@ -23,12 +22,16 @@ You must respond with valid JSON in this format:
 }"""
 
 
-async def analyze(ticker: str, num_news: int = 10) -> AgentReport:
+async def analyze(ticker: str, num_news: int = 10, context: MarketContext | None = None) -> AgentReport:
     """Run sentiment analysis on a stock based on recent news."""
     logger.info(f"[SentimentAgent] Analyzing {ticker}")
 
-    # Fetch news
-    news = get_stock_news(ticker, limit=num_news)
+    if context is None:
+        from data.akshare_provider import async_get_stock_news
+
+        news = await async_get_stock_news(ticker, limit=num_news)
+    else:
+        news = context.news[:num_news]
     if not news:
         return AgentReport(
             agent_name="sentiment",

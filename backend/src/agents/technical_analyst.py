@@ -5,11 +5,10 @@ Analyzes technical indicators: MACD, RSI, KDJ, Bollinger Bands, MA, volume.
 
 import pandas as pd
 from loguru import logger
-from models.schemas import AgentReport, Decision
-from data.akshare_provider import get_stock_history
-from llm.deepseek import chat_json
-from strategies.skill_manager import get_strategy_instructions
 
+from llm.deepseek import chat_json
+from models.schemas import AgentReport, Decision, MarketContext
+from strategies.skill_manager import get_strategy_instructions
 
 _BASE_PROMPT = """You are a professional A-share technical analyst.
 You analyze technical indicators including MACD, RSI, KDJ, Bollinger Bands, moving averages, and volume patterns.
@@ -24,13 +23,18 @@ You must respond with valid JSON in this format:
 }"""
 
 
-def _build_system_prompt(strategy_name: str | None = None) -> str:
+def _build_system_prompt(strategy_name: str | None = None, market_regime: str | None = None) -> str:
     """Build system prompt with strategy instructions injected."""
-    strategy_text = get_strategy_instructions(strategy_name=strategy_name)
+    strategy_text = get_strategy_instructions(strategy_name=strategy_name, market_regime=market_regime)
     return _BASE_PROMPT + strategy_text
 
 
-async def analyze(ticker: str, days: int = 120, strategy_name: str | None = None) -> AgentReport:
+async def analyze(
+    ticker: str,
+    days: int = 120,
+    strategy_name: str | None = None,
+    context: MarketContext | None = None,
+) -> AgentReport:
     """Run technical analysis on a stock.
 
     Args:
@@ -40,8 +44,12 @@ async def analyze(ticker: str, days: int = 120, strategy_name: str | None = None
     """
     logger.info(f"[TechnicalAgent] Analyzing {ticker}, strategy={strategy_name or 'auto'}")
 
-    # Fetch historical data
-    df = get_stock_history(ticker, start_date="", end_date="")
+    if context is None:
+        from data.akshare_provider import async_get_stock_history
+
+        df = await async_get_stock_history(ticker, start_date="", end_date="")
+    else:
+        df = pd.DataFrame(context.history)
     if df.empty:
         return AgentReport(agent_name="technical", reasoning="No data available")
 
@@ -69,7 +77,7 @@ Signal: buy if technicals suggest upward momentum, sell if downward, hold if mix
 """
 
     try:
-        system_prompt = _build_system_prompt(strategy_name)
+        system_prompt = _build_system_prompt(strategy_name, context.market_regime if context else None)
         result = await chat_json(prompt, system=system_prompt)
         return AgentReport(
             agent_name="technical",

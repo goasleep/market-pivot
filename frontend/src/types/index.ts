@@ -20,6 +20,8 @@ export interface BacktestResult {
   max_drawdown: number;
   sharpe_ratio: number | null;
   win_rate: number;
+  realized_pnl?: number;
+  total_fees?: number;
   total_trades: number;
   equity_curve: { date: string; value: number }[];
   trades: TradeRecord[];
@@ -39,16 +41,74 @@ export interface Position {
   shares: number;
   avg_cost: number;
   current_price: number;
+  available_shares: number;
+  frozen_shares: number;
   market_value: number;
   pnl: number;
   pnl_pct: number;
 }
 
 export interface Portfolio {
+  account_id: string;
+  name: string;
+  status: "active" | "paused";
+  current_date: string;
+  initial_capital: number;
+  total_pnl: number;
+  total_return_pct: number;
   cash: number;
   total_value: number;
   positions: Position[];
+  trades: TradeRecord[];
+  orders: SimulationOrder[];
+  config: SimulationAccountConfig;
   daily_pnl: number;
+}
+
+export interface ExternalSimulationConfig {
+  provider: "internal" | "juejin" | "joinquant" | "ricequant" | "custom";
+  enabled: boolean;
+  endpoint: string;
+  account_id: string;
+  token_set: boolean;
+  token_masked: string;
+  options: Record<string, unknown>;
+}
+
+export interface SimulationAccountConfig {
+  name: string;
+  initial_cash: number;
+  execution_frequency: "1d";
+  signal_time: "after_close";
+  fill_time: "next_open" | "same_close" | "manual";
+  slippage_bps: number;
+  buy_commission_rate: number;
+  sell_commission_rate: number;
+  minimum_commission: number;
+  stamp_tax_rate: number;
+  transfer_fee_rate: number;
+  min_lot: number;
+  max_single_position_pct: number;
+  max_total_position_pct: number;
+  default_stop_loss_pct: number;
+  benchmark: string;
+  universe: string[];
+  external: ExternalSimulationConfig;
+}
+
+export interface SimulationOrder {
+  order_id: string;
+  account_id: string;
+  ticker: string;
+  side: "buy" | "sell";
+  shares: number;
+  order_type: "market" | "limit";
+  limit_price: number | null;
+  status: "pending" | "filled" | "rejected" | "cancelled";
+  submitted_date: string;
+  fill_date: string | null;
+  fill_price: number | null;
+  reject_reason: string | null;
 }
 
 export interface SSEProgress {

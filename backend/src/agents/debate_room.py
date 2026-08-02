@@ -4,9 +4,9 @@ Two agents debate from opposing perspectives, then an LLM judge evaluates.
 """
 
 from loguru import logger
-from models.schemas import AgentReport, Decision
-from llm.deepseek import chat, chat_json
 
+from llm.deepseek import chat, chat_json
+from models.schemas import AgentReport, Decision
 
 BULL_SYSTEM = """You are a bullish (bull) A-share investment researcher.
 Your job is to find reasons to BUY the stock based on the provided analysis data.

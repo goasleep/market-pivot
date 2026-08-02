@@ -14,9 +14,7 @@ Widget types:
 - mini_chart: Sparkline mini chart from price data
 """
 
-from typing import Any
 from html import escape
-import json
 
 
 def _e(text: str) -> str:
@@ -310,9 +308,12 @@ def render_signal_gauge(scores: dict[str, float]) -> str:
         </div>
       </div>
       <div class="gauge-legend">
-        <div class="legend-item"><span class="legend-dot" style="background:#3b82f6"></span> Technical {technical:+.0f}</div>
-        <div class="legend-item"><span class="legend-dot" style="background:#f59e0b"></span> Sentiment {sentiment:+.0f}</div>
-        <div class="legend-item"><span class="legend-dot" style="background:#22c55e"></span> Fundamental {fundamental:+.0f}</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#3b82f6"></span>
+          Technical {technical:+.0f}</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#f59e0b"></span>
+          Sentiment {sentiment:+.0f}</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#22c55e"></span>
+          Fundamental {fundamental:+.0f}</div>
         <div class="legend-item"><span class="legend-dot" style="background:#8b5cf6"></span> Market {market:+.0f}</div>
       </div>
     </div>
@@ -367,7 +368,8 @@ def render_agent_pipeline(stages: list[dict[str, str]], current_stage: str = "")
           border: 2px solid currentColor;
         }}
         .pipe-label {{ font-size: 11px; font-weight: 500; }}
-        .pipe-arrow {{ color: #475569; font-size: 18px; margin: 0 6px; padding-top: 0; align-self: flex-start; margin-top: 6px; }}
+        .pipe-arrow {{ color: #475569; font-size: 18px; margin: 0 6px; padding-top: 0;
+          align-self: flex-start; margin-top: 6px; }}
       </style>
       {items_html}
     </div>

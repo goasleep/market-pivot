@@ -1,12 +1,13 @@
 """Analysis router - run multi-agent analysis for a stock."""
 
 import json
-from fastapi import APIRouter
-from sse_starlette.sse import EventSourceResponse
-from pydantic import BaseModel, Field
-from loguru import logger
 
-from graph.workflow import workflow
+from fastapi import APIRouter
+from loguru import logger
+from pydantic import BaseModel, Field
+from sse_starlette.sse import EventSourceResponse
+
+from application.research import research_service
 
 router = APIRouter()
 
@@ -34,15 +35,7 @@ async def run_analysis(req: AnalysisRequest):
     """Run multi-agent analysis and return result."""
     logger.info(f"Analysis request: {req.ticker}")
 
-    state = {
-        "ticker": req.ticker,
-        "current_price": 0.0,
-        "progress": [],
-    }
-    if req.strategy:
-        state["strategy_name"] = req.strategy
-
-    result = await workflow.ainvoke(state)
+    result = await research_service.run(req.ticker, req.strategy)
     decision = result.get("final_decision")
 
     if not decision:
@@ -69,32 +62,29 @@ async def run_analysis(req: AnalysisRequest):
 @router.get("/stream")
 async def stream_analysis(ticker: str):
     """Run analysis with SSE streaming progress via GET (EventSource compatible)."""
-    import asyncio
-
     async def event_generator():
-        stages = [
-            ("market_data", "Fetching market data..."),
-            ("technical", "Technical analyst working..."),
-            ("fundamentals", "Fundamentals analyst working..."),
-            ("sentiment", "Sentiment analyst working..."),
-            ("debate", "Bull vs Bear debate..."),
-            ("risk", "Risk manager assessing..."),
-            ("portfolio", "Portfolio manager deciding..."),
-        ]
-
-        # Send staged progress events
-        for stage, msg in stages:
-            yield {
-                "event": "progress",
-                "data": json.dumps({"stage": stage, "message": msg}, ensure_ascii=False),
-            }
-            await asyncio.sleep(0.3)
-
-        # Run actual workflow
+        stage_names = {"merge_debate": "debate"}
+        final_state: dict = {}
         try:
-            state = {"ticker": ticker, "current_price": 0.0, "progress": []}
-            result = await workflow.ainvoke(state)
-            decision = result.get("final_decision")
+            async for update in research_service.stream(ticker):
+                node = update["node"]
+                node_update = update["update"]
+                final_state = update["state"]
+                progress_items = node_update.get("progress", []) if isinstance(node_update, dict) else []
+                if progress_items:
+                    progress = progress_items[-1]
+                    yield {
+                        "event": "progress",
+                        "data": json.dumps(
+                            {
+                                "stage": stage_names.get(node, node),
+                                "message": progress.get("message", ""),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+
+            decision = final_state.get("final_decision")
 
             if decision:
                 yield {

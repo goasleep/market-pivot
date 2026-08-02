@@ -7,9 +7,9 @@ delegating analysis to the existing multi-agent LangGraph workflow.
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Sequence
+from typing import Any, AsyncIterator, Sequence
 
-from data.akshare_provider import get_stock_realtime
+from data.market_context import build_market_context
 from graph.workflow import workflow
 
 
@@ -114,10 +114,11 @@ class StockAgent:
             raise ValueError("A stock code is required for analysis")
 
         ticker = request.ticker
-        realtime = get_stock_realtime(ticker)
+        context = await build_market_context(ticker)
         state: dict[str, Any] = {
             "ticker": ticker,
-            "current_price": realtime.get("price", 0.0) if realtime else 0.0,
+            "current_price": context.current_price,
+            "market_context": context,
             "progress": [],
             "user_message": request.message,
         }
@@ -135,7 +136,46 @@ class StockAgent:
             },
         }
         result = await workflow.ainvoke(state, config=run_config)
-        return realtime, result
+        return context.realtime, result
+
+    async def analyze_stream(self, request: StockAgentRequest) -> AsyncIterator[dict[str, Any]]:
+        """Stream actual LangGraph node updates for the chat UI."""
+        if not request.ticker:
+            raise ValueError("A stock code is required for analysis")
+
+        ticker = request.ticker
+        context = await build_market_context(ticker)
+        state: dict[str, Any] = {
+            "ticker": ticker,
+            "current_price": context.current_price,
+            "market_context": context,
+            "progress": [],
+            "user_message": request.message,
+        }
+        if request.strategy:
+            state["strategy_name"] = request.strategy
+
+        run_config = {
+            "run_name": "stock-agent-analysis",
+            "tags": ["stock-agent", "chat", request.intent.value],
+            "metadata": {
+                "ticker": ticker,
+                "intent": request.intent.value,
+                "strategy": request.strategy or "auto",
+                "conversation_id": request.conversation_id or "",
+            },
+        }
+        accumulated: dict[str, Any] = dict(state)
+        async for update in workflow.astream(state, config=run_config, stream_mode="updates"):
+            node_name, node_update = next(iter(update.items()))
+            if isinstance(node_update, dict):
+                accumulated.update(node_update)
+            yield {
+                "node": node_name,
+                "update": node_update,
+                "state": accumulated,
+                "realtime": context.realtime,
+            }
 
 
 stock_agent = StockAgent()

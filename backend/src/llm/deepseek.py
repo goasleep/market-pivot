@@ -8,10 +8,12 @@ Configuration is hot-reloadable: reads from config.get_llm_config() on each
 call, so settings changed via the UI API take effect immediately without restart.
 """
 
-from openai import AsyncOpenAI
-from loguru import logger
-from config import get_llm_config
+import asyncio
 
+from loguru import logger
+from openai import AsyncOpenAI
+
+from config import get_llm_config
 
 # Default model presets (temperature & max_tokens defaults per model)
 MODEL_CONFIGS = {
@@ -59,7 +61,7 @@ async def chat(
     Returns:
         Response text
     """
-    cfg = get_llm_config()
+    cfg = await asyncio.to_thread(get_llm_config)
     model = model or cfg["model"]
 
     # Use model preset defaults, then override with config values, then explicit args
@@ -67,7 +69,10 @@ async def chat(
     temperature = temperature if temperature is not None else cfg.get("temperature", preset.get("temperature", 0.3))
     max_tokens = max_tokens or cfg.get("max_tokens", preset.get("max_tokens", 8192))
 
-    client = get_client()
+    client = AsyncOpenAI(
+        api_key=cfg["api_key"],
+        base_url=cfg["base_url"],
+    )
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -110,7 +115,7 @@ async def chat_json(
     if raw.startswith("```"):
         lines = raw.split("\n")
         # Remove first and last line (fences)
-        lines = [l for l in lines if not l.startswith("```")]
+        lines = [line for line in lines if not line.startswith("```")]
         raw = "\n".join(lines)
 
     import json
@@ -139,7 +144,7 @@ async def chat_langchain(
     """
     from langchain_openai import ChatOpenAI
 
-    cfg = get_llm_config()
+    cfg = await asyncio.to_thread(get_llm_config)
     model = model or cfg["model"]
     llm = ChatOpenAI(
         model=model,
@@ -149,7 +154,7 @@ async def chat_langchain(
     )
 
     lc_messages = []
-    from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
     for msg in messages:
         role = msg.get("role", "user")

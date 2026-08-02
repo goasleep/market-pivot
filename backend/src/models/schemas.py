@@ -1,8 +1,9 @@
 """Data models for A-Share Agent."""
 
-from pydantic import BaseModel, Field
 from enum import Enum
-from datetime import date
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 
 class Decision(str, Enum):
@@ -61,7 +62,7 @@ class AgentReport(BaseModel):
 
     agent_name: str
     signal: Decision = Decision.HOLD
-    confidence: float = 0.5
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     reasoning: str = ""
     key_data: dict = Field(default_factory=dict)
 
@@ -81,7 +82,7 @@ class CoreConclusion(BaseModel):
     """Core conclusion block of the decision dashboard."""
 
     signal: SignalType = SignalType.WATCH
-    confidence: float = 0.5
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     one_line_summary: str = ""  # 一句话结论
     position_advice: str = ""  # 仓位建议文字描述
 
@@ -125,10 +126,10 @@ class PhaseDecision(BaseModel):
 class SignalAttribution(BaseModel):
     """Signal attribution by dimension, each -100 to +100."""
 
-    technical_score: float = 0.0
-    sentiment_score: float = 0.0
-    fundamental_score: float = 0.0
-    market_regime_score: float = 0.0
+    technical_score: float = Field(default=0.0, ge=-100.0, le=100.0)
+    sentiment_score: float = Field(default=0.0, ge=-100.0, le=100.0)
+    fundamental_score: float = Field(default=0.0, ge=-100.0, le=100.0)
+    market_regime_score: float = Field(default=0.0, ge=-100.0, le=100.0)
 
 
 class DecisionDashboard(BaseModel):
@@ -147,13 +148,32 @@ class TradeDecision(BaseModel):
 
     ticker: str
     decision: Decision = Decision.HOLD
-    confidence: float = 0.5
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     target_price: float | None = None
     stop_loss: float | None = None
-    position_size: float | None = None  # 0-1 ratio of portfolio
+    position_size: float | None = Field(default=None, ge=0.0, le=1.0)  # 0-1 ratio of portfolio
     reasoning: str = ""
     agent_reports: dict[str, str] = Field(default_factory=dict)
     dashboard: DecisionDashboard | None = None
+
+
+class MarketContext(BaseModel):
+    """Immutable market snapshot used by every analysis agent.
+
+    ``as_of_date`` is set for backtests. In that mode the context is built only
+    from data available on or before the date and does not include live news or
+    current financial data.
+    """
+
+    ticker: str
+    as_of_date: str | None = None
+    current_price: float = 0.0
+    realtime: dict = Field(default_factory=dict)
+    history: list[dict] = Field(default_factory=list)
+    financial: dict = Field(default_factory=dict)
+    news: list[dict] = Field(default_factory=list)
+    market_regime: str = "unknown"
+    is_backtest: bool = False
 
 
 class TradeRecord(BaseModel):
@@ -225,3 +245,81 @@ class PortfolioState(BaseModel):
         if self.initial_capital == 0:
             return 0.0
         return self.total_pnl / self.initial_capital
+
+
+class ExternalSimulationConfig(BaseModel):
+    """Configuration reserved for an external paper-trading provider.
+
+    The current implementation stores this configuration but does not connect
+    to a remote provider. A broker adapter can be enabled later without
+    changing the account model or Agent workflow.
+    """
+
+    provider: Literal["internal", "juejin", "joinquant", "ricequant", "custom"] = "internal"
+    enabled: bool = False
+    endpoint: str = ""
+    account_id: str = ""
+    token: str = ""
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+class SimulationAccountConfig(BaseModel):
+    """User-configurable rules for a daily A-share simulation account."""
+
+    name: str = "默认日级 Agent 模拟账户"
+    initial_cash: float = Field(default=1_000_000.0, gt=0)
+    execution_frequency: Literal["1d"] = "1d"
+    signal_time: Literal["after_close"] = "after_close"
+    fill_time: Literal["next_open", "same_close", "manual"] = "next_open"
+    slippage_bps: float = Field(default=5.0, ge=0)
+    buy_commission_rate: float = Field(default=0.0003, ge=0)
+    sell_commission_rate: float = Field(default=0.0003, ge=0)
+    minimum_commission: float = Field(default=5.0, ge=0)
+    stamp_tax_rate: float = Field(default=0.001, ge=0)
+    transfer_fee_rate: float = Field(default=0.00002, ge=0)
+    min_lot: int = Field(default=100, ge=1)
+    max_single_position_pct: float = Field(default=0.2, ge=0, le=1)
+    max_total_position_pct: float = Field(default=0.95, ge=0, le=1)
+    default_stop_loss_pct: float = Field(default=0.08, ge=0, le=1)
+    benchmark: str = "000300"
+    universe: list[str] = Field(default_factory=list)
+    external: ExternalSimulationConfig = Field(default_factory=ExternalSimulationConfig)
+
+
+class SimulationAccount(BaseModel):
+    """Persisted simulation account metadata and current portfolio state."""
+
+    account_id: str
+    status: Literal["active", "paused"] = "active"
+    current_date: str = ""
+    config: SimulationAccountConfig = Field(default_factory=SimulationAccountConfig)
+    portfolio: PortfolioState = Field(default_factory=PortfolioState)
+
+
+class SimulationOrder(BaseModel):
+    """A simulation order, optionally waiting for a future daily fill."""
+
+    order_id: str
+    account_id: str
+    ticker: str
+    side: Decision
+    shares: int
+    order_type: Literal["market", "limit"] = "market"
+    limit_price: float | None = None
+    status: Literal["pending", "filled", "rejected", "cancelled"] = "pending"
+    submitted_date: str = ""
+    fill_date: str | None = None
+    fill_price: float | None = None
+    reject_reason: str | None = None
+
+
+class SimulationSnapshot(BaseModel):
+    """Daily mark-to-market snapshot for the simulation account."""
+
+    account_id: str
+    date: str
+    cash: float
+    total_value: float
+    total_pnl: float
+    total_return_pct: float
+    positions: list[Position] = Field(default_factory=list)

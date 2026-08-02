@@ -3,11 +3,12 @@
 Analyzes financial indicators: PE, PB, ROE, revenue growth, profit margin, etc.
 """
 
-from loguru import logger
-from models.schemas import AgentReport, Decision
-from data.akshare_provider import get_financial_data, get_stock_realtime
-from llm.deepseek import chat_json
+import asyncio
 
+from loguru import logger
+
+from llm.deepseek import chat_json
+from models.schemas import AgentReport, Decision, MarketContext
 
 SYSTEM_PROMPT = """You are a professional A-share fundamentals analyst.
 You analyze company financials including PE/PB ratios, ROE, revenue growth, profit margins, debt ratios.
@@ -22,13 +23,19 @@ You must respond with valid JSON in this format:
 }"""
 
 
-async def analyze(ticker: str) -> AgentReport:
+async def analyze(ticker: str, context: MarketContext | None = None) -> AgentReport:
     """Run fundamentals analysis on a stock."""
     logger.info(f"[FundamentalsAgent] Analyzing {ticker}")
 
-    # Fetch financial data
-    fin = get_financial_data(ticker)
-    rt = get_stock_realtime(ticker)
+    if context is None:
+        from data.akshare_provider import async_get_financial_data, async_get_stock_realtime
+
+        fin, rt = await asyncio.gather(
+            async_get_financial_data(ticker),
+            async_get_stock_realtime(ticker),
+        )
+    else:
+        fin, rt = context.financial, context.realtime
 
     prompt = f"""Analyze the A-share stock {ticker} using fundamental analysis.
 

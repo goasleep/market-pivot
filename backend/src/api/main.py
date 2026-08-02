@@ -1,9 +1,13 @@
 """FastAPI application entry point."""
 
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.requests import Request
 
-from api.routers import analysis, backtest, portfolio, health, chat, config
+from api.routers import analysis, backtest, chat, config, health, portfolio
 
 app = FastAPI(
     title="A-Share Agent API",
@@ -19,6 +23,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(KeyError)
+async def key_error_handler(request: Request, exc: KeyError):
+    return JSONResponse(status_code=404, content={"detail": str(exc).strip("'")})
+
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
@@ -32,7 +46,7 @@ async def list_strategies():
     """List all available trading strategies."""
     from strategies.skill_manager import list_strategies as _list
 
-    return {"strategies": _list()}
+    return {"strategies": await asyncio.to_thread(_list)}
 
 
 @app.get("/api/system/status", tags=["system"])
@@ -40,4 +54,4 @@ async def system_status():
     """Get system status including circuit breaker states."""
     from data.akshare_provider import get_breaker_status
 
-    return {"circuit_breakers": get_breaker_status()}
+    return {"circuit_breakers": await asyncio.to_thread(get_breaker_status)}

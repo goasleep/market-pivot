@@ -5,22 +5,22 @@ Outputs a structured DecisionDashboard with 6 blocks.
 """
 
 from loguru import logger
+
+from llm.deepseek import chat_json
 from models.schemas import (
     AgentReport,
-    Decision,
-    TradeDecision,
-    DecisionDashboard,
+    BattlePlan,
     CoreConclusion,
     DataPerspective,
+    Decision,
+    DecisionDashboard,
     Intelligence,
-    BattlePlan,
     PhaseDecision,
     SignalAttribution,
     SignalType,
+    TradeDecision,
 )
-from llm.deepseek import chat_json
 from strategies.skill_manager import get_strategy_instructions
-
 
 SYSTEM_PROMPT = """You are a professional A-share portfolio manager.
 You make the final trading decision based on all analyst reports.
@@ -144,6 +144,7 @@ async def decide(
     risk_report: AgentReport | None = None,
     current_price: float = 0.0,
     strategy_name: str | None = None,
+    market_regime: str | None = None,
 ) -> TradeDecision:
     """Make final trading decision with structured dashboard.
 
@@ -193,17 +194,24 @@ Make your final decision as JSON.
 
     try:
         # Inject strategy instructions into system prompt
-        strategy_text = get_strategy_instructions(strategy_name=strategy_name)
+        strategy_text = get_strategy_instructions(
+            strategy_name=strategy_name,
+            market_regime=market_regime,
+        )
         full_system = SYSTEM_PROMPT + strategy_text
         result = await chat_json(prompt, system=full_system)
         dashboard = _parse_dashboard(result)
+        position_size = result.get("position_size")
+        if position_size is not None and risk_report:
+            risk_limit = float(risk_report.key_data.get("max_position_pct", 1.0))
+            position_size = min(max(float(position_size), 0.0), max(risk_limit, 0.0))
         return TradeDecision(
             ticker=ticker,
             decision=Decision(result.get("decision", "hold")),
             confidence=float(result.get("confidence", 0.5)),
             target_price=result.get("target_price"),
             stop_loss=result.get("stop_loss"),
-            position_size=result.get("position_size"),
+            position_size=position_size,
             reasoning=result.get("reasoning", ""),
             agent_reports={name: r.reasoning for name, r in agent_reports.items()},
             dashboard=dashboard,
