@@ -4,6 +4,14 @@
 
 This pnpm monorepo contains an A-share AI trading simulation system.
 
+## Product Positioning & Investor Profile
+
+- Product positioning: a research and paper-trading assistant for a retail investor's short- to medium-term fund trading.
+- User profile: a small retail investor who trades funds only and does not pursue long-term buy-and-hold investing.
+- Analysis priorities: trend and market timing, entry/exit conditions, position sizing, stop-loss/take-profit, drawdown control, liquidity, fees, and holding-period risk.
+- Do not frame outputs as long-term stock value-investing advice, guaranteed returns, or real order execution.
+- Current implementation boundary: the analysis workflow is still stock-oriented and consumes six-digit A-share stock data. Treat stock analysis as underlying-asset research; do not present a stock recommendation as a fund recommendation or imply fund-specific analysis when fund data is unavailable.
+
 - `backend/src/api/` contains FastAPI routes; `agents/` contains roles; `data/` wraps AkShare and caching; `engine/` contains backtesting and paper trading; `graph/` defines LangGraph workflows; `models/` contains schemas; and `llm/` contains the DeepSeek adapter.
 - `backend/src/agents/stock_agent.py` routes conversational stock tasks such as analysis, quotes, history, news, strategies, and follow-up questions.
 - `frontend/src/` contains the React application, organized into `pages/`, `components/`, `api/`, `types/`, and `router/`.

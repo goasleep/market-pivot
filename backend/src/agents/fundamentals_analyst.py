@@ -7,8 +7,9 @@ import asyncio
 
 from loguru import logger
 
+from agents.prompt_context import INVESTOR_CONTEXT
 from llm import LLMService, get_llm_service
-from models.schemas import AgentReport, Decision, MarketContext
+from models.schemas import AgentReport, AssetType, Decision, MarketContext
 
 SYSTEM_PROMPT = """You are a professional A-share fundamentals analyst.
 You analyze company financials including PE/PB ratios, ROE, revenue growth, profit margins, debt ratios.
@@ -20,7 +21,7 @@ You must respond with valid JSON in this format:
   "confidence": 0.0-1.0,
   "reasoning": "detailed analysis in Chinese",
   "key_metrics": {"pe": ..., "pb": ..., "roe": ...}
-}"""
+}""" + INVESTOR_CONTEXT
 
 
 async def analyze(
@@ -30,6 +31,14 @@ async def analyze(
 ) -> AgentReport:
     """Run fundamentals analysis on a stock."""
     logger.info(f"[FundamentalsAgent] Analyzing {ticker}")
+
+    if context and context.asset_type != AssetType.STOCK:
+        return AgentReport(
+            agent_name="fundamentals",
+            reasoning="场内基金不适用个股 PE、PB、ROE 等财务指标；本环节不参与信号加权。",
+            confidence=0.0,
+            key_data={"not_applicable": True, "asset_type": context.asset_type.value},
+        )
 
     if context is None:
         from data.akshare_provider import async_get_financial_data, async_get_stock_realtime

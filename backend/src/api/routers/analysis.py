@@ -8,18 +8,26 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from application.research import research_service
+from models.schemas import AssetType
 
 router = APIRouter()
 
 
 class AnalysisRequest(BaseModel):
-    ticker: str = Field(..., description="A-share stock code, e.g. 000737")
+    ticker: str = Field(..., description="Stock or exchange-traded fund code")
+    asset_type: AssetType = Field(default=AssetType.STOCK)
     show_reasoning: bool = Field(default=True, description="Include agent reasoning in output")
     strategy: str | None = Field(default=None, description="Strategy name override, e.g. 'bull_trend'")
+    holding_period_days: int | None = Field(default=None, ge=1, le=365)
+    available_capital: float | None = Field(default=None, gt=0)
+    max_loss_pct: float | None = Field(default=None, ge=0, le=1)
+    current_position_pct: float | None = Field(default=None, ge=0, le=1)
+    entry_price: float | None = Field(default=None, gt=0)
 
 
 class AnalysisResult(BaseModel):
     ticker: str
+    asset_type: AssetType = AssetType.STOCK
     decision: str  # buy / sell / hold
     confidence: float
     target_price: float | None = None
@@ -28,6 +36,7 @@ class AnalysisResult(BaseModel):
     reasoning: str
     agent_reports: dict[str, str] = {}
     dashboard: dict | None = None  # full structured dashboard
+    data_status: dict = {}
 
 
 @router.post("/run")
@@ -35,7 +44,17 @@ async def run_analysis(req: AnalysisRequest):
     """Run multi-agent analysis and return result."""
     logger.info(f"Analysis request: {req.ticker}")
 
-    result = await research_service.run(req.ticker, req.strategy)
+    investor_context = req.model_dump(
+        include={
+            "holding_period_days",
+            "available_capital",
+            "max_loss_pct",
+            "current_position_pct",
+            "entry_price",
+        },
+        exclude_none=True,
+    )
+    result = await research_service.run(req.ticker, req.strategy, req.asset_type, investor_context)
     decision = result.get("final_decision")
 
     if not decision:
@@ -47,7 +66,8 @@ async def run_analysis(req: AnalysisRequest):
         )
 
     return AnalysisResult(
-        ticker=decision.ticker,
+            ticker=decision.ticker,
+            asset_type=decision.asset_type,
         decision=decision.decision.value,
         confidence=decision.confidence,
         target_price=decision.target_price,
@@ -56,17 +76,41 @@ async def run_analysis(req: AnalysisRequest):
         reasoning=decision.reasoning,
         agent_reports=decision.agent_reports if req.show_reasoning else {},
         dashboard=decision.dashboard.model_dump() if decision.dashboard else None,
+        data_status=result.get("market_context").data_status if result.get("market_context") else {},
     )
 
 
 @router.get("/stream")
-async def stream_analysis(ticker: str):
+async def stream_analysis(
+    ticker: str,
+    asset_type: AssetType = AssetType.STOCK,
+    holding_period_days: int | None = None,
+    available_capital: float | None = None,
+    max_loss_pct: float | None = None,
+    current_position_pct: float | None = None,
+    entry_price: float | None = None,
+):
     """Run analysis with SSE streaming progress via GET (EventSource compatible)."""
     async def event_generator():
         stage_names = {"merge_debate": "debate"}
         final_state: dict = {}
         try:
-            async for update in research_service.stream(ticker):
+            investor_context = {
+                key: value
+                for key, value in {
+                    "holding_period_days": holding_period_days,
+                    "available_capital": available_capital,
+                    "max_loss_pct": max_loss_pct,
+                    "current_position_pct": current_position_pct,
+                    "entry_price": entry_price,
+                }.items()
+                if value is not None
+            }
+            async for update in research_service.stream(
+                ticker,
+                asset_type=asset_type,
+                investor_context=investor_context,
+            ):
                 node = update["node"]
                 node_update = update["update"]
                 final_state = update["state"]
@@ -92,6 +136,7 @@ async def stream_analysis(ticker: str):
                     "data": json.dumps(
                         {
                             "ticker": decision.ticker,
+                            "asset_type": decision.asset_type.value,
                             "decision": decision.decision.value,
                             "confidence": decision.confidence,
                             "target_price": decision.target_price,
@@ -100,6 +145,9 @@ async def stream_analysis(ticker: str):
                             "reasoning": decision.reasoning,
                             "agent_reports": decision.agent_reports,
                             "dashboard": decision.dashboard.model_dump() if decision.dashboard else None,
+                            "data_status": final_state.get("market_context").data_status
+                            if final_state.get("market_context")
+                            else {},
                         },
                         ensure_ascii=False,
                     ),

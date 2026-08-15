@@ -6,8 +6,9 @@ Analyzes technical indicators: MACD, RSI, KDJ, Bollinger Bands, MA, volume.
 import pandas as pd
 from loguru import logger
 
+from agents.prompt_context import INVESTOR_CONTEXT
 from llm import LLMService, get_llm_service
-from models.schemas import AgentReport, Decision, MarketContext
+from models.schemas import AgentReport, AssetType, Decision, MarketContext
 from strategies.skill_manager import get_strategy_instructions
 
 _BASE_PROMPT = """You are a professional A-share technical analyst.
@@ -20,7 +21,7 @@ You must respond with valid JSON in this format:
   "confidence": 0.0-1.0,
   "reasoning": "detailed analysis in Chinese",
   "key_indicators": {"macd": "...", "rsi": ..., "kdj": "..."}
-}"""
+}""" + INVESTOR_CONTEXT
 
 
 def _build_system_prompt(strategy_name: str | None = None, market_regime: str | None = None) -> str:
@@ -59,7 +60,12 @@ async def analyze(
 
     # Build prompt
     recent_data = df.tail(20)[["date", "close", "volume", "pct_chg"]].to_dict(orient="records")
-    prompt = f"""Analyze the A-share stock {ticker} using technical analysis.
+    asset_label = (
+        "A-share stock"
+        if not context or context.asset_type == AssetType.STOCK
+        else f"{context.asset_type.value.upper()} fund"
+    )
+    prompt = f"""Analyze the {asset_label} {ticker} using technical analysis.
 
 Recent price data (last 20 days):
 {recent_data}

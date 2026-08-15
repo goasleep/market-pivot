@@ -9,7 +9,7 @@ Features:
 
 from loguru import logger
 
-from models.schemas import Decision, PortfolioState, Position, SimulationAccountConfig, TradeRecord
+from models.schemas import Decision, PortfolioState, Position, SimulationAccountConfig, TradeDecision, TradeRecord
 
 # A-share trading cost constants
 BUY_COMMISSION_RATE = 0.0003  # 0.03%
@@ -18,6 +18,41 @@ MIN_COMMISSION = 5.0  # minimum 5 CNY per trade
 STAMP_TAX_RATE = 0.001  # 0.1% (sell only)
 TRANSFER_FEE_RATE = 0.00002  # 0.002% (very small, often waived)
 MIN_LOT = 100  # minimum 100 shares
+
+
+def decision_shares(
+    portfolio: PortfolioState,
+    rules: SimulationAccountConfig,
+    decision: TradeDecision,
+    price: float,
+) -> int:
+    """Calculate an Agent order quantity using the shared A-share rules.
+
+    Both historical backtests and the persistent simulation account call this
+    helper.  The actual engine still performs the final cash, lot, T+1 and
+    position-limit checks at fill time.
+    """
+
+    if price <= 0 or decision.decision == Decision.HOLD:
+        return 0
+    if decision.decision == Decision.BUY:
+        position_pct = min(max(decision.position_size or 0.2, 0.0), rules.max_single_position_pct)
+        existing_invested = sum(
+            position.shares * (position.current_price or position.avg_cost)
+            for position in portfolio.positions
+        )
+        total_value = max(portfolio.total_value, portfolio.cash)
+        max_invest = min(
+            portfolio.cash * position_pct,
+            max(total_value * rules.max_total_position_pct - existing_invested, 0),
+        )
+        return int(max_invest / price)
+    position = next((item for item in portfolio.positions if item.ticker == decision.ticker), None)
+    if not position:
+        return 0
+    if decision.stop_loss and price <= decision.stop_loss:
+        return position.available_shares
+    return position.available_shares // 2
 
 
 class TradingEngine:
@@ -105,6 +140,7 @@ class TradingEngine:
             self.portfolio.positions.append(
                 Position(
                     ticker=ticker,
+                    asset_type=self.rules.asset_type,
                     shares=shares,
                     avg_cost=execution_price,
                     available_shares=0,
@@ -120,6 +156,7 @@ class TradingEngine:
             date=trade_date,
             action=Decision.BUY,
             ticker=ticker,
+            asset_type=self.rules.asset_type,
             shares=shares,
             price=execution_price,
             amount=amount,
@@ -182,6 +219,7 @@ class TradingEngine:
             date=trade_date,
             action=Decision.SELL,
             ticker=ticker,
+            asset_type=self.rules.asset_type,
             shares=shares,
             price=execution_price,
             amount=amount,

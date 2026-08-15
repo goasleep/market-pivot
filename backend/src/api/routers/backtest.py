@@ -6,13 +6,16 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from application.backtest_jobs import backtest_jobs
-from engine.backtester import run_backtest
+from engine.backtester import run_backtest, run_pool_backtest
+from models.schemas import AssetType
 
 router = APIRouter()
 
 
 class BacktestRequest(BaseModel):
-    ticker: str = Field(..., description="A-share stock code")
+    ticker: str | None = Field(default=None, description="Stock or exchange-traded fund code")
+    tickers: list[str] = Field(default_factory=list, description="Asset pool for batch Agent backtest")
+    asset_type: AssetType = AssetType.STOCK
     start_date: str = Field(..., description="YYYY-MM-DD")
     end_date: str = Field(..., description="YYYY-MM-DD")
     initial_capital: float = Field(default=1_000_000, description="Initial capital in CNY")
@@ -25,18 +28,34 @@ class BacktestRequest(BaseModel):
 @router.post("/run")
 async def run_backtest_api(req: BacktestRequest):
     """Run backtest with historical data."""
-    logger.info(f"Backtest request: {req.ticker} {req.start_date} -> {req.end_date}")
+    symbols = req.tickers or ([req.ticker] if req.ticker else [])
+    if not symbols:
+        raise ValueError("ticker 或 tickers 至少提供一个股票代码")
+    logger.info(f"Backtest request: {symbols} {req.start_date} -> {req.end_date}")
 
-    result = await run_backtest(
-        ticker=req.ticker,
-        start_date=req.start_date,
-        end_date=req.end_date,
-        initial_capital=req.initial_capital,
-        initial_position=req.initial_position,
-        decision_interval=req.decision_interval,
-        fill_time=req.fill_time,
-        strategy_name=req.strategy,
-    )
+    if len(symbols) > 1:
+        result = await run_pool_backtest(
+            tickers=symbols,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            initial_capital=req.initial_capital,
+            decision_interval=req.decision_interval,
+            fill_time=req.fill_time,
+            strategy_name=req.strategy,
+            asset_type=req.asset_type,
+        )
+    else:
+        result = await run_backtest(
+            ticker=symbols[0],
+            start_date=req.start_date,
+            end_date=req.end_date,
+            initial_capital=req.initial_capital,
+            initial_position=req.initial_position,
+            decision_interval=req.decision_interval,
+            fill_time=req.fill_time,
+            strategy_name=req.strategy,
+            asset_type=req.asset_type,
+        )
     return result
 
 
@@ -50,6 +69,7 @@ async def stream_backtest(
     decision_interval: int = 1,
     fill_time: str = "next_open",
     strategy: str | None = None,
+    asset_type: AssetType = AssetType.STOCK,
 ):
     """Run a backtest with real progress callbacks over SSE."""
     import asyncio
@@ -71,6 +91,7 @@ async def stream_backtest(
                 decision_interval=decision_interval,
                 fill_time=fill_time,
                 strategy_name=strategy,
+                asset_type=asset_type,
                 progress_callback=progress,
             )
         )

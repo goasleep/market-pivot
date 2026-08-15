@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
-from engine.backtester import run_backtest
+from engine.backtester import run_backtest, run_pool_backtest
 
 
 @dataclass
@@ -52,7 +52,8 @@ class BacktestJobManager:
             await job.queue.put({"event": "progress", "data": event})
 
         try:
-            job.result = await run_backtest(**job.params, progress_callback=callback)
+            runner = run_pool_backtest if job.params.get("tickers") else run_backtest
+            job.result = await runner(**job.params, progress_callback=callback)
             job.status = "completed"
             await job.queue.put({"event": "complete", "data": job.result})
         except asyncio.CancelledError:

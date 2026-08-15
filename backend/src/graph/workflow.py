@@ -20,11 +20,14 @@ from agents.risk_manager import assess as risk_assess
 from agents.sentiment_analyst import analyze as sent_analyze
 from agents.technical_analyst import analyze as tech_analyze
 from data.market_context import build_market_context
-from models.schemas import AgentReport, MarketContext, TradeDecision
+from models.schemas import AgentReport, AssetType, MarketContext, TradeDecision
 
 
 class WorkflowState(TypedDict, total=False):
     ticker: str
+    asset_type: str
+    conversation_history: list[dict[str, str]]
+    investor_context: dict[str, Any]
     current_price: float
     as_of_date: str | None
     market_context: MarketContext
@@ -53,6 +56,7 @@ async def fetch_market_data(state: WorkflowState) -> dict:
     if context is None:
         context = await build_market_context(
             ticker,
+            asset_type=state.get("asset_type", AssetType.STOCK.value),
             as_of_date=state.get("as_of_date"),
             current_price=state.get("current_price"),
         )
@@ -106,7 +110,11 @@ async def merge_analysts(state: WorkflowState) -> dict:
     }
 
     # Run debate
-    debate_report = await debate(state["ticker"], reports)
+    debate_report = await debate(
+        state["ticker"],
+        reports,
+        asset_type=state.get("asset_type", AssetType.STOCK.value),
+    )
 
     return {
         "analyst_reports": reports,
@@ -121,6 +129,7 @@ async def run_risk(state: WorkflowState) -> dict:
         state["ticker"],
         state.get("analyst_reports", {}),
         state.get("debate_report"),
+        asset_type=state.get("asset_type", AssetType.STOCK.value),
     )
     return {
         "risk_report": report,
@@ -136,6 +145,9 @@ async def run_portfolio_manager(state: WorkflowState) -> dict:
         state.get("debate_report"),
         state.get("risk_report"),
         state.get("current_price", 0.0),
+        asset_type=state.get("asset_type", AssetType.STOCK.value),
+        conversation_history=state.get("conversation_history", []),
+        investor_context=state.get("investor_context", {}),
         strategy_name=state.get("strategy_name"),
         market_regime=(state.get("market_context").market_regime if state.get("market_context") else None),
     )

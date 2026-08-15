@@ -5,8 +5,9 @@ Analyzes news sentiment and market sentiment for a stock.
 
 from loguru import logger
 
+from agents.prompt_context import INVESTOR_CONTEXT
 from llm import LLMService, get_llm_service
-from models.schemas import AgentReport, Decision, MarketContext
+from models.schemas import AgentReport, AssetType, Decision, MarketContext
 
 SYSTEM_PROMPT = """You are a professional A-share market sentiment analyst.
 You analyze news articles, market sentiment, and public opinion to gauge market mood.
@@ -19,7 +20,7 @@ You must respond with valid JSON in this format:
   "reasoning": "detailed analysis in Chinese",
   "sentiment_score": -1.0 to 1.0,
   "key_themes": ["theme1", "theme2"]
-}"""
+}""" + INVESTOR_CONTEXT
 
 
 async def analyze(
@@ -30,6 +31,14 @@ async def analyze(
 ) -> AgentReport:
     """Run sentiment analysis on a stock based on recent news."""
     logger.info(f"[SentimentAgent] Analyzing {ticker}")
+
+    if context and context.asset_type != AssetType.STOCK and not context.news:
+        return AgentReport(
+            agent_name="sentiment",
+            reasoning="当前未接入场内基金专属公告或舆情数据，本环节按中性处理。",
+            confidence=0.0,
+            key_data={"not_applicable": True, "asset_type": context.asset_type.value},
+        )
 
     if context is None:
         from data.akshare_provider import async_get_stock_news

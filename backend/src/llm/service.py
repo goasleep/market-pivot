@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.output_parsers import JsonOutputParser
 from loguru import logger
 
@@ -29,16 +29,21 @@ def _message_text(message: AIMessage) -> str:
     return str(content or "")
 
 
-def _to_messages(messages: list[dict[str, str]]) -> list[SystemMessage | HumanMessage | AIMessage]:
+def _to_messages(messages: list[Any]) -> list[Any]:
     """Convert the application's role/content dictionaries to LangChain messages."""
     converted = []
     for message in messages:
+        if not isinstance(message, dict):
+            converted.append(message)
+            continue
         role = message.get("role", "user")
         content = message.get("content", "")
         if role == "system":
             converted.append(SystemMessage(content=content))
         elif role == "assistant":
             converted.append(AIMessage(content=content))
+        elif role == "tool":
+            converted.append(ToolMessage(content=content, tool_call_id=message.get("tool_call_id", "")))
         else:
             converted.append(HumanMessage(content=content))
     return converted
@@ -113,13 +118,30 @@ class LLMService:
 
     async def chat_langchain(
         self,
-        messages: list[dict[str, str]],
+        messages: list[Any],
         model: str | None = None,
         temperature: float | None = None,
     ) -> str:
         """Invoke the underlying LangChain model with role/content messages."""
         response = await self.get_model(model=model, temperature=temperature).ainvoke(_to_messages(messages))
         return _message_text(response)
+
+    async def chat_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[Any],
+        model: str | None = None,
+        temperature: float | None = None,
+    ) -> AIMessage:
+        """Invoke the configured model with tool definitions.
+
+        Tool selection is intentionally owned by the model. The caller is
+        responsible for executing returned tool calls and feeding ToolMessage
+        results back into the conversation.
+        """
+        bound_model = self.get_model(model=model, temperature=temperature).bind_tools(tools)
+        response = await bound_model.ainvoke(_to_messages(messages))
+        return response
 
 
 _default_service = LLMService()

@@ -1,18 +1,30 @@
 """FastAPI application entry point."""
 
 import asyncio
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
-from api.routers import analysis, backtest, chat, config, health, portfolio
+from api.routers import analysis, automation, backtest, chat, config, health, market, portfolio
+from application.automation import automation_scheduler
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await automation_scheduler.start()
+    try:
+        yield
+    finally:
+        await automation_scheduler.stop()
 
 app = FastAPI(
     title="A-Share Agent API",
     description="AI Agent 驱动的 A 股模拟交易系统",
     version="0.3.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -37,8 +49,10 @@ app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
+app.include_router(automation.router, prefix="/api/automation", tags=["automation"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(config.router, prefix="/api/config", tags=["config"])
+app.include_router(market.router, prefix="/api/market", tags=["market"])
 
 
 @app.get("/api/strategies", tags=["strategies"])

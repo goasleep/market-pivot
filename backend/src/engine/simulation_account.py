@@ -19,6 +19,7 @@ from loguru import logger
 from config import settings
 from engine.trading_engine import TradingEngine
 from models.schemas import (
+    AssetType,
     Decision,
     ExternalSimulationConfig,
     PortfolioState,
@@ -274,6 +275,10 @@ class SimulationAccountService:
         order_type: str = "market",
         limit_price: float | None = None,
         submitted_date: str = "",
+        source: str = "manual",
+        run_id: str | None = None,
+        fill_policy: str | None = None,
+        asset_type: AssetType | str | None = None,
     ) -> SimulationOrder:
         account = self.get_account(account_id)
         if account.status != "active":
@@ -285,17 +290,26 @@ class SimulationAccountService:
             raise ValueError("shares 必须大于 0")
         if order_type not in {"market", "limit"}:
             raise ValueError("order_type 必须是 market 或 limit")
+        if source not in {"manual", "agent", "backtest", "system"}:
+            raise ValueError("source 必须是 manual、agent、backtest 或 system")
+        effective_fill_policy = fill_policy or ("manual" if source == "manual" else "next_open")
+        if effective_fill_policy not in {"next_open", "same_close", "manual"}:
+            raise ValueError("fill_policy 必须是 next_open、same_close 或 manual")
         if order_type == "limit" and (limit_price is None or limit_price <= 0):
             raise ValueError("限价单必须提供正数 limit_price")
         order = SimulationOrder(
             order_id=f"sim-{uuid4().hex[:16]}",
             account_id=account_id,
             ticker=ticker,
+            asset_type=AssetType(asset_type or account.config.asset_type),
             side=side,
             shares=shares,
             order_type=order_type,
             limit_price=limit_price,
             submitted_date=submitted_date or account.current_date,
+            source=source,
+            run_id=run_id,
+            fill_policy=effective_fill_policy,
         )
         with self._lock, self._connect() as connection:
             timestamp = _now()
@@ -343,7 +357,9 @@ class SimulationAccountService:
             # TradingEngine also supports slippage for standalone backtests;
             # this service applies it above so limit validation and stored fill
             # prices remain explicit and it is not applied twice.
-            execution_rules = account.config.model_copy(update={"slippage_bps": 0.0})
+            execution_rules = account.config.model_copy(
+                update={"slippage_bps": 0.0, "asset_type": order.asset_type}
+            )
             engine = TradingEngine(
                 account.portfolio.initial_capital,
                 execution_rules,

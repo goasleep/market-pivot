@@ -6,9 +6,11 @@ Outputs a structured DecisionDashboard with 6 blocks.
 
 from loguru import logger
 
+from agents.prompt_context import INVESTOR_CONTEXT
 from llm import LLMService, get_llm_service
 from models.schemas import (
     AgentReport,
+    AssetType,
     BattlePlan,
     CoreConclusion,
     DataPerspective,
@@ -77,7 +79,7 @@ The JSON must contain both a simplified decision and a detailed dashboard:
     }
   }
 }
-"""
+""" + INVESTOR_CONTEXT
 
 
 def _parse_dashboard(raw: dict) -> DecisionDashboard:
@@ -145,6 +147,9 @@ async def decide(
     current_price: float = 0.0,
     strategy_name: str | None = None,
     market_regime: str | None = None,
+    asset_type: AssetType | str = AssetType.STOCK,
+    conversation_history: list[dict[str, str]] | None = None,
+    investor_context: dict | None = None,
     llm: LLMService | None = None,
 ) -> TradeDecision:
     """Make final trading decision with structured dashboard.
@@ -176,9 +181,23 @@ async def decide(
 
     analysis = "\n\n".join(sections)
 
-    prompt = f"""Make the final trading decision for A-share stock {ticker}.
+    asset_type = AssetType(asset_type)
+    asset_label = "A-share stock" if asset_type == AssetType.STOCK else f"{asset_type.value.upper()} fund"
+    context_text = "\n".join(
+        f"{item.get('role', 'user')}: {item.get('content', '')}"
+        for item in (conversation_history or [])[-8:]
+        if item.get("content")
+    )
+    investor_text = "\n".join(f"{key}: {value}" for key, value in (investor_context or {}).items())
+    prompt = f"""Make the final trading decision for the {asset_label} {ticker}.
 
 Current price: {current_price}
+
+Investor constraints:
+{investor_text or "not provided; use conservative defaults"}
+
+Recent conversation context:
+{context_text or "none"}
 
 All analyst reports:
 {analysis}
@@ -209,6 +228,7 @@ Make your final decision as JSON.
             position_size = min(max(float(position_size), 0.0), max(risk_limit, 0.0))
         return TradeDecision(
             ticker=ticker,
+            asset_type=asset_type,
             decision=Decision(result.get("decision", "hold")),
             confidence=float(result.get("confidence", 0.5)),
             target_price=result.get("target_price"),
@@ -222,6 +242,7 @@ Make your final decision as JSON.
         logger.error(f"[PortfolioManager] LLM error: {e}")
         return TradeDecision(
             ticker=ticker,
+            asset_type=asset_type,
             reasoning=f"Decision error: {e}",
             agent_reports={name: r.reasoning for name, r in agent_reports.items()},
         )

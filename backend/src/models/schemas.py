@@ -3,13 +3,21 @@
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Decision(str, Enum):
     BUY = "buy"
     SELL = "sell"
     HOLD = "hold"
+
+
+class AssetType(str, Enum):
+    """Supported exchange-traded assets."""
+
+    STOCK = "stock"
+    ETF = "etf"
+    LOF = "lof"
 
 
 class StockData(BaseModel):
@@ -147,6 +155,7 @@ class TradeDecision(BaseModel):
     """Final portfolio manager decision with dashboard."""
 
     ticker: str
+    asset_type: AssetType = AssetType.STOCK
     decision: Decision = Decision.HOLD
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     target_price: float | None = None
@@ -166,6 +175,7 @@ class MarketContext(BaseModel):
     """
 
     ticker: str
+    asset_type: AssetType = AssetType.STOCK
     as_of_date: str | None = None
     current_price: float = 0.0
     realtime: dict = Field(default_factory=dict)
@@ -174,6 +184,7 @@ class MarketContext(BaseModel):
     news: list[dict] = Field(default_factory=list)
     market_regime: str = "unknown"
     is_backtest: bool = False
+    data_status: dict[str, Any] = Field(default_factory=dict)
 
 
 class TradeRecord(BaseModel):
@@ -182,6 +193,7 @@ class TradeRecord(BaseModel):
     date: str
     action: Decision
     ticker: str
+    asset_type: AssetType = AssetType.STOCK
     shares: int
     price: float
     amount: float
@@ -198,6 +210,7 @@ class Position(BaseModel):
     """
 
     ticker: str
+    asset_type: AssetType = AssetType.STOCK
     shares: int  # total = available + frozen
     avg_cost: float
     current_price: float = 0.0
@@ -255,8 +268,16 @@ class ExternalSimulationConfig(BaseModel):
     changing the account model or Agent workflow.
     """
 
-    provider: Literal["internal", "juejin", "joinquant", "ricequant", "custom"] = "internal"
+    provider: Literal[
+        "internal",
+        "eastmoney_emt",
+        "juejin",
+        "joinquant",
+        "ricequant",
+        "custom",
+    ] = "internal"
     enabled: bool = False
+    simulation_only: bool = True
     endpoint: str = ""
     account_id: str = ""
     token: str = ""
@@ -282,6 +303,7 @@ class SimulationAccountConfig(BaseModel):
     max_total_position_pct: float = Field(default=0.95, ge=0, le=1)
     default_stop_loss_pct: float = Field(default=0.08, ge=0, le=1)
     benchmark: str = "000300"
+    asset_type: AssetType = AssetType.STOCK
     universe: list[str] = Field(default_factory=list)
     external: ExternalSimulationConfig = Field(default_factory=ExternalSimulationConfig)
 
@@ -302,6 +324,7 @@ class SimulationOrder(BaseModel):
     order_id: str
     account_id: str
     ticker: str
+    asset_type: AssetType = AssetType.STOCK
     side: Decision
     shares: int
     order_type: Literal["market", "limit"] = "market"
@@ -311,6 +334,9 @@ class SimulationOrder(BaseModel):
     fill_date: str | None = None
     fill_price: float | None = None
     reject_reason: str | None = None
+    source: Literal["manual", "agent", "backtest", "system"] = "manual"
+    run_id: str | None = None
+    fill_policy: Literal["next_open", "same_close", "manual"] = "next_open"
 
 
 class SimulationSnapshot(BaseModel):
@@ -323,3 +349,79 @@ class SimulationSnapshot(BaseModel):
     total_pnl: float
     total_return_pct: float
     positions: list[Position] = Field(default_factory=list)
+
+
+class AutomationTaskConfig(BaseModel):
+    """Persistent configuration for an unattended daily Agent task.
+
+    ``simulation_only`` is deliberately fixed to true.  The automation layer
+    can create internal paper orders, but it never turns this task into a live
+    trading connection.
+    """
+
+    enabled: bool = False
+    mode: Literal["observe", "confirm", "auto"] = "observe"
+    schedule_time: str = "15:10"
+    weekdays: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
+    universe: list[str] = Field(default_factory=list)
+    asset_type: AssetType = AssetType.STOCK
+    strategy_name: str | None = None
+    max_symbols_per_run: int = Field(default=50, ge=1, le=500)
+    max_orders_per_run: int = Field(default=20, ge=1, le=200)
+    daily_loss_limit_pct: float = Field(default=0.03, ge=0, le=1)
+    data_max_age_seconds: int = Field(default=86400, ge=0)
+    fill_time: Literal["next_open", "same_close", "manual"] = "next_open"
+    simulation_only: Literal[True] = True
+
+    @field_validator("schedule_time")
+    @classmethod
+    def validate_schedule_time(cls, value: str) -> str:
+        from datetime import time
+
+        try:
+            time.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("schedule_time 必须是 HH:MM 格式") from exc
+        return value[:5]
+
+    @field_validator("weekdays")
+    @classmethod
+    def validate_weekdays(cls, value: list[int]) -> list[int]:
+        if any(day < 0 or day > 4 for day in value):
+            raise ValueError("weekdays 只能包含 0 到 4")
+        return sorted(set(value))
+
+
+class AgentRunSummary(BaseModel):
+    """Durable execution/audit summary for one Agent run."""
+
+    run_id: str
+    account_id: str
+    run_date: str
+    trigger: Literal["schedule", "manual", "retry", "settlement"] = "manual"
+    status: Literal["queued", "running", "completed", "failed", "cancelled", "skipped"] = "queued"
+    mode: Literal["observe", "confirm", "auto"] = "observe"
+    strategy_name: str | None = None
+    symbols_total: int = 0
+    symbols_processed: int = 0
+    decisions_count: int = 0
+    orders_count: int = 0
+    started_at: str | None = None
+    completed_at: str | None = None
+    error: str | None = None
+    idempotency_key: str
+
+
+class AgentDecisionAudit(BaseModel):
+    """Decision-level audit record, including risk and execution outcome."""
+
+    decision_id: str
+    run_id: str
+    account_id: str
+    ticker: str
+    decision: TradeDecision
+    current_price: float = 0.0
+    risk_status: Literal["pending", "approved", "rejected"] = "pending"
+    risk_reason: str | None = None
+    order_id: str | None = None
+    created_at: str

@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 
+from api.routers.backtest import BacktestRequest, run_backtest_api
 from engine import backtester
 from engine.simulation_account import SimulationAccountService
 from graph import workflow as workflow_module
@@ -81,6 +82,65 @@ async def test_backtest_builds_as_of_context_and_does_not_use_live_data(monkeypa
         assert not context.financial
         assert not context.news
         assert all(row["date"] <= context.as_of_date for row in context.history)
+
+
+@pytest.mark.asyncio
+async def test_pool_backtest_uses_one_agent_portfolio_without_live_enrichment(monkeypatch):
+    dates = pd.date_range("2026-01-01", periods=6, freq="D").strftime("%Y-%m-%d")
+
+    def make_history(offset: float):
+        return pd.DataFrame(
+            {
+                "date": dates,
+                "open": [10 + offset] * 6,
+                "close": [10 + offset, 11 + offset, 11 + offset, 12 + offset, 12 + offset, 13 + offset],
+                "high": [11 + offset] * 6,
+                "low": [9 + offset] * 6,
+                "volume": [100] * 6,
+                "pct_chg": [0] * 6,
+            }
+        )
+
+    async def history_provider(ticker, *args, **kwargs):
+        return make_history(0 if ticker == "000001" else 2)
+
+    async def fake_invoke(state):
+        assert state["market_context"].is_backtest is True
+        return {"final_decision": TradeDecision(ticker=state["ticker"], decision=Decision.HOLD)}
+
+    monkeypatch.setattr(backtester, "async_get_stock_history", history_provider)
+    monkeypatch.setattr(backtester.workflow, "ainvoke", fake_invoke)
+    result = await backtester.run_pool_backtest(
+        ["000001", "600519"],
+        "2026-01-01",
+        "2026-01-06",
+        decision_interval=2,
+    )
+
+    assert result["ticker"] == "pool"
+    assert result["tickers"] == ["000001", "600519"]
+    assert result["total_trades"] == 0
+    assert len(result["equity_curve"]) == 6
+
+
+@pytest.mark.asyncio
+async def test_pool_backtest_api_dispatches_to_batch_runner(monkeypatch):
+    captured = {}
+
+    async def fake_pool(**kwargs):
+        captured.update(kwargs)
+        return {"ticker": "pool", "tickers": kwargs["tickers"]}
+
+    monkeypatch.setattr("api.routers.backtest.run_pool_backtest", fake_pool)
+    result = await run_backtest_api(
+        BacktestRequest(
+            tickers=["000001", "600519"],
+            start_date="2026-01-01",
+            end_date="2026-01-06",
+        )
+    )
+    assert result["tickers"] == ["000001", "600519"]
+    assert captured["decision_interval"] == 1
 
 
 def test_simulation_account_enforces_t_plus_one_and_persists(tmp_path):

@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { runBacktest } from "@/api";
-import type { BacktestResult } from "@/types";
+import type { AssetType, BacktestResult } from "@/types";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   ReferenceLine,
@@ -15,6 +15,7 @@ import { Loader2, Play } from "lucide-react";
 export function BacktestPage() {
   const [form, setForm] = useState({
     ticker: "",
+    assetType: "stock" as AssetType,
     startDate: "",
     endDate: "",
     initialCapital: "1000000",
@@ -30,11 +31,14 @@ export function BacktestPage() {
     setResult(null);
     try {
       const res = await runBacktest({
-        ticker: form.ticker,
+        ...(form.ticker.split(",").map((item) => item.trim()).filter(Boolean).length > 1
+          ? { tickers: form.ticker.split(",").map((item) => item.trim()).filter(Boolean) }
+          : { ticker: form.ticker.trim() }),
         start_date: form.startDate,
         end_date: form.endDate,
         initial_capital: Number(form.initialCapital),
         decision_interval: Number(form.decisionInterval),
+        asset_type: form.assetType,
       });
       setResult(res);
     } catch (err) {
@@ -48,22 +52,28 @@ export function BacktestPage() {
     <div className="space-y-6 p-6">
       <div>
         <h1 className="text-2xl font-bold">Backtest</h1>
-        <p className="text-sm text-muted-foreground">使用历史数据验证 Agent 策略表现</p>
+        <p className="text-sm text-muted-foreground">使用历史数据验证股票或场内基金策略表现</p>
       </div>
 
       {/* Form */}
       <Card>
         <CardHeader>
           <CardTitle className="text-base">回测参数</CardTitle>
-          <CardDescription>设置股票、时间范围和初始资金</CardDescription>
+          <CardDescription>设置标的类型、代码、时间范围和初始资金</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             <div className="space-y-2">
-              <Label htmlFor="bt-ticker">股票代码</Label>
+              <Label htmlFor="bt-asset-type">标的类型</Label>
+              <select id="bt-asset-type" className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 text-sm" value={form.assetType} onChange={(e) => setForm({ ...form, assetType: e.target.value as AssetType })}>
+                <option value="stock">股票</option><option value="etf">ETF</option><option value="lof">LOF</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="bt-ticker">股票代码 / 股票池</Label>
               <Input
                 id="bt-ticker"
-                placeholder="000737"
+                placeholder="000737 或 000737,600519"
                 value={form.ticker}
                 onChange={(e) => setForm({ ...form, ticker: e.target.value })}
               />

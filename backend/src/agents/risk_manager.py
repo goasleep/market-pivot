@@ -5,8 +5,9 @@ Assesses overall risk and suggests position sizing and stop-loss.
 
 from loguru import logger
 
+from agents.prompt_context import INVESTOR_CONTEXT
 from llm import LLMService, get_llm_service
-from models.schemas import AgentReport, Decision
+from models.schemas import AgentReport, AssetType, Decision
 
 SYSTEM_PROMPT = """You are a professional A-share risk manager.
 You assess risk levels and recommend position sizing, stop-loss, and risk controls.
@@ -20,7 +21,7 @@ You must respond with valid JSON in this format:
   "max_position_pct": 0.0-1.0,
   "stop_loss_pct": 0.0-1.0,
   "risk_factors": ["factor1", "factor2"]
-}"""
+}""" + INVESTOR_CONTEXT
 
 
 async def assess(
@@ -28,6 +29,7 @@ async def assess(
     agent_reports: dict[str, AgentReport],
     debate_report: AgentReport | None = None,
     llm: LLMService | None = None,
+    asset_type: AssetType | str = AssetType.STOCK,
 ) -> AgentReport:
     """Run risk assessment based on all agent reports."""
     logger.info(f"[RiskManager] Assessing {ticker}")
@@ -40,8 +42,13 @@ async def assess(
         all_reports.append(f"## Debate Outcome\nSignal: {debate_report.signal.value}\n{debate_report.reasoning}")
 
     analysis = "\n\n".join(all_reports)
+    asset_label = (
+        "股票"
+        if AssetType(asset_type) == AssetType.STOCK
+        else f"{AssetType(asset_type).value.upper()} 场内基金"
+    )
 
-    prompt = f"""Assess the risk for A-share stock {ticker} based on all analyst reports:
+    prompt = f"""Assess the risk for {asset_label} {ticker} based on all analyst reports:
 
 {analysis}
 

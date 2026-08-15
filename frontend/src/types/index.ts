@@ -1,5 +1,8 @@
+export type AssetType = "stock" | "etf" | "lof";
+
 export interface AnalysisResult {
   ticker: string;
+  asset_type: AssetType;
   decision: "buy" | "sell" | "hold";
   confidence: number;
   target_price: number | null;
@@ -8,10 +11,12 @@ export interface AnalysisResult {
   reasoning: string;
   agent_reports: Record<string, string>;
   dashboard?: DashboardData | null;
+  data_status?: Record<string, unknown>;
 }
 
 export interface BacktestResult {
   ticker: string;
+  tickers?: string[];
   start_date: string;
   end_date: string;
   initial_capital: number;
@@ -31,13 +36,17 @@ export interface TradeRecord {
   date: string;
   action: "buy" | "sell";
   ticker: string;
+  asset_type?: AssetType;
   shares: number;
   price: number;
   amount: number;
+  commission?: number;
+  tax?: number;
 }
 
 export interface Position {
   ticker: string;
+  asset_type?: AssetType;
   shares: number;
   avg_cost: number;
   current_price: number;
@@ -63,11 +72,47 @@ export interface Portfolio {
   orders: SimulationOrder[];
   config: SimulationAccountConfig;
   daily_pnl: number;
+  broker: SimulationBrokerStatus;
+}
+
+export interface SimulationSnapshot {
+  account_id: string;
+  date: string;
+  cash: number;
+  total_value: number;
+  total_pnl: number;
+  total_return_pct: number;
+  positions: Position[];
+}
+
+export interface SimulationBrokerStatus {
+  provider: string;
+  label: string;
+  enabled: boolean;
+  simulation_only: boolean;
+  account_id?: string;
+  state: string;
+  connected: boolean;
+  can_submit_orders: boolean;
+  installed: boolean;
+  supported_platform: boolean;
+  runtime: string;
+  endpoint_configured: boolean;
+  message: string;
+  requirements: string[];
+}
+
+export interface SimulationEvent {
+  type: string;
+  account_id: string;
+  timestamp?: string;
+  data: Record<string, unknown>;
 }
 
 export interface ExternalSimulationConfig {
-  provider: "internal" | "juejin" | "joinquant" | "ricequant" | "custom";
+  provider: "internal" | "eastmoney_emt" | "juejin" | "joinquant" | "ricequant" | "custom";
   enabled: boolean;
+  simulation_only: boolean;
   endpoint: string;
   account_id: string;
   token_set: boolean;
@@ -92,6 +137,7 @@ export interface SimulationAccountConfig {
   max_total_position_pct: number;
   default_stop_loss_pct: number;
   benchmark: string;
+  asset_type: AssetType;
   universe: string[];
   external: ExternalSimulationConfig;
 }
@@ -100,6 +146,7 @@ export interface SimulationOrder {
   order_id: string;
   account_id: string;
   ticker: string;
+  asset_type?: AssetType;
   side: "buy" | "sell";
   shares: number;
   order_type: "market" | "limit";
@@ -109,6 +156,69 @@ export interface SimulationOrder {
   fill_date: string | null;
   fill_price: number | null;
   reject_reason: string | null;
+  source?: "manual" | "agent" | "backtest" | "system";
+  run_id?: string | null;
+  fill_policy?: "next_open" | "same_close" | "manual";
+}
+
+export type AutomationMode = "observe" | "confirm" | "auto";
+
+export interface AutomationTaskConfig {
+  enabled: boolean;
+  mode: AutomationMode;
+  schedule_time: string;
+  weekdays: number[];
+  universe: string[];
+  asset_type: AssetType;
+  strategy_name: string | null;
+  max_symbols_per_run: number;
+  max_orders_per_run: number;
+  daily_loss_limit_pct: number;
+  data_max_age_seconds: number;
+  fill_time: "next_open" | "same_close" | "manual";
+  simulation_only: true;
+}
+
+export interface AutomationTask {
+  account_id: string;
+  config: AutomationTaskConfig;
+  status: string;
+  last_run_id: string | null;
+  last_run_date: string | null;
+  last_error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface AgentRunSummary {
+  run_id: string;
+  account_id: string;
+  run_date: string;
+  trigger: "schedule" | "manual" | "retry" | "settlement";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "skipped";
+  mode: AutomationMode;
+  strategy_name: string | null;
+  symbols_total: number;
+  symbols_processed: number;
+  decisions_count: number;
+  orders_count: number;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+  idempotency_key: string;
+}
+
+export interface AgentDecisionAudit {
+  decision_id: string;
+  run_id: string;
+  account_id: string;
+  ticker: string;
+  decision: AnalysisResult;
+  current_price: number;
+  risk_status: "pending" | "approved" | "rejected";
+  risk_reason: string | null;
+  order_id: string | null;
+  created_at: string;
 }
 
 export interface SSEProgress {

@@ -517,6 +517,133 @@ def get_stock_list() -> list[dict]:
         return []
 
 
+def get_fund_realtime(ticker: str, asset_type: str = "etf") -> dict:
+    """Get an exchange-traded ETF/LOF quote via AkShare."""
+    ticker = _format_ticker(ticker)
+    if asset_type not in {"etf", "lof"}:
+        raise ValueError("asset_type must be etf or lof")
+
+    cache_key = f"fund_rt:{asset_type}:{ticker}"
+    cached = _cache.get(cache_key, ttl=TTL_REALTIME)
+    if cached is not None:
+        return cached
+    fail_key = f"fail:{cache_key}"
+    if _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
+        return {}
+
+    breaker = _breakers["realtime"]
+    endpoint_name = "fund_etf_spot_em" if asset_type == "etf" else "fund_lof_spot_em"
+
+    def _fetch():
+        import akshare as ak
+
+        endpoint = getattr(ak, endpoint_name)
+        df = endpoint()
+        code_column = "代码"
+        row = df[df[code_column].astype(str).str.zfill(6) == ticker]
+        if row.empty:
+            raise ValueError(f"Fund {ticker} not found in {endpoint_name}")
+        return row.iloc[0]
+
+    try:
+        row = _retry_with_backoff(_fetch, breaker, f"{asset_type}_realtime:{ticker}")
+        data = {
+            "ticker": ticker,
+            "asset_type": asset_type,
+            "name": row.get("名称", ""),
+            "price": float(row.get("最新价", 0) or 0),
+            "pct_chg": float(row.get("涨跌幅", 0) or 0),
+            "change": float(row.get("涨跌额", 0) or 0),
+            "volume": float(row.get("成交量", 0) or 0),
+            "amount": float(row.get("成交额", 0) or 0),
+            "high": float(row.get("最高", row.get("最高价", 0)) or 0),
+            "low": float(row.get("最低", row.get("最低价", 0)) or 0),
+            "open": float(row.get("今开", row.get("开盘价", 0)) or 0),
+            "prev_close": float(row.get("昨收", 0) or 0),
+            "turnover": float(row.get("换手率", 0) or 0),
+            "discount_rate": float(row.get("基金折价率", 0) or 0),
+            "iopv": float(row.get("IOPV实时估值", 0) or 0),
+            "data_date": str(row.get("数据日期", "")),
+            "updated_at": str(row.get("更新时间", "")),
+        }
+        _cache.set(cache_key, data)
+        return data
+    except Exception as e:
+        logger.error(f"Failed to fetch {asset_type} realtime for {ticker}: {e}")
+        _cache.set(fail_key, {"error": str(e)})
+        return {}
+
+
+def get_fund_history(
+    ticker: str,
+    asset_type: str = "etf",
+    start_date: str = "",
+    end_date: str = "",
+    adjust: str = "",
+) -> pd.DataFrame:
+    """Get daily historical data for an exchange-traded ETF/LOF."""
+    ticker = _format_ticker(ticker)
+    if asset_type not in {"etf", "lof"}:
+        raise ValueError("asset_type must be etf or lof")
+    if not start_date:
+        start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
+    else:
+        start_date = start_date.replace("-", "")
+    if not end_date:
+        end_date = datetime.now().strftime("%Y%m%d")
+    else:
+        end_date = end_date.replace("-", "")
+
+    cache_key = f"fund_hist:{asset_type}:{ticker}:{start_date}:{end_date}:{adjust}"
+    cached = _cache.get(cache_key, ttl=TTL_DAILY)
+    if cached is not None:
+        return pd.DataFrame(cached)
+    fail_key = f"fail:{cache_key}"
+    if _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
+        return pd.DataFrame()
+
+    breaker = _breakers["history"]
+    endpoint_name = "fund_etf_hist_em" if asset_type == "etf" else "fund_lof_hist_em"
+
+    def _fetch():
+        import akshare as ak
+
+        endpoint = getattr(ak, endpoint_name)
+        return endpoint(
+            symbol=ticker,
+            period="daily",
+            start_date=start_date,
+            end_date=end_date,
+            adjust=adjust,
+        )
+
+    try:
+        df = _retry_with_backoff(_fetch, breaker, f"{asset_type}_history:{ticker}")
+        col_map = {
+            "日期": "date",
+            "开盘": "open",
+            "开盘价": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最高价": "high",
+            "最低": "low",
+            "最低价": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+            "涨跌幅": "pct_chg",
+            "换手率": "turnover",
+        }
+        df = df.rename(columns=col_map)
+        df["ticker"] = ticker
+        df["asset_type"] = asset_type
+        _cache.set(cache_key, df.to_dict(orient="records"))
+        return df
+    except Exception as e:
+        logger.error(f"Failed to fetch {asset_type} history for {ticker}: {e}")
+        _cache.set(fail_key, {"error": str(e)})
+        return pd.DataFrame()
+
+
 def get_breaker_status() -> dict[str, str]:
     """Get status of all circuit breakers (for monitoring API)."""
     return {name: breaker.state for name, breaker in _breakers.items()}
@@ -543,3 +670,11 @@ async def async_get_stock_news(*args, **kwargs) -> list[dict]:
 
 async def async_get_stock_list(*args, **kwargs) -> list[dict]:
     return await asyncio.to_thread(get_stock_list, *args, **kwargs)
+
+
+async def async_get_fund_realtime(*args, **kwargs) -> dict:
+    return await asyncio.to_thread(get_fund_realtime, *args, **kwargs)
+
+
+async def async_get_fund_history(*args, **kwargs) -> pd.DataFrame:
+    return await asyncio.to_thread(get_fund_history, *args, **kwargs)

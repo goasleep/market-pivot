@@ -3,14 +3,22 @@
 import asyncio
 from datetime import date
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from data.akshare_provider import async_get_stock_realtime
+from data.akshare_provider import async_get_fund_realtime, async_get_stock_realtime
+from engine.broker_adapters import broker_status
 from engine.simulation_account import simulation_accounts
-from models.schemas import Decision, ExternalSimulationConfig, SimulationAccountConfig, TradeDecision
+from engine.simulation_events import simulation_events
+from models.schemas import AssetType, Decision, ExternalSimulationConfig, SimulationAccountConfig, TradeDecision
 
 router = APIRouter()
+
+
+async def _quote(ticker: str, asset_type: AssetType):
+    if asset_type == AssetType.STOCK:
+        return await async_get_stock_realtime(ticker)
+    return await async_get_fund_realtime(ticker, asset_type=asset_type.value)
 
 
 class ConfigRequest(BaseModel):
@@ -35,6 +43,7 @@ class OrderRequest(BaseModel):
     price: float | None = Field(default=None, gt=0)
     fill_immediately: bool = True
     trade_date: str | None = None
+    asset_type: AssetType | None = None
 
 
 class MarkRequest(BaseModel):
@@ -81,6 +90,7 @@ def _payload(account, orders=None, daily_pnl: float = 0.0) -> dict:
         "orders": [order.model_dump(mode="json") for order in (orders or [])],
         "config": config,
         "daily_pnl": daily_pnl,
+        "broker": broker_status(account.config.external),
     }
 
 
@@ -88,7 +98,7 @@ async def _account_payload(account_id: str = "default", refresh_quotes: bool = F
     account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
     if refresh_quotes and account.portfolio.positions:
         quotes = await asyncio.gather(
-            *(async_get_stock_realtime(position.ticker) for position in account.portfolio.positions)
+            *(_quote(position.ticker, position.asset_type) for position in account.portfolio.positions)
         )
         prices = {
             position.ticker: float(quote.get("price", 0) or position.current_price)
@@ -105,6 +115,15 @@ async def _account_payload(account_id: str = "default", refresh_quotes: bool = F
     orders = await asyncio.to_thread(simulation_accounts.list_orders, account_id)
     daily_pnl = await asyncio.to_thread(simulation_accounts.daily_pnl, account_id)
     return _payload(account, orders, daily_pnl)
+
+
+async def _publish_account_update(
+    account_id: str,
+    event_type: str = "account.updated",
+    data: dict | None = None,
+) -> None:
+    """Publish a lightweight event; REST remains the source of truth."""
+    await simulation_events.publish(account_id, event_type, data or {})
 
 
 @router.get("/")
@@ -135,11 +154,45 @@ async def get_account(account_id: str, refresh_quotes: bool = False):
     return await _account_payload(account_id, refresh_quotes=refresh_quotes)
 
 
+@router.websocket("/accounts/{account_id}/stream")
+async def stream_account(account_id: str, websocket: WebSocket):
+    """Push simulation account events to the web frontend."""
+    try:
+        await asyncio.to_thread(simulation_accounts.get_account, account_id)
+    except KeyError:
+        await websocket.close(code=4404, reason="模拟账户不存在")
+        return
+
+    await websocket.accept()
+    queue = await simulation_events.subscribe(account_id)
+    try:
+        initial = await _account_payload(account_id)
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "account_id": account_id,
+                "data": {"broker": initial["broker"], "total_value": initial["total_value"]},
+            }
+        )
+        while True:
+            try:
+                result = await asyncio.wait_for(queue.get(), timeout=30)
+                await websocket.send_json(result)
+            except asyncio.TimeoutError:
+                await websocket.send_json({"type": "heartbeat", "account_id": account_id})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await simulation_events.unsubscribe(account_id, queue)
+
+
 @router.put("/accounts/{account_id}/config")
 async def update_config(account_id: str, req: ConfigRequest):
     try:
         account = await asyncio.to_thread(simulation_accounts.update_config, account_id, req.config)
-        return await _account_payload(account.account_id)
+        payload = await _account_payload(account.account_id)
+        await _publish_account_update(account.account_id, data={"reason": "config_updated"})
+        return payload
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -148,16 +201,43 @@ async def update_config(account_id: str, req: ConfigRequest):
 async def update_external_config(account_id: str, req: ExternalSimulationConfig):
     try:
         account = await asyncio.to_thread(simulation_accounts.update_external_config, account_id, req)
-        return await _account_payload(account.account_id)
+        payload = await _account_payload(account.account_id)
+        await _publish_account_update(
+            account.account_id,
+            event_type="broker.updated",
+            data={"broker": payload["broker"]},
+        )
+        return payload
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/accounts/{account_id}/broker")
+async def get_broker_status(account_id: str):
+    try:
+        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        return broker_status(account.config.external)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/accounts/{account_id}/broker/validate")
+async def validate_broker(account_id: str):
+    """Validate the configured external broker without opening a connection."""
+    try:
+        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        return broker_status(account.config.external)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/accounts/{account_id}/status")
 async def update_status(account_id: str, req: StatusRequest):
     try:
         account = await asyncio.to_thread(simulation_accounts.set_status, account_id, req.status)
-        return await _account_payload(account.account_id)
+        payload = await _account_payload(account.account_id)
+        await _publish_account_update(account.account_id, data={"status": account.status})
+        return payload
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -166,7 +246,9 @@ async def update_status(account_id: str, req: StatusRequest):
 async def reset_account(account_id: str):
     try:
         account = await asyncio.to_thread(simulation_accounts.reset_account, account_id)
-        return await _account_payload(account.account_id)
+        payload = await _account_payload(account.account_id)
+        await _publish_account_update(account.account_id, event_type="account.reset", data={})
+        return payload
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -189,16 +271,22 @@ async def create_order(account_id: str, req: OrderRequest):
             req.order_type,
             req.limit_price,
             submitted_date,
+            asset_type=req.asset_type,
         )
         if req.fill_immediately and req.order_type == "market":
             fill_price = req.price
             if fill_price is None:
-                quote = await async_get_stock_realtime(order.ticker)
+                quote = await _quote(order.ticker, order.asset_type)
                 fill_price = float(quote.get("price", 0) or 0)
             if fill_price <= 0:
                 await asyncio.to_thread(simulation_accounts.cancel_order, order.order_id)
                 raise HTTPException(status_code=400, detail="无法取得可执行价格")
             order = await asyncio.to_thread(simulation_accounts.fill_order, order.order_id, fill_price, submitted_date)
+        await _publish_account_update(
+            account_id,
+            event_type="order.updated",
+            data={"order": order.model_dump(mode="json")},
+        )
         return order.model_dump(mode="json")
     except HTTPException:
         raise
@@ -219,6 +307,11 @@ async def cancel_order(account_id: str, order_id: str):
         if not any(item.order_id == order_id for item in orders):
             raise HTTPException(status_code=404, detail="订单不属于该模拟账户")
         order = await asyncio.to_thread(simulation_accounts.cancel_order, order_id)
+        await _publish_account_update(
+            account_id,
+            event_type="order.updated",
+            data={"order": order.model_dump(mode="json")},
+        )
         return order.model_dump(mode="json")
     except HTTPException:
         raise
@@ -238,6 +331,11 @@ async def fill_order(account_id: str, order_id: str, req: FillRequest):
             req.price,
             req.trade_date,
         )
+        await _publish_account_update(
+            account_id,
+            event_type="order.updated",
+            data={"order": order.model_dump(mode="json")},
+        )
         return order.model_dump(mode="json")
     except HTTPException:
         raise
@@ -251,7 +349,7 @@ async def mark_account(account_id: str, req: MarkRequest):
     if not prices:
         account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
         quotes = await asyncio.gather(
-            *(async_get_stock_realtime(position.ticker) for position in account.portfolio.positions)
+            *(_quote(position.ticker, position.asset_type) for position in account.portfolio.positions)
         )
         prices = {
             position.ticker: float(quote.get("price", 0) or 0)
@@ -260,6 +358,7 @@ async def mark_account(account_id: str, req: MarkRequest):
         }
     snapshot_date = req.trade_date or date.today().isoformat()
     account = await asyncio.to_thread(simulation_accounts.mark_to_market, account_id, prices, snapshot_date)
+    filled_orders = []
     for order in await asyncio.to_thread(simulation_accounts.list_orders, account_id):
         if order.status != "pending" or order.ticker not in prices:
             continue
@@ -268,8 +367,22 @@ async def mark_account(account_id: str, req: MarkRequest):
             order.side == Decision.BUY and price <= (order.limit_price or 0)
         ) or (order.side == Decision.SELL and price >= (order.limit_price or 0))
         if should_fill:
-            await asyncio.to_thread(simulation_accounts.fill_order, order.order_id, price, snapshot_date)
-    return await _account_payload(account_id)
+            filled_orders.append(
+                await asyncio.to_thread(simulation_accounts.fill_order, order.order_id, price, snapshot_date)
+            )
+    payload = await _account_payload(account_id)
+    for order in filled_orders:
+        await _publish_account_update(
+            account_id,
+            event_type="order.updated",
+            data={"order": order.model_dump(mode="json")},
+        )
+    await _publish_account_update(
+        account_id,
+        event_type="account.updated",
+        data={"total_value": payload["total_value"], "current_date": payload["current_date"]},
+    )
+    return payload
 
 
 @router.get("/accounts/{account_id}/snapshots")
@@ -287,7 +400,7 @@ async def execute_decision(account_id: str, decision: TradeDecision, price: floa
     account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
     fill_price = price
     if fill_price is None:
-        quote = await async_get_stock_realtime(decision.ticker)
+        quote = await _quote(decision.ticker, decision.asset_type)
         fill_price = float(quote.get("price", 0) or 0)
     if fill_price <= 0:
         raise ValueError("无法取得可执行价格")
@@ -314,6 +427,13 @@ async def execute_decision(account_id: str, decision: TradeDecision, price: floa
         "market",
         None,
         date.today().isoformat(),
+        asset_type=decision.asset_type,
     )
     await asyncio.to_thread(simulation_accounts.fill_order, order.order_id, fill_price, date.today().isoformat())
-    return await _account_payload(account_id)
+    payload = await _account_payload(account_id)
+    await _publish_account_update(
+        account_id,
+        event_type="agent.order.executed",
+        data={"ticker": decision.ticker, "decision": decision.decision.value, "total_value": payload["total_value"]},
+    )
+    return payload

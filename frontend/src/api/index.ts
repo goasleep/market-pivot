@@ -5,6 +5,14 @@ import type {
   SSEProgress,
   SimulationAccountConfig,
   SimulationOrder,
+  SimulationBrokerStatus,
+  SimulationEvent,
+  AutomationTask,
+  AutomationTaskConfig,
+  AgentRunSummary,
+  AgentDecisionAudit,
+  SimulationSnapshot,
+  AssetType,
 } from "@/types";
 
 const BASE_URL = "/api";
@@ -24,12 +32,24 @@ export async function runAnalysis(
 
 export function streamAnalysis(
   ticker: string,
+  options: {
+    asset_type?: AssetType;
+    holding_period_days?: number;
+    available_capital?: number;
+    max_loss_pct?: number;
+    current_position_pct?: number;
+    entry_price?: number;
+  } = {},
   onProgress: (data: SSEProgress) => void,
   onComplete: (data: AnalysisResult) => void,
   onError: (err: EventSource) => void
 ): EventSource {
   // SSE doesn't support POST, so we use a GET with query params for streaming
-  const url = `${BASE_URL}/analysis/stream?ticker=${encodeURIComponent(ticker)}`;
+  const params = new URLSearchParams({ ticker });
+  Object.entries(options).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) params.set(key, String(value));
+  });
+  const url = `${BASE_URL}/analysis/stream?${params.toString()}`;
   const es = new EventSource(url);
 
   es.addEventListener("progress", (e) => {
@@ -48,34 +68,46 @@ export function streamAnalysis(
 }
 
 export async function runBacktest(params: {
-  ticker: string;
+  ticker?: string;
+  tickers?: string[];
   start_date: string;
   end_date: string;
   initial_capital?: number;
   decision_interval?: number;
   fill_time?: "next_open" | "same_close";
   strategy?: string;
+  asset_type?: AssetType;
 }): Promise<BacktestResult> {
   const res = await fetch(`${BASE_URL}/backtest/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       ticker: params.ticker,
+      tickers: params.tickers,
       start_date: params.start_date,
       end_date: params.end_date,
       initial_capital: params.initial_capital ?? 1_000_000,
       decision_interval: params.decision_interval ?? 1,
       fill_time: params.fill_time ?? "next_open",
       strategy: params.strategy,
+      asset_type: params.asset_type ?? "stock",
     }),
   });
   if (!res.ok) throw new Error(`Backtest failed: ${res.statusText}`);
   return res.json();
 }
 
-export async function getPortfolio(): Promise<Portfolio> {
-  const res = await fetch(`${BASE_URL}/portfolio/`);
+export async function getPortfolio(accountId = "default"): Promise<Portfolio> {
+  const params = new URLSearchParams({ account_id: accountId });
+  const res = await fetch(`${BASE_URL}/portfolio/?${params.toString()}`);
   if (!res.ok) throw new Error(`Failed to fetch portfolio: ${res.statusText}`);
+  return res.json();
+}
+
+export async function getMarketQuote(ticker: string, assetType: AssetType = "stock"): Promise<{ ticker: string; asset_type: AssetType; quote: Record<string, unknown>; available: boolean }> {
+  const params = new URLSearchParams({ ticker, asset_type: assetType });
+  const res = await fetch(`${BASE_URL}/market/quote?${params.toString()}`);
+  if (!res.ok) throw new Error(`Failed to fetch quote: ${res.statusText}`);
   return res.json();
 }
 
@@ -84,6 +116,13 @@ export async function getSimulationAccounts(): Promise<Portfolio[]> {
   if (!res.ok) throw new Error(`Failed to fetch simulation accounts: ${res.statusText}`);
   const data = await res.json();
   return data.accounts;
+}
+
+export async function getSimulationSnapshots(accountId = "default"): Promise<SimulationSnapshot[]> {
+  const res = await fetch(`${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/snapshots?limit=500`);
+  if (!res.ok) throw new Error(`Failed to fetch simulation snapshots: ${res.statusText}`);
+  const data = await res.json();
+  return data.snapshots;
 }
 
 export async function updateSimulationConfig(
@@ -126,10 +165,45 @@ export async function updateExternalSimulationConfig(
   return res.json();
 }
 
+export async function getSimulationBrokerStatus(accountId = "default"): Promise<SimulationBrokerStatus> {
+  const res = await fetch(`${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/broker`);
+  if (!res.ok) throw new Error(`Failed to fetch broker status: ${res.statusText}`);
+  return res.json();
+}
+
+export async function validateSimulationBroker(accountId = "default"): Promise<SimulationBrokerStatus> {
+  const res = await fetch(`${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/broker/validate`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Failed to validate broker: ${res.statusText}`);
+  return res.json();
+}
+
+export function openSimulationStream(
+  accountId: string,
+  onEvent: (event: SimulationEvent) => void,
+  onError?: () => void
+): WebSocket {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(
+    `${protocol}//${window.location.host}${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/stream`
+  );
+  socket.onmessage = (message) => {
+    try {
+      onEvent(JSON.parse(message.data) as SimulationEvent);
+    } catch {
+      onError?.();
+    }
+  };
+  socket.onerror = () => onError?.();
+  return socket;
+}
+
 export async function createSimulationOrder(
   accountId: string,
   order: {
     ticker: string;
+    asset_type?: AssetType;
     side: "buy" | "sell";
     shares: number;
     price?: number;
@@ -153,6 +227,91 @@ export async function resetPortfolio(): Promise<{ status: string; message: strin
   const res = await fetch(`${BASE_URL}/portfolio/reset`, { method: "POST" });
   if (!res.ok) throw new Error(`Failed to reset: ${res.statusText}`);
   return res.json();
+}
+
+async function automationRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE_URL}/automation${path}`, {
+    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    ...init,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Automation request failed: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export function getAutomationTask(accountId = "default"): Promise<AutomationTask> {
+  return automationRequest(`/accounts/${encodeURIComponent(accountId)}`);
+}
+
+export function updateAutomationTask(
+  accountId: string,
+  config: AutomationTaskConfig
+): Promise<AutomationTask> {
+  return automationRequest(`/accounts/${encodeURIComponent(accountId)}`, {
+    method: "PUT",
+    body: JSON.stringify(config),
+  });
+}
+
+export function runAutomation(
+  accountId = "default",
+  runDate?: string
+): Promise<AgentRunSummary> {
+  return automationRequest(`/accounts/${encodeURIComponent(accountId)}/run`, {
+    method: "POST",
+    body: JSON.stringify({ run_date: runDate }),
+  });
+}
+
+export function settleAutomation(
+  accountId = "default",
+  payload: { settlement_date?: string; prices?: Record<string, number>; open_prices?: Record<string, number> } = {}
+): Promise<Record<string, unknown>> {
+  return automationRequest(`/accounts/${encodeURIComponent(accountId)}/settle`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getAutomationRuns(accountId = "default"): Promise<AgentRunSummary[]> {
+  const data = await automationRequest<{ runs: AgentRunSummary[] }>(
+    `/accounts/${encodeURIComponent(accountId)}/runs`
+  );
+  return data.runs;
+}
+
+export async function getAutomationDecisions(accountId = "default"): Promise<AgentDecisionAudit[]> {
+  const data = await automationRequest<{ decisions: AgentDecisionAudit[] }>(
+    `/accounts/${encodeURIComponent(accountId)}/decisions`
+  );
+  return data.decisions;
+}
+
+export async function executeAnalysisInSimulation(
+  accountId: string,
+  decision: AnalysisResult
+): Promise<Portfolio> {
+  const res = await fetch(`${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/execute-decision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(decision),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Failed to execute simulation decision: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export function confirmAutomationDecision(
+  accountId: string,
+  decisionId: string,
+  price?: number
+): Promise<AgentDecisionAudit> {
+  const query = price ? `?price=${encodeURIComponent(price)}` : "";
+  return automationRequest(`/accounts/${encodeURIComponent(accountId)}/decisions/${encodeURIComponent(decisionId)}/confirm${query}`, { method: "POST" });
 }
 
 // --- Strategy APIs ---

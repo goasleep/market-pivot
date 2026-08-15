@@ -9,11 +9,13 @@ import pandas as pd
 
 from data.akshare_provider import (
     async_get_financial_data,
+    async_get_fund_history,
+    async_get_fund_realtime,
     async_get_stock_history,
     async_get_stock_news,
     async_get_stock_realtime,
 )
-from models.schemas import MarketContext
+from models.schemas import AssetType, MarketContext
 
 
 def _normalise_history(df: pd.DataFrame, as_of_date: str | None = None) -> list[dict[str, Any]]:
@@ -65,6 +67,7 @@ def _detect_regime(records: list[dict[str, Any]]) -> str:
 async def build_market_context(
     ticker: str,
     *,
+    asset_type: AssetType | str = AssetType.STOCK,
     as_of_date: str | None = None,
     current_price: float | None = None,
     history_df: pd.DataFrame | None = None,
@@ -72,13 +75,18 @@ async def build_market_context(
 ) -> MarketContext:
     """Build a consistent snapshot for live analysis or historical simulation."""
 
+    asset_type = AssetType(asset_type)
     is_backtest = as_of_date is not None
     if history_df is None:
-        history_df = await async_get_stock_history(
-            ticker,
-            start_date="",
-            end_date=as_of_date or "",
-        )
+        if asset_type == AssetType.STOCK:
+            history_df = await async_get_stock_history(ticker, start_date="", end_date=as_of_date or "")
+        else:
+            history_df = await async_get_fund_history(
+                ticker,
+                asset_type=asset_type.value,
+                start_date="",
+                end_date=as_of_date or "",
+            )
     records = _normalise_history(history_df, as_of_date)
 
     # Historical simulation must not request current information. Daily OHLCV
@@ -89,26 +97,48 @@ async def build_market_context(
             realtime["price"] = current_price
         return MarketContext(
             ticker=ticker,
+            asset_type=asset_type,
             as_of_date=as_of_date,
             current_price=float(current_price if current_price is not None else realtime.get("price", 0.0)),
             realtime=realtime,
             history=records,
             market_regime=_detect_regime(records),
             is_backtest=is_backtest,
+            data_status={
+                "history": bool(records),
+                "realtime": bool(realtime.get("price")),
+                "financial": False,
+                "news": False,
+                "latest_history_date": records[-1].get("date", "") if records else "",
+            },
         )
 
-    realtime_task = async_get_stock_realtime(ticker)
-    financial_task = async_get_financial_data(ticker)
-    news_task = async_get_stock_news(ticker, limit=10)
-    realtime, financial, news = await asyncio.gather(realtime_task, financial_task, news_task)
+    if asset_type == AssetType.STOCK:
+        realtime_task = async_get_stock_realtime(ticker)
+        financial_task = async_get_financial_data(ticker)
+        news_task = async_get_stock_news(ticker, limit=10)
+        realtime, financial, news = await asyncio.gather(realtime_task, financial_task, news_task)
+    else:
+        realtime = await async_get_fund_realtime(ticker, asset_type=asset_type.value)
+        financial = {"ticker": ticker, "not_applicable": "场内基金不适用个股财务指标"}
+        news = []
     live_price = current_price if current_price and current_price > 0 else None
     price = float(live_price if live_price is not None else realtime.get("price", 0.0) or 0.0)
     return MarketContext(
         ticker=ticker,
+        asset_type=asset_type,
         current_price=price,
         realtime=realtime,
         history=records,
         financial=financial,
         news=news,
         market_regime=_detect_regime(records),
+        data_status={
+            "history": bool(records),
+            "realtime": bool(realtime.get("price")),
+            "financial": asset_type == AssetType.STOCK and bool(financial),
+            "news": bool(news),
+            "latest_history_date": records[-1].get("date", "") if records else "",
+            "source": "AkShare / 东方财富" if asset_type != AssetType.STOCK else "AkShare",
+        },
     )

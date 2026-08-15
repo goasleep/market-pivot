@@ -6,9 +6,9 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
-import { streamAnalysis } from "@/api";
-import type { AnalysisResult, SSEProgress } from "@/types";
-import { Loader2, Search } from "lucide-react";
+import { executeAnalysisInSimulation, streamAnalysis } from "@/api";
+import type { AnalysisResult, AssetType, SSEProgress } from "@/types";
+import { Loader2, Search, Send } from "lucide-react";
 
 const STAGE_LABELS: Record<string, string> = {
   market_data: "市场数据获取",
@@ -22,10 +22,17 @@ const STAGE_LABELS: Record<string, string> = {
 
 export function AnalysisPage() {
   const [ticker, setTicker] = useState("");
+  const [assetType, setAssetType] = useState<AssetType>("stock");
+  const [holdingPeriodDays, setHoldingPeriodDays] = useState("20");
+  const [availableCapital, setAvailableCapital] = useState("");
+  const [maxLossPct, setMaxLossPct] = useState("5");
+  const [currentPositionPct, setCurrentPositionPct] = useState("0");
+  const [entryPrice, setEntryPrice] = useState("");
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<SSEProgress[]>([]);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [executing, setExecuting] = useState(false);
 
   const handleRun = () => {
     if (!ticker.trim()) return;
@@ -36,6 +43,14 @@ export function AnalysisPage() {
 
     streamAnalysis(
       ticker.trim(),
+      {
+        asset_type: assetType,
+        holding_period_days: Number(holdingPeriodDays) || undefined,
+        available_capital: Number(availableCapital) || undefined,
+        max_loss_pct: Number(maxLossPct) / 100 || undefined,
+        current_position_pct: Number(currentPositionPct) / 100 || undefined,
+        entry_price: Number(entryPrice) || undefined,
+      },
       (data) => setProgress((prev) => [...prev, data]),
       (data) => {
         setResult(data);
@@ -50,32 +65,77 @@ export function AnalysisPage() {
 
   const progressPct = running ? (progress.length / 7) * 100 : result ? 100 : 0;
 
+  const handleExecute = async () => {
+    if (!result || result.decision === "hold") return;
+    if (!window.confirm(`确认将 ${result.asset_type} ${result.ticker} 的 ${result.decision} 决策提交到模拟账户吗？`)) return;
+    setExecuting(true);
+    setError(null);
+    try {
+      await executeAnalysisInSimulation("default", result);
+      setError("Agent 决策已提交到 default 模拟账户");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "模拟执行失败");
+    } finally {
+      setExecuting(false);
+    }
+  };
+
   return (
     <div className="space-y-6 p-6">
       <div>
         <h1 className="text-2xl font-bold">Agent Analysis</h1>
-        <p className="text-sm text-muted-foreground">输入股票代码，启动多智能体协作分析</p>
+        <p className="text-sm text-muted-foreground">输入股票或场内基金代码，启动多智能体协作分析</p>
       </div>
 
       {/* Input */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">股票分析</CardTitle>
-          <CardDescription>输入 A 股股票代码（如 000737、600519）</CardDescription>
+          <CardTitle className="text-base">标的分析</CardTitle>
+          <CardDescription>股票示例 600519；ETF 示例 510300；LOF 示例 166009</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="flex items-end gap-3">
-            <div className="flex-1 space-y-2">
-              <Label htmlFor="ticker">股票代码</Label>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="asset-type">标的类型</Label>
+              <select id="asset-type" className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 text-sm" value={assetType} onChange={(e) => setAssetType(e.target.value as AssetType)} disabled={running}>
+                <option value="stock">股票</option>
+                <option value="etf">ETF</option>
+                <option value="lof">LOF</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="ticker">股票 / 基金代码</Label>
               <Input
                 id="ticker"
-                placeholder="000737"
+                placeholder={assetType === "stock" ? "000737" : assetType === "etf" ? "510300" : "166009"}
                 value={ticker}
                 onChange={(e) => setTicker(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && !running && handleRun()}
                 disabled={running}
               />
             </div>
+            <div className="space-y-2">
+              <Label htmlFor="holding-period">预计持有天数</Label>
+              <Input id="holding-period" type="number" min="1" value={holdingPeriodDays} onChange={(e) => setHoldingPeriodDays(e.target.value)} disabled={running} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="capital">可投入资金（可选）</Label>
+              <Input id="capital" type="number" placeholder="100000" value={availableCapital} onChange={(e) => setAvailableCapital(e.target.value)} disabled={running} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="max-loss">最大可接受亏损 (%)</Label>
+              <Input id="max-loss" type="number" min="0" max="100" value={maxLossPct} onChange={(e) => setMaxLossPct(e.target.value)} disabled={running} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="position">当前仓位 (%)</Label>
+              <Input id="position" type="number" min="0" max="100" value={currentPositionPct} onChange={(e) => setCurrentPositionPct(e.target.value)} disabled={running} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="entry-price">持仓成本价（可选）</Label>
+              <Input id="entry-price" type="number" placeholder="无持仓可留空" value={entryPrice} onChange={(e) => setEntryPrice(e.target.value)} disabled={running} />
+            </div>
+          </div>
+          <div className="mt-4">
             <Button onClick={handleRun} disabled={running || !ticker.trim()}>
               {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
               {running ? "分析中..." : "开始分析"}
@@ -150,10 +210,29 @@ export function AnalysisPage() {
               </div>
             </div>
             <Separator />
+            <div className="flex justify-end">
+              <Button variant="outline" onClick={handleExecute} disabled={executing || result.decision === "hold"}>
+                {executing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
+                {result.decision === "hold" ? "持有，不生成订单" : "执行到模拟盘"}
+              </Button>
+            </div>
+            <Separator />
             <div>
               <Label className="text-xs text-muted-foreground">决策推理</Label>
               <p className="mt-1 text-sm leading-relaxed">{result.reasoning}</p>
             </div>
+            {result.data_status && (
+              <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
+                数据状态：{Object.entries(result.data_status).map(([key, value]) => `${key}=${String(value)}`).join(" · ")}
+              </div>
+            )}
+            {result.dashboard && (
+              <div className="grid gap-3 text-sm md:grid-cols-2">
+                <div className="rounded-md border p-3"><Label className="text-xs text-muted-foreground">趋势与量价</Label><p>{result.dashboard.data_perspective.trend_status || "—"} · {result.dashboard.data_perspective.volume_analysis || "—"}</p></div>
+                <div className="rounded-md border p-3"><Label className="text-xs text-muted-foreground">执行计划</Label><p>{result.dashboard.battle_plan.position_strategy || "—"}</p><p className="text-xs text-muted-foreground">{result.dashboard.battle_plan.action_items.join("；")}</p></div>
+                <div className="rounded-md border p-3 md:col-span-2"><Label className="text-xs text-muted-foreground">阶段计划</Label><p>{result.dashboard.phase_decision.pre_market || "—"} {result.dashboard.phase_decision.intraday || "—"} {result.dashboard.phase_decision.post_market || "—"}</p></div>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

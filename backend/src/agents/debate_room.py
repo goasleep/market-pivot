@@ -5,20 +5,21 @@ Two agents debate from opposing perspectives, then an LLM judge evaluates.
 
 from loguru import logger
 
+from agents.prompt_context import INVESTOR_CONTEXT
 from llm import LLMService, get_llm_service
-from models.schemas import AgentReport, Decision
+from models.schemas import AgentReport, AssetType, Decision
 
 BULL_SYSTEM = """You are a bullish (bull) A-share investment researcher.
 Your job is to find reasons to BUY the stock based on the provided analysis data.
 Be persuasive but factual. Focus on opportunities, growth potential, positive catalysts.
 Respond in Chinese, 300-500 words.
-"""
+""" + INVESTOR_CONTEXT
 
 BEAR_SYSTEM = """You are a bearish (bear) A-share investment researcher.
 Your job is to find reasons to SELL the stock based on the provided analysis data.
 Be persuasive but factual. Focus on risks, overvaluation, negative signals, downside potential.
 Respond in Chinese, 300-500 words.
-"""
+""" + INVESTOR_CONTEXT
 
 JUDGE_SYSTEM = """You are a neutral investment debate judge.
 You evaluate bull and bear arguments and make a balanced assessment.
@@ -30,7 +31,7 @@ You must respond with valid JSON only:
   "bear_score": 0-10,
   "reasoning": "summary of debate outcome in Chinese"
 }
-"""
+""" + INVESTOR_CONTEXT
 
 
 async def debate(
@@ -38,6 +39,7 @@ async def debate(
     agent_reports: dict[str, AgentReport],
     rounds: int = 2,
     llm: LLMService | None = None,
+    asset_type: AssetType | str = AssetType.STOCK,
 ) -> AgentReport:
     """Run bull vs bear debate.
 
@@ -50,6 +52,7 @@ async def debate(
         AgentReport with debate outcome
     """
     logger.info(f"[DebateRoom] Debating {ticker}, rounds={rounds}")
+    asset_label = "stock" if AssetType(asset_type) == AssetType.STOCK else f"{AssetType(asset_type).value.upper()} fund"
     llm_service = llm or get_llm_service()
 
     # Compile analysis summary
@@ -59,7 +62,7 @@ async def debate(
     )
 
     # Round 1: Bull and Bear present initial arguments
-    bull_prompt = f"""Based on the following analysis for stock {ticker}, present your bullish case:
+    bull_prompt = f"""Based on the following analysis for {asset_label} {ticker}, present your bullish case:
 
 {analysis_summary}
 
@@ -67,7 +70,7 @@ Argue why this stock should be bought. Focus on the strongest evidence.
 """
     bull_arg = await llm_service.chat(bull_prompt, system=BULL_SYSTEM)
 
-    bear_prompt = f"""Based on the following analysis for stock {ticker}, present your bearish case:
+    bear_prompt = f"""Based on the following analysis for {asset_label} {ticker}, present your bearish case:
 
 {analysis_summary}
 
@@ -92,7 +95,7 @@ Rebut their arguments and strengthen your bear case for {ticker}.
         bear_arg = await llm_service.chat(bear_rebuttal_prompt, system=BEAR_SYSTEM)
 
     # Judge evaluates
-    judge_prompt = f"""Evaluate the bull vs bear debate for stock {ticker}.
+    judge_prompt = f"""Evaluate the bull vs bear debate for {asset_label} {ticker}.
 
 Bull argument:
 {bull_arg}

@@ -1,16 +1,78 @@
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { TrendingUp, Wallet, Activity, Brain } from "lucide-react";
-import { getStrategies, getSystemStatus, type StrategyInfo } from "@/api";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { TrendingUp, Wallet, Activity, Brain, Plus, X } from "lucide-react";
+import { getAutomationRuns, getAutomationTask, getMarketQuote, getPortfolio, getStrategies, getSystemStatus, openSimulationStream, type StrategyInfo } from "@/api";
+import type { AgentRunSummary, AssetType, AutomationTask, Portfolio } from "@/types";
+
+interface WatchItem {
+  ticker: string;
+  assetType: AssetType;
+  alertPrice?: number;
+}
 
 export function DashboardPage() {
   const [strategies, setStrategies] = useState<StrategyInfo[]>([]);
   const [breakers, setBreakers] = useState<Record<string, string>>({});
+  const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
+  const [automation, setAutomation] = useState<AutomationTask | null>(null);
+  const [runs, setRuns] = useState<AgentRunSummary[]>([]);
+  const [watchlist, setWatchlist] = useState<WatchItem[]>(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem("a-share-agent:watchlist") || "[]");
+      return parsed.map((item: WatchItem | string) => typeof item === "string" ? { ticker: item, assetType: "stock" } : item);
+    } catch {
+      return [];
+    }
+  });
+  const [watchInput, setWatchInput] = useState("");
+  const [watchType, setWatchType] = useState<AssetType>("etf");
+  const [alertPrice, setAlertPrice] = useState("");
+  const [quotes, setQuotes] = useState<Record<string, Record<string, unknown>>>({});
+
+  useEffect(() => {
+    localStorage.setItem("a-share-agent:watchlist", JSON.stringify(watchlist));
+  }, [watchlist]);
+
+  const addWatch = () => {
+    const code = watchInput.trim().replace(/^(sh|sz|bj)/i, "").padStart(6, "0");
+    if (!/^\d{6}$/.test(code) || watchlist.some((item) => item.ticker === code && item.assetType === watchType)) return;
+    setWatchlist((items) => [...items, { ticker: code, assetType: watchType, alertPrice: Number(alertPrice) || undefined }]);
+    setWatchInput("");
+    setAlertPrice("");
+  };
+
+  const refreshWatchlist = async () => {
+    const entries = await Promise.all(watchlist.map(async (item) => {
+      try {
+        const result = await getMarketQuote(item.ticker, item.assetType);
+        return [item.ticker, result.quote] as const;
+      } catch {
+        return [item.ticker, {}] as const;
+      }
+    }));
+    setQuotes(Object.fromEntries(entries));
+  };
 
   useEffect(() => {
     getStrategies().then(setStrategies).catch(() => {});
     getSystemStatus().then(setBreakers).catch(() => {});
+    const refresh = () => {
+      getPortfolio().then(setPortfolio).catch(() => {});
+      getAutomationTask().then(setAutomation).catch(() => {});
+      getAutomationRuns().then(setRuns).catch(() => {});
+    };
+    refresh();
+    const socket = openSimulationStream("default", (event) => {
+      if (event.type.startsWith("agent.") || event.type === "daily.settled" || event.type === "automation.updated") refresh();
+    });
+    const timer = window.setInterval(refresh, 30_000);
+    return () => {
+      socket.close();
+      window.clearInterval(timer);
+    };
   }, []);
 
   const breakerColors: Record<string, "success" | "destructive" | "warning"> = {
@@ -38,8 +100,8 @@ export function DashboardPage() {
             <Wallet className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">¥1,000,000</div>
-            <p className="text-xs text-muted-foreground">初始资金</p>
+            <div className="text-2xl font-bold">¥{(portfolio?.total_value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+            <p className="text-xs text-muted-foreground">{portfolio?.current_date || "模拟账户"}</p>
           </CardContent>
         </Card>
         <Card>
@@ -48,8 +110,8 @@ export function DashboardPage() {
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-muted-foreground">¥0</div>
-            <p className="text-xs text-muted-foreground">0.00%</p>
+            <div className={`text-2xl font-bold ${(portfolio?.total_pnl || 0) < 0 ? "text-destructive" : "text-emerald-600"}`}>¥{(portfolio?.total_pnl || 0).toFixed(2)}</div>
+            <p className="text-xs text-muted-foreground">{((portfolio?.total_return_pct || 0) * 100).toFixed(2)}%</p>
           </CardContent>
         </Card>
         <Card>
@@ -58,8 +120,8 @@ export function DashboardPage() {
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">0</div>
-            <p className="text-xs text-muted-foreground">无持仓</p>
+            <div className="text-2xl font-bold">{portfolio?.positions.length || 0}</div>
+            <p className="text-xs text-muted-foreground">模拟账户持仓</p>
           </CardContent>
         </Card>
         <Card>
@@ -69,12 +131,21 @@ export function DashboardPage() {
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
-              <Badge variant="success">就绪</Badge>
-              <span className="text-xs text-muted-foreground">DeepSeek</span>
+              <Badge variant={automation?.config.enabled ? "success" : "secondary"}>{automation?.config.enabled ? "运行中" : "未启用"}</Badge>
+              <span className="text-xs text-muted-foreground">{automation?.config.mode || "observe"} · {runs[0]?.status || "暂无运行"}</span>
             </div>
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">自选标的</CardTitle><CardDescription>保存股票、ETF 或 LOF 代码，作为后续分析和提醒入口。</CardDescription></CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid gap-2 md:grid-cols-[1fr_120px_120px_auto]"><Input placeholder="例如 510300、600519" value={watchInput} onChange={(e) => setWatchInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addWatch()} /><select className="h-10 rounded-md border bg-background px-3 text-sm" value={watchType} onChange={(e) => setWatchType(e.target.value as AssetType)}><option value="stock">股票</option><option value="etf">ETF</option><option value="lof">LOF</option></select><Input type="number" placeholder="提醒价（可选）" value={alertPrice} onChange={(e) => setAlertPrice(e.target.value)} /><Button onClick={addWatch}><Plus className="mr-1 h-4 w-4" />加入</Button></div>
+          {watchlist.length === 0 ? <p className="text-sm text-muted-foreground">暂无自选标的</p> : <div className="space-y-2">{watchlist.map((item) => { const quote = quotes[item.ticker] || {}; const price = Number(quote.price || 0); const triggered = item.alertPrice && price > 0 && price >= item.alertPrice; return <div key={`${item.assetType}-${item.ticker}`} className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"><div><span className="font-medium">{item.ticker}</span><span className="ml-2 text-xs text-muted-foreground">{item.assetType.toUpperCase()}</span>{item.alertPrice && <span className="ml-2 text-xs text-muted-foreground">提醒 ≥ ¥{item.alertPrice}</span>}</div><div className="flex items-center gap-3"><span className={triggered ? "font-semibold text-emerald-600" : "text-muted-foreground"}>{price ? `¥${price.toFixed(3)} ${Number(quote.pct_chg || 0) >= 0 ? "+" : ""}${Number(quote.pct_chg || 0).toFixed(2)}%` : "暂无行情"}</span><button aria-label={`移除 ${item.ticker}`} onClick={() => setWatchlist((items) => items.filter((current) => !(current.ticker === item.ticker && current.assetType === item.assetType)))}><X className="h-3 w-3" /></button></div></div> })}</div>}
+          <div className="flex items-center justify-between"><p className="text-xs text-muted-foreground">自选列表保存在本机；提醒价在刷新行情后显示触发状态。</p><Button variant="outline" size="sm" onClick={refreshWatchlist} disabled={!watchlist.length}>刷新行情</Button></div>
+        </CardContent>
+      </Card>
 
       {/* Agent pipeline overview */}
       <Card>

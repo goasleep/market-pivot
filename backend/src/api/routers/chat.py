@@ -12,15 +12,13 @@ from sse_starlette.sse import EventSourceResponse
 from agents.stock_agent import (
     StockAgentRequest,
     StockIntent,
-    capabilities_text,
     stock_agent,
 )
 from data.akshare_provider import (
     async_get_stock_history,
-    async_get_stock_news,
-    async_get_stock_realtime,
     get_breaker_status,
 )
+from models.schemas import AssetType
 from strategies.skill_manager import list_strategies
 from widgets.renderer import (
     render_agent_pipeline,
@@ -41,10 +39,11 @@ class ChatHistoryItem(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., description="A stock-related request")
+    message: str = Field(..., description="A stock or exchange-traded fund request")
     strategy: str | None = Field(default=None, description="Strategy override")
     history: list[ChatHistoryItem] = Field(default_factory=list, description="Recent conversation context")
     conversation_id: str | None = Field(default=None, description="Client-side conversation identifier")
+    asset_type: AssetType | None = Field(default=None, description="Optional stock, ETF, or LOF override")
 
 
 PIPELINE_STAGES = [
@@ -130,7 +129,23 @@ async def _analysis_events(request: StockAgentRequest):
     stage_names = {"merge_debate": "debate"}
     accumulated: dict = {}
     realtime_sent = False
+    status_sent = False
     async for update in stock_agent.analyze_stream(request):
+        if not status_sent and update.get("data_status"):
+            status = update["data_status"]
+            yield _event(
+                "text",
+                {
+                    "text": (
+                        "数据状态："
+                        f"历史={'正常' if status.get('history') else '缺失'}，"
+                        f"实时={'正常' if status.get('realtime') else '缺失'}，"
+                        f"财务={'正常' if status.get('financial') else '不适用/缺失'}，"
+                        f"新闻={'正常' if status.get('news') else '缺失'}。"
+                    )
+                },
+            )
+            status_sent = True
         if not realtime_sent and update.get("realtime"):
             yield _event(
                 "widget",
@@ -211,96 +226,21 @@ async def chat_send(req: ChatRequest):
     logger.info(f"[StockAgent] Message: {req.message}")
 
     async def event_generator():
-        request = stock_agent.resolve(
+        request = stock_agent.prepare(
             message=req.message,
             history=[item.model_dump() for item in req.history],
             strategy=req.strategy,
             conversation_id=req.conversation_id,
+            asset_type=req.asset_type,
         )
-        intent_label = _INTENT_LABELS[request.intent]
-        yield _event("text", {"text": f"股票 Agent：已识别任务「{intent_label}」。"})
-
-        if request.intent == StockIntent.HELP:
-            yield _event("text", {"text": capabilities_text()})
-            yield _done()
-            return
-
-        if request.intent == StockIntent.STRATEGIES:
-            yield _event("text", {"text": "当前可用的选股与交易策略："})
-            strategies = await asyncio.to_thread(list_strategies)
-            yield _event("widget", {"type": "strategy_selector", "html": render_strategy_selector(strategies)})
-            yield _done()
-            return
-
-        if request.intent == StockIntent.PORTFOLIO:
-            yield _event(
-                "text",
-                {"text": "组合和持仓管理请使用 Portfolio 页面；股票 Agent 可以继续帮你分析持仓中的个股。"},
-            )
-            yield _done()
-            return
-
-        if request.intent == StockIntent.COMPARE:
-            yield _event(
-                "text",
-                {"text": "股票 Agent 当前支持单只股票的深度研究。请先分别分析股票代码；多股票对比功能可以继续扩展。"},
-            )
-            yield _done()
-            return
-
-        if not request.ticker:
-            yield _event(
-                "text",
-                {"text": "请提供 6 位 A 股代码，例如 `分析 000737`、`查询 600519 行情`。也可以继续追问上一只股票。"},
-            )
-            yield _done()
-            return
-
-        ticker = request.ticker
         try:
-            if request.intent == StockIntent.QUOTE:
-                quote = await async_get_stock_realtime(ticker)
-                if quote:
-                    yield _event("widget", {"type": "stock_card", "html": render_stock_card(quote)})
-                    yield _event("text", {"text": _quote_text(ticker, quote)})
-                else:
-                    yield _event("text", {"text": f"暂时无法获取 {ticker} 的实时行情。"})
-                yield _done()
-                return
-
-            if request.intent == StockIntent.HISTORY:
-                history = await async_get_stock_history(ticker)
-                if not history.empty:
-                    prices = history.tail(30)["close"].tolist()
-                    yield _event("widget", {"type": "mini_chart", "html": render_mini_chart(prices)})
-                yield _event("text", {"text": _history_text(ticker, history)})
-                yield _done()
-                return
-
-            if request.intent == StockIntent.NEWS:
-                yield _event("text", {"text": _news_text(ticker, await async_get_stock_news(ticker))})
-                yield _done()
-                return
-
-            if request.intent == StockIntent.BACKTEST:
-                yield _event(
-                    "text",
-                    {
-                        "text": (
-                            f"已识别回测任务：{ticker}。请在 Backtest 页面设置起止日期和初始资金后运行，"
-                            "避免在聊天中误触发长时间回测。"
-                        )
-                    },
-                )
-                yield _done()
-                return
-
-            async for event in _analysis_events(request):
-                yield event
+            yield _event("text", {"text": "A-Share Agent：正在让模型判断任务并选择数据工具。"})
+            async for event in stock_agent.chat(request):
+                yield _event(event["type"], {"text": event["text"]})
         except Exception as exc:
             logger.exception(f"[StockAgent] Task failed: {exc}")
-            yield _event("text", {"text": f"股票 Agent 执行失败：{exc}"})
-            yield _done()
+            yield _event("text", {"text": f"Agent 执行失败：{exc}"})
+        yield _done()
 
     return EventSourceResponse(event_generator())
 
