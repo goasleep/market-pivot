@@ -6,6 +6,7 @@ from typing import Any, AsyncIterator
 
 from graph.workflow import workflow
 from models.schemas import AssetType
+from observability import build_trace_config
 
 
 class ResearchService:
@@ -28,7 +29,14 @@ class ResearchService:
             state["strategy_name"] = strategy
         if investor_context:
             state["investor_context"] = investor_context
-        return await workflow.ainvoke(state)
+        return await workflow.ainvoke(
+            state,
+            config=build_trace_config(
+                "research-analysis",
+                tags=["research", "analysis"],
+                metadata={"ticker": ticker, "asset_type": AssetType(asset_type).value},
+            ),
+        )
 
     async def stream(
         self,
@@ -48,7 +56,15 @@ class ResearchService:
         if investor_context:
             state["investor_context"] = investor_context
         accumulated: dict[str, Any] = dict(state)
-        async for update in workflow.astream(state, stream_mode="updates"):
+        async for update in workflow.astream(
+            state,
+            config=build_trace_config(
+                "research-analysis",
+                tags=["research", "analysis", "stream"],
+                metadata={"ticker": ticker, "asset_type": AssetType(asset_type).value},
+            ),
+            stream_mode="updates",
+        ):
             node, node_update = next(iter(update.items()))
             if isinstance(node_update, dict):
                 accumulated.update(node_update)

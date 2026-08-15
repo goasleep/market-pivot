@@ -128,7 +128,7 @@ class LLMService:
 
     async def chat_with_tools(
         self,
-        messages: list[dict[str, str]],
+        messages: list[Any],
         tools: list[Any],
         model: str | None = None,
         temperature: float | None = None,

@@ -61,11 +61,15 @@ Chat 页面支持股票、ETF 和 LOF 的行情查询与研究。Analysis 页面
 对比 ETF 510300 159915
 ```
 
-场内基金使用 AkShare 的 `fund_etf_*` 或 `fund_lof_*` 接口；股票仍使用股票行情接口。所有分析和订单均为研究/模拟用途。
+场内基金使用 AkShare 的 `fund_etf_*` 或 `fund_lof_*` 接口；股票仍使用股票行情接口。默认分析和订单均为研究/模拟用途；实盘需额外配置并通过独立安全门禁。
 
 ### LangSmith 追踪
 
 在 `.env` 中配置 `LANGSMITH_TRACING=true` 和 `LANGSMITH_API_KEY` 后，Stock Agent 的路由及 LangGraph 分析流程会发送到 `LANGSMITH_PROJECT` 指定的项目。API Key 只通过环境变量读取，不会显示在前端。
+
+### Langfuse 追踪
+
+在 `.env` 中配置 `LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY` 和可选的 `LANGFUSE_BASE_URL` 后，Stock Agent 对话、研究分析及回测中的 LangGraph/LLM 调用会发送到 Langfuse。每次根调用都会创建独立 callback，并附带标的、日期、策略和会话元数据；未配置 key 时自动跳过。API Key 只通过环境变量读取，不会显示在前端。
 
 ### 无人值守 Agent 模拟交易
 
@@ -76,7 +80,9 @@ Chat 页面支持股票、ETF 和 LOF 的行情查询与研究。Analysis 页面
 - `next_open` 下一交易日开盘成交、`same_close` 当日收盘成交、`manual` 手动成交
 - 单日亏损熔断、每次最大股票数和最大订单数
 
-任务默认关闭，所有订单只写入本地 SQLite 模拟账户，不连接真实券商。调度器会读取 A 股交易日历，数据源不可用时退化为周一至周五并记录警告。Portfolio 页面展示持仓、订单来源、日级净值快照和 WebSocket 事件；Analysis 页面可以把单次 Agent 决策提交到模拟账户。
+任务默认关闭，paper 模式下所有订单只写入本地 SQLite 模拟账户，不连接真实券商。调度器会读取 A 股交易日历，数据源不可用时退化为周一至周五并记录警告。Portfolio 页面展示持仓、订单来源、日级净值快照和 WebSocket 事件；Analysis 页面可以把单次 Agent 决策提交到模拟账户。
+
+实盘模式需要同时满足 `LIVE_TRADING_ENABLED=true`、自动化任务 `execution_mode=live` 且 `live_armed=true`、账户配置启用 `custom_http` Adapter。Adapter 对接一个由用户自行维护的交易网关：`POST /orders` 接收标准化订单，`DELETE /orders/{id}` 撤单，`GET /sync?account_id=...` 返回现金和持仓快照。默认配置和未实现的 provider 都会 fail-closed；未完成券商适配、风控和人工审批前，不应启用真实账户。
 
 回测页面的股票代码支持逗号分隔的股票池，例如 `000737,600519`。批量回测会让每个股票使用各自的历史 as-of 上下文，并合并到同一个组合中计算资金曲线和交易成本。
 
@@ -87,9 +93,11 @@ GET  /api/automation/accounts/{account_id}
 PUT  /api/automation/accounts/{account_id}
 POST /api/automation/accounts/{account_id}/run
 POST /api/automation/accounts/{account_id}/settle
+POST /api/automation/accounts/{account_id}/live-sync
 GET  /api/automation/accounts/{account_id}/runs
 GET  /api/automation/accounts/{account_id}/decisions
 POST /api/automation/accounts/{account_id}/decisions/{decision_id}/confirm
+PUT  /api/portfolio/accounts/{account_id}/live
 ```
 
 ### 一键安装与启动

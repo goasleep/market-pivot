@@ -9,6 +9,7 @@ import {
   getPortfolio,
   resetSimulationAccount,
   updateExternalSimulationConfig,
+  updateLiveTradingConfig,
   updateSimulationConfig,
   validateSimulationBroker,
   openSimulationStream,
@@ -22,12 +23,14 @@ const cloneConfig = (config: SimulationAccountConfig): SimulationAccountConfig =
   ...config,
   universe: [...config.universe],
   external: { ...config.external },
+  live: { ...config.live },
 });
 
 export function PortfolioPage() {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [configDraft, setConfigDraft] = useState<SimulationAccountConfig | null>(null);
   const [externalToken, setExternalToken] = useState("");
+  const [liveToken, setLiveToken] = useState("");
   const [order, setOrder] = useState({ ticker: "", side: "buy" as "buy" | "sell", shares: "100", price: "" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -92,6 +95,13 @@ export function PortfolioPage() {
           token: externalToken.trim(),
         });
         setExternalToken("");
+      }
+      if (liveToken.trim()) {
+        updated = await updateLiveTradingConfig(portfolio.account_id, {
+          ...configDraft.live,
+          token: liveToken.trim(),
+        });
+        setLiveToken("");
       }
       setPortfolio(updated);
       setConfigDraft(cloneConfig(updated.config));
@@ -262,6 +272,18 @@ export function PortfolioPage() {
             </div>
             {configDraft.external.provider === "internal" && <p className="mt-3 text-xs text-muted-foreground">Web-native 模拟盘直接运行在当前 FastAPI 服务中，订单、成交、账户快照都会持久化到 SQLite。</p>}
             {configDraft.external.provider === "eastmoney_emt" && <p className="mt-3 text-xs text-muted-foreground">东方财富 EMT 仅作为预留外部适配器，不是当前 Web 模拟盘的必需依赖。</p>}
+          </div>
+          <div className="rounded-md border border-red-200 bg-red-50/40 p-4">
+            <p className="mb-3 text-sm font-medium text-red-900">实盘 Adapter（默认关闭）</p>
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="space-y-2"><Label>Provider</Label><Input value={configDraft.live.provider} onChange={(e) => setConfig({ live: { ...configDraft.live, provider: e.target.value } })} placeholder="custom_http" /></div>
+              <div className="space-y-2"><Label>Endpoint</Label><Input value={configDraft.live.endpoint} onChange={(e) => setConfig({ live: { ...configDraft.live, endpoint: e.target.value } })} placeholder="http://broker-sidecar:9000" /></div>
+              <div className="space-y-2"><Label>实盘账户 ID</Label><Input value={configDraft.live.account_id} onChange={(e) => setConfig({ live: { ...configDraft.live, account_id: e.target.value } })} /></div>
+              <div className="space-y-2"><Label>Token</Label><Input type="password" placeholder={configDraft.live.token_set ? `已配置：${configDraft.live.token_masked}` : "仅在接入时填写"} value={liveToken} onChange={(e) => setLiveToken(e.target.value)} /></div>
+              <div className="space-y-2"><Label>单笔金额上限</Label><Input type="number" min="0" value={configDraft.live.max_order_value} onChange={(e) => setConfig({ live: { ...configDraft.live, max_order_value: Number(e.target.value) } })} /></div>
+              <div className="flex items-end gap-4"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={configDraft.live.enabled} onChange={(e) => setConfig({ live: { ...configDraft.live, enabled: e.target.checked } })} />启用 Adapter</label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={configDraft.live.require_manual_approval} onChange={(e) => setConfig({ live: { ...configDraft.live, require_manual_approval: e.target.checked } })} />要求人工确认</label></div>
+            </div>
+            <p className="mt-3 text-xs text-red-800">当前仓库只定义 sidecar 协议；服务端还需开启 LIVE_TRADING_ENABLED，且自动化任务必须明确选择 live 并 armed。</p>
           </div>
           <div className="flex justify-end"><Button onClick={handleSaveConfig} disabled={saving}>{saving ? "保存中..." : "保存配置"}</Button></div>
         </CardContent>

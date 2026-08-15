@@ -22,7 +22,9 @@ from models.schemas import (
     AssetType,
     Decision,
     ExternalSimulationConfig,
+    LiveTradingConfig,
     PortfolioState,
+    Position,
     SimulationAccount,
     SimulationAccountConfig,
     SimulationOrder,
@@ -180,6 +182,10 @@ class SimulationAccountService:
         if not account.portfolio.trades and config.initial_cash != account.config.initial_cash:
             account.portfolio.cash = config.initial_cash
             account.portfolio.initial_capital = config.initial_cash
+        if not config.external.token:
+            config = config.model_copy(update={"external": account.config.external})
+        if not config.live.token:
+            config = config.model_copy(update={"live": account.config.live})
         account.config = config
         with self._lock, self._connect() as connection:
             self._save_account(account, connection)
@@ -193,6 +199,36 @@ class SimulationAccountService:
         if not update.token:
             update = update.model_copy(update={"token": current.token})
         account.config = account.config.model_copy(update={"external": update})
+        with self._lock, self._connect() as connection:
+            self._save_account(account, connection)
+        return account
+
+    def update_live_config(self, account_id: str, update: LiveTradingConfig) -> SimulationAccount:
+        """Persist live broker settings without exposing or losing the token."""
+        account = self.get_account(account_id)
+        current = account.config.live
+        if not update.token:
+            update = update.model_copy(update={"token": current.token})
+        account.config = account.config.model_copy(update={"live": update})
+        with self._lock, self._connect() as connection:
+            self._save_account(account, connection)
+        return account
+
+    def apply_live_snapshot(
+        self,
+        account_id: str,
+        cash: float,
+        positions: list[dict],
+        snapshot_date: str | None = None,
+    ) -> SimulationAccount:
+        """Mirror broker cash/positions locally for sizing and audit only."""
+        if cash < 0:
+            raise ValueError("实盘同步返回的 cash 不能为负数")
+        account = self.get_account(account_id)
+        account.portfolio.cash = cash
+        account.portfolio.positions = [Position.model_validate(item) for item in positions]
+        if snapshot_date:
+            account.current_date = snapshot_date
         with self._lock, self._connect() as connection:
             self._save_account(account, connection)
         return account

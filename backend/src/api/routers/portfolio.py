@@ -7,10 +7,17 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from data.akshare_provider import async_get_fund_realtime, async_get_stock_realtime
-from engine.broker_adapters import broker_status
+from engine.broker_adapters import broker_status, live_broker_status
 from engine.simulation_account import simulation_accounts
 from engine.simulation_events import simulation_events
-from models.schemas import AssetType, Decision, ExternalSimulationConfig, SimulationAccountConfig, TradeDecision
+from models.schemas import (
+    AssetType,
+    Decision,
+    ExternalSimulationConfig,
+    LiveTradingConfig,
+    SimulationAccountConfig,
+    TradeDecision,
+)
 
 router = APIRouter()
 
@@ -65,8 +72,16 @@ def _payload(account, orders=None, daily_pnl: float = 0.0) -> dict:
         if len(account.config.external.token) > 8
         else ("***" if account.config.external.token else "")
     )
+    live = account.config.live.model_dump(mode="json", exclude={"token"})
+    live["token_set"] = bool(account.config.live.token)
+    live["token_masked"] = (
+        account.config.live.token[:4] + "***" + account.config.live.token[-4:]
+        if len(account.config.live.token) > 8
+        else ("***" if account.config.live.token else "")
+    )
     config = account.config.model_dump(mode="json", exclude={"external"})
     config["external"] = external
+    config["live"] = live
     return {
         "account_id": account.account_id,
         "name": account.config.name,
@@ -91,6 +106,7 @@ def _payload(account, orders=None, daily_pnl: float = 0.0) -> dict:
         "config": config,
         "daily_pnl": daily_pnl,
         "broker": broker_status(account.config.external),
+        "live_broker": live_broker_status(account.config.live),
     }
 
 
@@ -206,6 +222,22 @@ async def update_external_config(account_id: str, req: ExternalSimulationConfig)
             account.account_id,
             event_type="broker.updated",
             data={"broker": payload["broker"]},
+        )
+        return payload
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/accounts/{account_id}/live")
+async def update_live_config(account_id: str, req: LiveTradingConfig):
+    """Update live broker configuration; token is retained when omitted."""
+    try:
+        account = await asyncio.to_thread(simulation_accounts.update_live_config, account_id, req)
+        payload = await _account_payload(account.account_id)
+        await _publish_account_update(
+            account.account_id,
+            event_type="live-broker.updated",
+            data={"live_broker": payload["live_broker"]},
         )
         return payload
     except (KeyError, ValueError) as exc:

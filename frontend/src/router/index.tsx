@@ -1,5 +1,5 @@
 import { createBrowserRouter, Outlet, NavLink } from "react-router-dom";
-import { LayoutDashboard, FlaskConical, Wallet, Brain, MessageSquare, Settings, Bot } from "lucide-react";
+import { LayoutDashboard, FlaskConical, Wallet, Brain, MessageSquare, Settings, Bot, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { DashboardPage } from "@/pages/dashboard";
 import { AnalysisPage } from "@/pages/analysis";
@@ -21,16 +21,20 @@ const navItems = [
 
 function Layout() {
   return (
-    <div className="flex h-screen w-full overflow-hidden">
+    <div className="app-grid flex h-screen w-full overflow-hidden bg-background">
       {/* Sidebar */}
-      <aside className="flex w-60 shrink-0 flex-col border-r bg-card">
-        <div className="flex h-14 items-center gap-2 border-b px-6">
-          <div className="h-7 w-7 rounded-md bg-primary flex items-center justify-center">
-            <span className="text-sm font-bold text-primary-foreground">A</span>
+      <aside className="app-sidebar relative flex w-64 shrink-0 flex-col overflow-hidden border-r border-[#C9DDF5]/80 bg-gradient-to-b from-[#EAF3FF] via-[#F4F8FF] to-[#E7F2FF] text-[#16325C] shadow-2xl shadow-[#5D8FD1]/10">
+        <div className="pointer-events-none absolute -right-20 -top-20 h-52 w-52 rounded-full bg-[#8CB7FF]/25 blur-3xl" />
+        <div className="relative flex h-[76px] items-center gap-3 border-b border-[#C9DDF5]/80 px-6">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-300 via-blue-500 to-violet-500 shadow-lg shadow-blue-500/30">
+            <Sparkles className="h-4 w-4 text-white" />
           </div>
-          <span className="font-semibold">A-Share Agent</span>
+          <div className="app-brand-copy">
+            <span className="block text-sm font-semibold tracking-wide">A-Share Agent</span>
+          </div>
         </div>
-        <nav className="flex-1 space-y-1 p-3">
+        <nav className="relative flex-1 space-y-1 p-4">
+          <p className="app-nav-heading mb-3 px-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-[#6A82A5]/75">Workspace</p>
           {navItems.map((item) => (
             <NavLink
               key={item.to}
@@ -38,27 +42,26 @@ function Layout() {
               end={item.to === "/"}
               className={({ isActive }) =>
                 cn(
-                  "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                  "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200",
                   isActive
-                    ? "bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                    ? "bg-[#0376FF] text-white shadow-lg shadow-[#0376FF]/25"
+                    : "text-[#36577F] hover:bg-white/70 hover:text-[#102C55]"
                 )
               }
             >
-              <item.icon className="h-4 w-4" />
-              {item.label}
+              <item.icon className="h-4 w-4 opacity-80 transition-transform group-hover:scale-110" />
+              <span className="app-nav-label">{item.label}</span>
             </NavLink>
           ))}
         </nav>
-        <div className="border-t p-4 text-xs text-muted-foreground">
-          v0.1.0 · DeepSeek Powered
-        </div>
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-y-auto">
-        <Outlet />
-      </main>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <main className="min-h-0 flex-1 overflow-y-auto">
+          <Outlet />
+        </main>
+      </div>
     </div>
   );
 }

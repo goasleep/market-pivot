@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
+    # Live trading safety gate.  Keep disabled unless a reviewed broker
+    # adapter and an isolated live account have been configured.
+    live_trading_enabled: bool = False
+
     # Unified SQLite database (cache, settings, and future trading records)
     database_path: str = "./data/cache.db"
     data_cache_path: str | None = None  # backwards-compatible legacy environment variable
@@ -98,6 +102,11 @@ class Settings(BaseSettings):
     langsmith_api_key: str = ""
     langsmith_project: str = "a-share-agent"
     langsmith_endpoint: str = "https://api.smith.langchain.com"
+
+    # Langfuse observability
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_base_url: str = "https://cloud.langfuse.com"
 
     @property
     def database_file_path(self) -> Path:
@@ -144,4 +153,18 @@ def configure_langsmith() -> None:
     logger.info(f"LangSmith tracing enabled for project: {settings.langsmith_project}")
 
 
+def configure_langfuse() -> None:
+    """Expose Langfuse settings to its SDK and LangChain callback handler."""
+    if not settings.langfuse_public_key or not settings.langfuse_secret_key:
+        return
+
+    # BaseSettings reads .env without mutating os.environ, while the Langfuse
+    # SDK reads its standard environment variables directly.
+    os.environ["LANGFUSE_PUBLIC_KEY"] = settings.langfuse_public_key
+    os.environ["LANGFUSE_SECRET_KEY"] = settings.langfuse_secret_key
+    os.environ["LANGFUSE_BASE_URL"] = settings.langfuse_base_url
+    logger.info("Langfuse tracing enabled")
+
+
 configure_langsmith()
+configure_langfuse()

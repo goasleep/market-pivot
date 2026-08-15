@@ -1,0 +1,434 @@
+import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
+import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+
+export interface A2UIMessage {
+  version?: "v0.9";
+  createSurface?: {
+    surfaceId: string;
+    catalogId: string;
+    sendDataModel?: boolean;
+  };
+  updateComponents?: {
+    surfaceId: string;
+    components: A2UIComponent[];
+  };
+  updateDataModel?: {
+    surfaceId: string;
+    path?: string;
+    value?: unknown;
+  };
+  deleteSurface?: { surfaceId: string };
+}
+
+interface A2UIComponent {
+  id: string;
+  component: string;
+  children?: string[];
+  [key: string]: unknown;
+}
+
+interface SurfaceState {
+  id: string;
+  catalogId?: string;
+  components: Map<string, A2UIComponent>;
+  model: Record<string, unknown>;
+}
+
+export interface A2UIAction {
+  name: string;
+  surfaceId: string;
+  context: Record<string, unknown>;
+}
+
+export function createMarkdownSurface(text: string, surfaceId: string): A2UIMessage[] {
+  return [
+    {
+      version: "v0.9",
+      createSurface: {
+        surfaceId,
+        catalogId: "https://a-share-agent.local/a2ui/catalog/v0.9",
+      },
+    },
+    {
+      version: "v0.9",
+      updateComponents: {
+        surfaceId,
+        components: [{ id: "root", component: "Markdown", text: { path: "/text" } }],
+      },
+    },
+    {
+      version: "v0.9",
+      updateDataModel: { surfaceId, path: "/", value: { text } },
+    },
+  ];
+}
+
+interface A2UIRendererProps {
+  messages: A2UIMessage[];
+  onAction?: (action: A2UIAction) => void;
+}
+
+type Binding = { path: string } | { literalString: string };
+
+function isBinding(value: unknown): value is Binding {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      ("path" in value || "literalString" in value),
+  );
+}
+
+function getAtPath(value: unknown, path: string, scope?: unknown): unknown {
+  if (!path) return scope ?? value;
+  const source = path.startsWith("/") ? value : scope;
+  if (source === undefined) return undefined;
+  return path
+    .replace(/^\//, "")
+    .split("/")
+    .filter(Boolean)
+    .map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~"))
+    .reduce<unknown>((current, part) => {
+      if (current && typeof current === "object") {
+        return (current as Record<string, unknown>)[part];
+      }
+      return undefined;
+    }, source);
+}
+
+function resolveValue(value: unknown, model: unknown, scope?: unknown): unknown {
+  if (!isBinding(value)) return value;
+  if ("literalString" in value) return value.literalString;
+  return getAtPath(model, value.path, scope);
+}
+
+function displayValue(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return value.toLocaleString("zh-CN");
+  return JSON.stringify(value);
+}
+
+function cloneAndSet(root: Record<string, unknown>, path: string, value: unknown) {
+  const next = structuredClone(root);
+  const keys = path.replace(/^\//, "").split("/").filter(Boolean);
+  if (!keys.length) return (value || {}) as Record<string, unknown>;
+  let cursor: Record<string, unknown> = next;
+  keys.forEach((key, index) => {
+    const decoded = key.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (index === keys.length - 1) {
+      cursor[decoded] = value;
+    } else {
+      if (!cursor[decoded] || typeof cursor[decoded] !== "object") {
+        cursor[decoded] = {};
+      }
+      cursor = cursor[decoded] as Record<string, unknown>;
+    }
+  });
+  return next;
+}
+
+function buildSurfaces(messages: A2UIMessage[]): SurfaceState[] {
+  const surfaces = new Map<string, SurfaceState>();
+  messages.forEach((message) => {
+    if (message.createSurface) {
+      const { surfaceId, catalogId } = message.createSurface;
+      surfaces.set(surfaceId, {
+        id: surfaceId,
+        catalogId,
+        components: new Map(),
+        model: {},
+      });
+    }
+    if (message.updateComponents) {
+      const update = message.updateComponents;
+      const surface = surfaces.get(update.surfaceId) || {
+        id: update.surfaceId,
+        components: new Map<string, A2UIComponent>(),
+        model: {},
+      };
+      update.components.forEach((component) =>
+        surface.components.set(component.id, component),
+      );
+      surfaces.set(update.surfaceId, surface);
+    }
+    if (message.updateDataModel) {
+      const update = message.updateDataModel;
+      const surface = surfaces.get(update.surfaceId) || {
+        id: update.surfaceId,
+        components: new Map<string, A2UIComponent>(),
+        model: {},
+      };
+      surface.model = update.path && update.path !== "/"
+        ? cloneAndSet(surface.model, update.path, update.value)
+        : ((update.value || {}) as Record<string, unknown>);
+      surfaces.set(update.surfaceId, surface);
+    }
+    if (message.deleteSurface) surfaces.delete(message.deleteSurface.surfaceId);
+  });
+  return Array.from(surfaces.values());
+}
+
+export function A2UIRenderer({ messages, onAction }: A2UIRendererProps) {
+  const baseSurfaces = useMemo(() => buildSurfaces(messages), [messages]);
+  const [models, setModels] = useState<Record<string, Record<string, unknown>>>({});
+
+  useEffect(() => {
+    setModels(
+      Object.fromEntries(baseSurfaces.map((surface) => [surface.id, surface.model])),
+    );
+  }, [baseSurfaces]);
+
+  if (!baseSurfaces.length) return null;
+
+  return (
+    <div className="w-full space-y-3">
+      {baseSurfaces.map((surface) => (
+        <SurfaceRenderer
+          key={surface.id}
+          surface={{ ...surface, model: models[surface.id] || surface.model }}
+          onModelChange={(path, value) =>
+            setModels((current) => ({
+              ...current,
+              [surface.id]: cloneAndSet(
+                current[surface.id] || surface.model,
+                path,
+                value,
+              ),
+            }))
+          }
+          onAction={onAction}
+        />
+      ))}
+    </div>
+  );
+}
+
+function SurfaceRenderer({
+  surface,
+  onModelChange,
+  onAction,
+}: {
+  surface: SurfaceState;
+  onModelChange: (path: string, value: unknown) => void;
+  onAction?: (action: A2UIAction) => void;
+}) {
+  const root = surface.components.get("root");
+  if (!root) return null;
+  return (
+    <div className="animate-in fade-in slide-in-from-bottom-1 duration-300" data-a2ui-surface={surface.id} data-a2ui-catalog={surface.catalogId}>
+      <RenderComponent
+        component={root}
+        surface={surface}
+        scope={surface.model}
+        onModelChange={onModelChange}
+        onAction={onAction}
+      />
+    </div>
+  );
+}
+
+function RenderComponent({
+  component,
+  surface,
+  scope,
+  onModelChange,
+  onAction,
+}: {
+  component: A2UIComponent;
+  surface: SurfaceState;
+  scope: unknown;
+  onModelChange: (path: string, value: unknown) => void;
+  onAction?: (action: A2UIAction) => void;
+}) {
+  const resolve = (value: unknown) => resolveValue(value, surface.model, scope);
+  const children = (component.children || [])
+    .map((id) => surface.components.get(id))
+    .filter((item): item is A2UIComponent => Boolean(item));
+  const renderChildren = () =>
+    children.map((child) => (
+      <RenderComponent
+        key={child.id}
+        component={child}
+        surface={surface}
+        scope={scope}
+        onModelChange={onModelChange}
+        onAction={onAction}
+      />
+    ));
+
+  switch (component.component) {
+    case "Markdown":
+      return <MarkdownContent text={displayValue(resolve(component.text))} />;
+    case "Text": {
+      const variant = String(component.variant || "body");
+      return (
+        <p
+          className={cn(
+            "whitespace-pre-wrap text-sm leading-relaxed",
+            variant === "h3" && "text-base font-semibold",
+            variant === "h4" && "text-sm font-semibold",
+            variant === "metric" && "text-xl font-semibold",
+            variant === "caption" && "text-xs text-muted-foreground",
+            component.tone === "positive" && "text-green-500",
+            component.tone === "negative" && "text-red-500",
+          )}
+        >
+          {displayValue(resolve(component.text))}
+        </p>
+      );
+    }
+    case "Row":
+      return <div className="flex flex-wrap items-center gap-3">{renderChildren()}</div>;
+    case "Column":
+      return <div className="flex flex-col gap-2">{renderChildren()}</div>;
+    case "Card":
+      return <div className="rounded-xl border bg-card p-4 shadow-sm"><div className="space-y-3">{renderChildren()}</div></div>;
+    case "Section":
+      return (
+        <section className="rounded-lg border border-border/70 bg-background/40 p-3">
+          {Boolean(component.title) && <h4 className="mb-2 text-xs font-semibold text-muted-foreground">{String(component.title)}</h4>}
+          <div className="space-y-2">{renderChildren()}</div>
+        </section>
+      );
+    case "Badge": {
+      const tone = String(resolve(component.tone) || "secondary");
+      const variant = tone === "sell" || tone === "strong_sell" ? "destructive" : tone === "buy" || tone === "strong_buy" ? "success" : "secondary";
+      return <Badge variant={variant}>{displayValue(resolve(component.text))}</Badge>;
+    }
+    case "Progress":
+      return <div className="h-2 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.max(0, Math.min(100, Number(resolve(component.value) || 0)))}%` }} /></div>;
+    case "ScoreBar": {
+      const value = Number(resolve(component.value) || 0);
+      return <div className="space-y-1"><div className="flex justify-between text-xs"><span>{String(component.label || "")}</span><span>{value >= 0 ? "+" : ""}{value.toFixed(0)}</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className={cn("h-full rounded-full", value >= 0 ? "bg-primary" : "bg-destructive")} style={{ width: `${Math.min(100, Math.abs(value))}%` }} /></div></div>;
+    }
+    case "PipelineStep": {
+      const status = String(component.status || "pending");
+      return <div className="flex items-center gap-2 text-xs"><span className={cn("flex h-6 w-6 items-center justify-center rounded-full border text-[10px]", status === "done" ? "border-green-500 bg-green-500/10 text-green-500" : status === "running" ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground")}>{status === "done" ? "✓" : status === "running" ? "•" : "○"}</span><span>{String(component.label || "")}</span></div>;
+    }
+    case "List": {
+      const items = resolve(component.items);
+      if (!Array.isArray(items)) return null;
+      const template = component.itemTemplate ? surface.components.get(String(component.itemTemplate)) : undefined;
+      return <div className="space-y-1">{Boolean(component.title) && <p className="text-xs font-medium text-muted-foreground">{String(component.title)}</p>}{items.map((item, index) => template ? <RenderComponent key={index} component={template} surface={surface} scope={item} onModelChange={onModelChange} onAction={onAction} /> : <div key={index} className="rounded-md bg-muted/50 px-2 py-1 text-xs">{displayValue(item)}</div>)}</div>;
+    }
+    case "StrategyItem":
+      return <div className="rounded-lg border px-3 py-2"><div className="flex items-center justify-between text-sm font-medium"><span>{displayValue(resolve(component.name))}</span>{Boolean(resolve(component.active)) && <Badge variant="success">启用</Badge>}</div><p className="mt-1 text-xs text-muted-foreground">{displayValue(resolve(component.description))}</p></div>;
+    case "StatusItem": {
+      const status = displayValue(resolve(component.status));
+      return <div className="flex items-center justify-between rounded-md bg-muted/50 px-2 py-1 text-xs"><span>{displayValue(resolve(component.label))}</span><Badge variant={status === "closed" ? "success" : status === "open" ? "destructive" : "warning"}>{status}</Badge></div>;
+    }
+    case "Sparkline": {
+      const values = (resolve(component.values) as number[]) || [];
+      if (values.length < 2) return <p className="text-xs text-muted-foreground">暂无走势数据</p>;
+      const min = Math.min(...values); const max = Math.max(...values); const range = max - min || 1;
+      const points = values.map((value, index) => `${(index / (values.length - 1)) * 300},${80 - ((value - min) / range) * 70}`).join(" ");
+      return <svg viewBox="0 0 300 80" className="h-20 w-full"><polyline points={points} fill="none" stroke="hsl(var(--primary))" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+    }
+    case "Activity": {
+      const status = displayValue(resolve(component.status));
+      return <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-xs text-muted-foreground"><span className={cn("h-2 w-2 rounded-full", status === "completed" ? "bg-green-500" : "animate-pulse bg-primary")} /><span>已调用数据工具：{displayValue(resolve(component.name))}</span><span className="ml-auto">{status === "completed" ? "完成" : status === "running" ? "执行中" : status}</span></div>;
+    }
+    case "DataTable": {
+      const rows = resolve(component.rows);
+      const columns = Array.isArray(component.columns) ? component.columns as Array<{ key: string; label: string }> : [];
+      if (!Array.isArray(rows)) return null;
+      return <div className="overflow-x-auto rounded-lg border"><table className="w-full min-w-[560px] text-left text-xs"><thead className="bg-muted/60 text-muted-foreground"><tr>{columns.map((column) => <th key={column.key} className="whitespace-nowrap px-3 py-2 font-medium">{column.label}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={index} className="border-t border-border/70">{columns.map((column) => <td key={column.key} className="whitespace-nowrap px-3 py-2">{displayValue((row as Record<string, unknown>)[column.key])}</td>)}</tr>)}</tbody></table></div>;
+    }
+    case "Button": {
+      const event = (component.action as { event?: { name?: string; context?: Record<string, unknown> } } | undefined)?.event;
+      return <Button onClick={() => event?.name && onAction?.({ name: event.name, surfaceId: surface.id, context: resolveContext(event.context || {}, surface.model) })}>{component.text ? displayValue(resolve(component.text)) : children.map((child) => <RenderComponent key={child.id} component={child} surface={surface} scope={scope} onModelChange={onModelChange} onAction={onAction} />)}</Button>;
+    }
+    case "TextField": {
+      const binding = component.value as Binding | undefined;
+      const path = binding && "path" in binding ? binding.path : "";
+      return <Input aria-label={String(component.label || "")} placeholder={String(component.label || "")} value={displayValue(resolve(component.value))} onChange={(event) => path && onModelChange(path, event.target.value)} />;
+    }
+    case "ChoicePicker": {
+      const binding = component.value as Binding | undefined;
+      const path = binding && "path" in binding ? binding.path : "";
+      const options = Array.isArray(component.options) ? component.options as Array<{ label: string; value: string }> : [];
+      return <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={displayValue(resolve(component.value))} onChange={(event) => path && onModelChange(path, event.target.value)}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
+    }
+    default:
+      return <div className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">暂不支持的 A2UI 组件：{component.component}</div>;
+  }
+}
+
+function resolveContext(context: Record<string, unknown>, model: unknown) {
+  return Object.fromEntries(Object.entries(context).map(([key, value]) => [key, resolveValue(value, model)]));
+}
+
+function MarkdownContent({ text }: { text: string }) {
+  const lines = text.split("\n");
+  const blocks: ReactNode[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      const level = heading[1].length;
+      const className = level <= 2 ? "mt-3 text-base font-semibold" : "mt-2 text-sm font-semibold";
+      blocks.push(<div key={index} className={className}>{inlineMarkdown(heading[2])}</div>);
+      index += 1;
+      continue;
+    }
+    if (/^\s*\|/.test(line) && index + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[index + 1])) {
+      const tableLines: string[] = [line];
+      index += 2;
+      while (index < lines.length && /^\s*\|/.test(lines[index])) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      blocks.push(<MarkdownTable key={`table-${index}`} lines={tableLines} />);
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      const items: string[] = [];
+      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^\s*[-*]\s+/, ""));
+        index += 1;
+      }
+      blocks.push(<ul key={`ul-${index}`} className="ml-4 list-disc space-y-1 text-sm">{items.map((item, itemIndex) => <li key={itemIndex}>{inlineMarkdown(item)}</li>)}</ul>);
+      continue;
+    }
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const items: string[] = [];
+      while (index < lines.length && /^\s*\d+\.\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^\s*\d+\.\s+/, ""));
+        index += 1;
+      }
+      blocks.push(<ol key={`ol-${index}`} className="ml-4 list-decimal space-y-1 text-sm">{items.map((item, itemIndex) => <li key={itemIndex}>{inlineMarkdown(item)}</li>)}</ol>);
+      continue;
+    }
+    const paragraph: string[] = [line];
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !/^(#{1,6})\s|^\s*[-*]\s+|^\s*\d+\.\s+|^\s*\|/.test(lines[index])) {
+      paragraph.push(lines[index]);
+      index += 1;
+    }
+    blocks.push(<p key={`p-${index}`} className="whitespace-pre-wrap text-sm leading-relaxed">{inlineMarkdown(paragraph.join("\n"))}</p>);
+  }
+  return <div className="space-y-3">{blocks}</div>;
+}
+
+function MarkdownTable({ lines }: { lines: string[] }) {
+  const cells = (line: string) => line.split("|").slice(1, -1).map((cell) => cell.trim());
+  const headers = cells(lines[0]);
+  return <div className="overflow-x-auto rounded-lg border"><table className="w-full text-left text-xs"><thead className="bg-muted/60"><tr>{headers.map((header, index) => <th key={index} className="whitespace-nowrap px-3 py-2 font-medium">{inlineMarkdown(header)}</th>)}</tr></thead><tbody>{lines.slice(1).map((line, rowIndex) => <tr key={rowIndex} className="border-t border-border/70">{cells(line).map((cell, cellIndex) => <td key={cellIndex} className="whitespace-nowrap px-3 py-2">{inlineMarkdown(cell)}</td>)}</tr>)}</tbody></table></div>;
+}
+
+function inlineMarkdown(text: string): ReactNode {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith("`") && part.endsWith("`")) return <code key={index} className="rounded bg-muted px-1">{part.slice(1, -1)}</code>;
+    return <span key={index}>{part}</span>;
+  });
+}

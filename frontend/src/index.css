@@ -4,31 +4,31 @@
 
 @layer base {
   :root {
-    --background: 222 14% 8%;
-    --foreground: 210 20% 92%;
-    --card: 222 14% 11%;
-    --card-foreground: 210 20% 92%;
-    --popover: 222 14% 11%;
-    --popover-foreground: 210 20% 92%;
-    --primary: 142 71% 45%;
+    --background: 220 36% 97%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    --primary: 212 100% 50%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 217 19% 18%;
-    --secondary-foreground: 210 20% 92%;
-    --muted: 217 19% 18%;
-    --muted-foreground: 215 16% 55%;
-    --accent: 217 19% 18%;
-    --accent-foreground: 210 20% 92%;
-    --destructive: 0 72% 51%;
+    --secondary: 216 32% 93%;
+    --secondary-foreground: 222 47% 20%;
+    --muted: 216 32% 94%;
+    --muted-foreground: 215 20% 42%;
+    --accent: 207 100% 95%;
+    --accent-foreground: 214 80% 32%;
+    --destructive: 0 72% 48%;
     --destructive-foreground: 0 0% 100%;
-    --border: 217 19% 20%;
-    --input: 217 19% 20%;
-    --ring: 142 71% 45%;
-    --chart-1: 142 71% 45%;
+    --border: 214 32% 86%;
+    --input: 214 32% 82%;
+    --ring: 212 100% 50%;
+    --chart-1: 199 89% 48%;
     --chart-2: 0 72% 51%;
-    --chart-3: 38 92% 50%;
-    --chart-4: 199 89% 48%;
-    --chart-5: 280 65% 60%;
-    --radius: 0.5rem;
+    --chart-3: 271 76% 63%;
+    --chart-4: 212 100% 50%;
+    --chart-5: 186 100% 44%;
+    --radius: 1rem;
   }
 }
 
@@ -38,6 +38,68 @@
   }
   body {
     @apply bg-background text-foreground;
+    min-width: 320px;
+    font-family: Inter, "MiSans", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
     font-feature-settings: "rlig" 1, "calt" 1;
+    background-image:
+      radial-gradient(circle at 86% -8%, rgba(99, 169, 255, 0.18), transparent 30rem),
+      radial-gradient(circle at 10% 18%, rgba(0, 217, 255, 0.07), transparent 24rem);
+    background-attachment: fixed;
+  }
+  ::selection {
+    background: rgba(3, 118, 255, 0.2);
+    color: hsl(var(--foreground));
+  }
+  button, input, select, textarea {
+    font: inherit;
+  }
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+@layer components {
+  .app-grid {
+    background-image: linear-gradient(rgba(8, 26, 74, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(8, 26, 74, 0.035) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  .eyebrow {
+    @apply text-[10px] font-semibold uppercase tracking-[0.2em] text-primary;
+  }
+}
+
+@media (max-width: 767px) {
+  .app-sidebar {
+    width: 4.5rem;
+  }
+
+  .app-brand-copy,
+  .app-nav-heading,
+  .app-nav-label {
+    display: none;
+  }
+
+  .app-sidebar > div:first-of-type {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .app-sidebar nav {
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+
+  .app-sidebar nav a {
+    justify-content: center;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+
+  .app-sidebar nav a svg {
+    height: 1.1rem;
+    width: 1.1rem;
   }
 }

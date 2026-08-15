@@ -10,6 +10,7 @@ dependencies = [
     "langchain>=0.3.0",
     "langchain-deepseek>=0.1.0",
     "langchain-openai>=0.2.11",
+    "langfuse>=3.0.0",
     "openai>=1.55.0",
     "akshare>=1.14.0",
     "pandas>=2.1.0",

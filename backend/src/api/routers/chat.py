@@ -3,8 +3,9 @@
 import asyncio
 import json
 from typing import Literal
+from uuid import uuid4
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -14,13 +15,15 @@ from agents.stock_agent import (
     StockIntent,
     stock_agent,
 )
+from application.chat_service import ChatTaskInput, chat_store, chat_task_manager
 from data.akshare_provider import (
     async_get_stock_history,
     get_breaker_status,
 )
 from models.schemas import AssetType
 from strategies.skill_manager import list_strategies
-from widgets.renderer import (
+from widgets.a2ui import (
+    CATALOG,
     render_agent_pipeline,
     render_breaker_status,
     render_decision_dashboard,
@@ -36,6 +39,7 @@ router = APIRouter()
 class ChatHistoryItem(BaseModel):
     role: Literal["user", "assistant"]
     content: str
+    parts: list[dict] | None = None
 
 
 class ChatRequest(BaseModel):
@@ -44,6 +48,19 @@ class ChatRequest(BaseModel):
     history: list[ChatHistoryItem] = Field(default_factory=list, description="Recent conversation context")
     conversation_id: str | None = Field(default=None, description="Client-side conversation identifier")
     asset_type: AssetType | None = Field(default=None, description="Optional stock, ETF, or LOF override")
+    task_id: str | None = Field(default=None, description="Client-generated task identifier")
+
+
+class ConversationUpdate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=100)
+
+
+class A2UIActionRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    surface_id: str = Field(alias="surfaceId", min_length=1, max_length=200)
+    context: dict = Field(default_factory=dict)
+
+    model_config = {"populate_by_name": True}
 
 
 PIPELINE_STAGES = [
@@ -149,7 +166,7 @@ async def _analysis_events(request: StockAgentRequest):
         if not realtime_sent and update.get("realtime"):
             yield _event(
                 "widget",
-                {"type": "stock_card", "html": render_stock_card(update["realtime"])},
+                {"type": "a2ui", "messages": render_stock_card(update["realtime"])},
             )
             realtime_sent = True
 
@@ -164,7 +181,7 @@ async def _analysis_events(request: StockAgentRequest):
         )
         yield _event(
             "widget",
-            {"type": "agent_pipeline", "html": render_agent_pipeline(stages, current_stage)},
+            {"type": "a2ui", "messages": render_agent_pipeline(stages, current_stage)},
         )
         accumulated = update.get("state", accumulated)
 
@@ -179,13 +196,13 @@ async def _analysis_events(request: StockAgentRequest):
     if dashboard:
         yield _event(
             "widget",
-            {"type": "decision_dashboard", "html": render_decision_dashboard(dashboard)},
+            {"type": "a2ui", "messages": render_decision_dashboard(dashboard)},
         )
         attribution = dashboard.get("signal_attribution", {})
         if attribution:
             yield _event(
                 "widget",
-                {"type": "signal_gauge", "html": render_signal_gauge(attribution)},
+                {"type": "a2ui", "messages": render_signal_gauge(attribution)},
             )
 
     decision_label = {"buy": "买入", "sell": "卖出", "hold": "观望"}.get(
@@ -222,46 +239,139 @@ async def _analysis_events(request: StockAgentRequest):
 
 @router.post("/send")
 async def chat_send(req: ChatRequest):
-    """Route a stock-related message and return an SSE response."""
+    """Create a durable Agent task and stream its events to this subscriber."""
     logger.info(f"[StockAgent] Message: {req.message}")
+    conversation_id = req.conversation_id or f"conversation-{uuid4().hex}"
+    task_id = req.task_id or f"task-{uuid4().hex}"
+    history = [item.model_dump(exclude_none=True) for item in req.history]
+    try:
+        _, assistant_message_id = chat_store.prepare_task(
+            conversation_id=conversation_id,
+            task_id=task_id,
+            message=req.message,
+            history=history,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    task_input = ChatTaskInput(
+        task_id=task_id,
+        conversation_id=conversation_id,
+        message=req.message,
+        history=history,
+        strategy=req.strategy,
+        asset_type=req.asset_type,
+        assistant_message_id=assistant_message_id,
+    )
 
     async def event_generator():
-        request = stock_agent.prepare(
-            message=req.message,
-            history=[item.model_dump() for item in req.history],
-            strategy=req.strategy,
-            conversation_id=req.conversation_id,
-            asset_type=req.asset_type,
-        )
-        try:
-            yield _event("text", {"text": "A-Share Agent：正在让模型判断任务并选择数据工具。"})
-            async for event in stock_agent.chat(request):
-                yield _event(event["type"], {"text": event["text"]})
-        except Exception as exc:
-            logger.exception(f"[StockAgent] Task failed: {exc}")
-            yield _event("text", {"text": f"Agent 执行失败：{exc}"})
-        yield _done()
+        await chat_task_manager.start(task_input)
+        async for event in chat_task_manager.subscribe(task_id):
+            yield event
 
     return EventSourceResponse(event_generator())
 
 
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_chat_task(task_id: str):
+    """Cancel a server-owned chat task without relying on the SSE client connection."""
+    result = await chat_task_manager.cancel(task_id)
+    if result["status"] == "not_found":
+        raise HTTPException(status_code=404, detail="聊天任务不存在")
+    return result
+
+
+@router.get("/tasks/{task_id}")
+async def get_chat_task(task_id: str):
+    """Return durable status for a chat task after a browser refresh."""
+    result = chat_store.get_task(task_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="聊天任务不存在")
+    return result
+
+
+@router.get("/tasks/{task_id}/stream")
+async def reconnect_chat_task(request: Request, task_id: str, last_event_id: int = 0):
+    """Reconnect a browser to an existing server-owned chat SSE task."""
+    record = chat_store.get_task(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="聊天任务不存在")
+
+    header_cursor = request.headers.get("last-event-id")
+    if header_cursor and header_cursor.isdigit():
+        last_event_id = max(last_event_id, int(header_cursor))
+
+    async def event_generator():
+        async for event in chat_task_manager.subscribe(task_id, after_sequence=last_event_id):
+            yield event
+
+    return EventSourceResponse(event_generator())
+
+
+@router.get("/conversations")
+async def list_chat_conversations():
+    """List durable chat history for the current local installation."""
+    return {"conversations": chat_store.list_conversations()}
+
+
+@router.get("/conversations/{conversation_id}")
+async def get_chat_conversation(conversation_id: str):
+    """Load one durable conversation, including partial or cancelled messages."""
+    conversation = chat_store.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return conversation
+
+
+@router.patch("/conversations/{conversation_id}")
+async def rename_chat_conversation(conversation_id: str, req: ConversationUpdate):
+    if not chat_store.rename_conversation(conversation_id, req.title):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return chat_store.get_conversation(conversation_id)
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_chat_conversation(conversation_id: str):
+    if chat_store.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if not chat_store.delete_conversation(conversation_id):
+        raise HTTPException(status_code=409, detail="会话仍有任务运行，无法删除")
+    return {"conversation_id": conversation_id, "deleted": True}
+
+
 @router.get("/widgets/strategies")
 async def get_strategy_widget():
-    """Get the strategy selector widget."""
+    """Get a complete A2UI strategy surface."""
     strategies = await asyncio.to_thread(list_strategies)
-    return {"html": render_strategy_selector(strategies)}
+    return {"protocol": "a2ui", "catalog": CATALOG, "messages": render_strategy_selector(strategies)}
 
 
 @router.get("/widgets/breakers")
 async def get_breaker_widget():
-    """Get the circuit breaker status widget."""
-    return {"html": render_breaker_status(get_breaker_status())}
+    """Get a complete A2UI breaker-status surface."""
+    return {"protocol": "a2ui", "catalog": CATALOG, "messages": render_breaker_status(get_breaker_status())}
 
 
 @router.get("/widgets/mini_chart/{ticker}")
 async def get_mini_chart_widget(ticker: str):
-    """Get a mini sparkline chart for a stock."""
+    """Get a native A2UI sparkline surface for a stock."""
     history = await async_get_stock_history(ticker)
     if history.empty:
-        return {"html": '<div style="color:#94a3b8;font-size:12px">No data</div>'}
-    return {"html": render_mini_chart(history.tail(30)["close"].tolist())}
+        return {"protocol": "a2ui", "catalog": CATALOG, "messages": render_mini_chart([])}
+    return {
+        "protocol": "a2ui",
+        "catalog": CATALOG,
+        "messages": render_mini_chart(history.tail(30)["close"].tolist()),
+    }
+
+
+@router.get("/a2ui/catalog")
+async def get_a2ui_catalog():
+    """Publish the catalog understood by the native frontend renderer."""
+    return CATALOG
+
+
+@router.post("/a2ui/actions")
+async def handle_a2ui_action(req: A2UIActionRequest):
+    """Receive native A2UI actions without executing agent-provided code."""
+    logger.info("[A2UI] action={} surface={} context_keys={}", req.name, req.surface_id, list(req.context))
+    return {"accepted": True, "name": req.name, "surfaceId": req.surface_id}

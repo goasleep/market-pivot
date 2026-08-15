@@ -21,6 +21,8 @@ import { Bot, CalendarClock, CheckCircle2, Play, RefreshCw, ShieldAlert } from "
 const DEFAULT_CONFIG: AutomationTaskConfig = {
   enabled: false,
   mode: "observe",
+  execution_mode: "paper",
+  live_armed: false,
   schedule_time: "15:10",
   weekdays: [0, 1, 2, 3, 4],
   universe: [],
@@ -175,9 +177,11 @@ export function AutomationPage() {
           <CardContent className="space-y-4">
             <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={config.enabled} onChange={(e) => setConfig({ ...config, enabled: e.target.checked })} />启用每日自动任务</label>
             <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-2"><Label>运行模式</Label><select className="h-10 w-full rounded-md border bg-background px-3 text-sm" value={config.mode} onChange={(e) => setConfig({ ...config, mode: e.target.value as AutomationTaskConfig["mode"] })}><option value="observe">observe · 只观察</option><option value="confirm">confirm · 记录待确认</option><option value="auto">auto · 自动模拟下单</option></select></div>
+              <div className="space-y-2"><Label>运行模式</Label><select className="h-10 w-full rounded-md border bg-background px-3 text-sm" value={config.mode} onChange={(e) => setConfig({ ...config, mode: e.target.value as AutomationTaskConfig["mode"] })}><option value="observe">observe · 只观察</option><option value="confirm">confirm · 记录待确认</option><option value="auto">auto · 自动下单</option></select></div>
+              <div className="space-y-2"><Label>执行账户</Label><select className="h-10 w-full rounded-md border bg-background px-3 text-sm" value={config.execution_mode} onChange={(e) => setConfig({ ...config, execution_mode: e.target.value as AutomationTaskConfig["execution_mode"], simulation_only: e.target.value !== "live", live_armed: false })}><option value="paper">paper · 模拟盘</option><option value="live">live · 实盘 Adapter</option></select></div>
               <div className="space-y-2"><Label>每日运行时间</Label><Input type="time" value={config.schedule_time} onChange={(e) => setConfig({ ...config, schedule_time: e.target.value })} /></div>
             </div>
+            {config.execution_mode === "live" && <label className="flex items-center gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900"><input type="checkbox" checked={config.live_armed} onChange={(e) => setConfig({ ...config, live_armed: e.target.checked, simulation_only: false })} />确认已配置并审核实盘 Adapter，允许任务提交真实订单</label>}
             <div className="space-y-2"><Label>运行日</Label><div className="flex flex-wrap gap-2">{WEEKDAYS.map((label, index) => <Button key={label} type="button" size="sm" variant={config.weekdays.includes(index) ? "default" : "outline"} onClick={() => setConfig({ ...config, weekdays: config.weekdays.includes(index) ? config.weekdays.filter((day) => day !== index) : [...config.weekdays, index].sort() })}>{label}</Button>)}</div></div>
             <div className="space-y-2"><Label>资产类型</Label><select className="h-10 w-full rounded-md border bg-background px-3 text-sm" value={config.asset_type} onChange={(e) => setConfig({ ...config, asset_type: e.target.value as AssetType })}><option value="stock">股票</option><option value="etf">ETF</option><option value="lof">LOF</option></select></div>
             <div className="space-y-2"><Label>交易标的池（逗号分隔）</Label><Input placeholder={config.asset_type === "stock" ? "000001,600519" : config.asset_type === "etf" ? "510300,159915" : "166009"} value={config.universe.join(",")} onChange={(e) => setConfig({ ...config, universe: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })} /></div>
@@ -186,7 +190,7 @@ export function AutomationPage() {
               <div className="space-y-2"><Label>信号成交</Label><select className="h-10 w-full rounded-md border bg-background px-3 text-sm" value={config.fill_time} onChange={(e) => setConfig({ ...config, fill_time: e.target.value as AutomationTaskConfig["fill_time"] })}><option value="next_open">下一交易日开盘</option><option value="same_close">当日收盘价</option><option value="manual">手动确认</option></select></div>
             </div>
             <div className="grid gap-3 sm:grid-cols-3"><div className="space-y-2"><Label>单日亏损熔断比例</Label><Input type="number" min="0" max="1" step="0.01" value={config.daily_loss_limit_pct} onChange={(e) => setConfig({ ...config, daily_loss_limit_pct: Number(e.target.value) })} /></div><div className="space-y-2"><Label>每次最大股票数</Label><Input type="number" min="1" max="500" value={config.max_symbols_per_run} onChange={(e) => setConfig({ ...config, max_symbols_per_run: Number(e.target.value) })} /></div><div className="space-y-2"><Label>每次最大订单数</Label><Input type="number" min="1" max="200" value={config.max_orders_per_run} onChange={(e) => setConfig({ ...config, max_orders_per_run: Number(e.target.value) })} /></div></div>
-            {autoModeWarning && <div className="flex gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"><ShieldAlert className="h-4 w-4 shrink-0" />auto 只会进入本地模拟账户，不会连接实盘券商。</div>}
+            {autoModeWarning && <div className="flex gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"><ShieldAlert className="h-4 w-4 shrink-0" />{config.execution_mode === "paper" ? "当前任务只会进入本地模拟账户。" : "实盘模式还需要服务端 LIVE_TRADING_ENABLED、账户 Adapter 和 live armed 同时满足。"}</div>}
             <Button onClick={save} disabled={busy} className="w-full">保存自动化配置</Button>
           </CardContent>
         </Card>

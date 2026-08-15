@@ -60,6 +60,15 @@ async def settle_automation(account_id: str, req: SettlementRequest = Settlement
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/accounts/{account_id}/live-sync")
+async def sync_live_account(account_id: str):
+    """Reconcile broker orders and positions for a live execution account."""
+    try:
+        return await automation_service.sync_live_account(account_id)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/accounts/{account_id}/runs")
 async def list_runs(account_id: str, limit: int = 50):
     try:

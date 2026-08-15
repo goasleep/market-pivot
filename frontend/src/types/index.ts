@@ -73,6 +73,7 @@ export interface Portfolio {
   config: SimulationAccountConfig;
   daily_pnl: number;
   broker: SimulationBrokerStatus;
+  live_broker: LiveBrokerStatus;
 }
 
 export interface SimulationSnapshot {
@@ -100,6 +101,15 @@ export interface SimulationBrokerStatus {
   endpoint_configured: boolean;
   message: string;
   requirements: string[];
+}
+
+export interface LiveBrokerStatus {
+  provider: string;
+  enabled: boolean;
+  configured: boolean;
+  can_submit_orders: boolean;
+  state: string;
+  message: string;
 }
 
 export interface SimulationEvent {
@@ -140,6 +150,18 @@ export interface SimulationAccountConfig {
   asset_type: AssetType;
   universe: string[];
   external: ExternalSimulationConfig;
+  live: LiveTradingConfig;
+}
+
+export interface LiveTradingConfig {
+  provider: string;
+  enabled: boolean;
+  account_id: string;
+  endpoint: string;
+  token_set: boolean;
+  token_masked: string;
+  require_manual_approval: boolean;
+  max_order_value: number;
 }
 
 export interface SimulationOrder {
@@ -166,6 +188,8 @@ export type AutomationMode = "observe" | "confirm" | "auto";
 export interface AutomationTaskConfig {
   enabled: boolean;
   mode: AutomationMode;
+  execution_mode: "paper" | "live";
+  live_armed: boolean;
   schedule_time: string;
   weekdays: number[];
   universe: string[];
@@ -176,7 +200,7 @@ export interface AutomationTaskConfig {
   daily_loss_limit_pct: number;
   data_max_age_seconds: number;
   fill_time: "next_open" | "same_close" | "manual";
-  simulation_only: true;
+  simulation_only: boolean;
 }
 
 export interface AutomationTask {

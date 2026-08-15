@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, time
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from loguru import logger
 
 from application.automation_store import automation_store
 from application.research import research_service
+from config import settings
 from data.akshare_provider import async_get_stock_history, async_get_stock_realtime
 from data.trading_calendar import is_trading_day
+from engine.broker_adapters import LiveBrokerUnavailableError, get_live_broker
 from engine.simulation_account import simulation_accounts
 from engine.simulation_events import simulation_events
 from engine.trading_engine import decision_shares
-from models.schemas import AgentRunSummary, AutomationTaskConfig, Decision, TradeDecision
+from models.schemas import AgentRunSummary, AutomationTaskConfig, Decision, LiveOrderIntent, TradeDecision
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -29,7 +32,7 @@ def _today() -> str:
 
 
 class AutomationService:
-    """Run Agent decisions and route approved intents into paper orders."""
+    """Run Agent decisions and route them into paper or live adapters."""
 
     def __init__(self):
         self._locks: dict[str, asyncio.Lock] = {}
@@ -258,7 +261,19 @@ class AutomationService:
         orders_count: int,
         force: bool = False,
     ) -> tuple[str, str | None, str | None]:
-        """Apply mode/risk gates and optionally create a simulation order."""
+        """Apply mode/risk gates and route to paper or live execution."""
+
+        if config.execution_mode == "live":
+            return await self._execute_live_decision(
+                account_id,
+                run_id,
+                decision,
+                price,
+                trade_date,
+                config,
+                orders_count,
+                force,
+            )
 
         if config.mode != "auto" and not force:
             return "approved", "仅记录决策，自动下单未启用", None
@@ -295,6 +310,100 @@ class AutomationService:
             order.order_id,
         )
 
+    async def _execute_live_decision(
+        self,
+        account_id: str,
+        run_id: str,
+        decision: TradeDecision,
+        price: float,
+        trade_date: str,
+        config: AutomationTaskConfig,
+        orders_count: int,
+        force: bool,
+    ) -> tuple[str, str | None, str | None]:
+        """Submit a validated intent to a live broker sidecar.
+
+        The local simulation account is never mutated by a live submission.
+        The service flag, task arming, account configuration, and (by default)
+        explicit confirmation are all required before a request leaves the
+        process.
+        """
+        if config.mode != "auto" and not force:
+            return "approved", "实盘决策已记录，等待人工确认", None
+        if not settings.live_trading_enabled:
+            return "rejected", "服务端 LIVE_TRADING_ENABLED 未开启", None
+        if not config.live_armed:
+            return "rejected", "该自动化任务尚未 armed 实盘执行", None
+        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        live_config = account.config.live
+        if not live_config.enabled:
+            return "rejected", "账户未启用实盘 Adapter", None
+        if live_config.require_manual_approval and not force:
+            return "rejected", "该实盘账户要求人工确认", None
+        if orders_count >= config.max_orders_per_run:
+            return "rejected", "达到本次 Agent 运行的最大订单数", None
+        if config.daily_loss_limit_pct:
+            daily_pnl = await asyncio.to_thread(simulation_accounts.daily_pnl, account_id)
+            if daily_pnl <= -account.portfolio.initial_capital * config.daily_loss_limit_pct:
+                return "rejected", "触发单日亏损限额", None
+        if decision.decision == Decision.HOLD:
+            return "approved", "Agent 建议持有，不生成实盘订单", None
+        if price <= 0:
+            return "rejected", "实盘订单缺少有效参考价格", None
+
+        shares = decision_shares(account.portfolio, account.config, decision, price)
+        if shares <= 0:
+            return "rejected", "按仓位和 A 股最小交易单位计算后无可交易数量", None
+        order_value = shares * price
+        if live_config.max_order_value and order_value > live_config.max_order_value:
+            return "rejected", "超过实盘账户单笔金额上限", None
+
+        client_order_id = f"live-{uuid4().hex[:16]}"
+        intent = LiveOrderIntent(
+            client_order_id=client_order_id,
+            account_id=live_config.account_id or account_id,
+            ticker=decision.ticker,
+            asset_type=decision.asset_type,
+            side=decision.decision,
+            shares=shares,
+            order_type="market",
+            submitted_date=trade_date,
+            fill_policy=config.fill_time,
+        )
+        try:
+            broker = get_live_broker(live_config)
+            result = await asyncio.to_thread(broker.submit_order, intent)
+        except LiveBrokerUnavailableError as exc:
+            return "rejected", str(exc), None
+        except Exception as exc:  # A network failure may occur after broker acceptance.
+            logger.exception("Live broker submission outcome is unknown for {}", client_order_id)
+            return "pending", f"实盘提交结果未知，需要对账：{exc}", client_order_id
+
+        order_id = result.broker_order_id or result.client_order_id
+        if result.status == "rejected":
+            return "rejected", result.message or "券商拒绝订单", order_id
+        if result.status == "unknown":
+            return "pending", result.message or "券商返回未知状态，需要对账", order_id
+        try:
+            snapshot = await asyncio.to_thread(broker.sync)
+            self._apply_live_snapshot(account_id, snapshot)
+        except Exception:
+            logger.warning("Live broker accepted {} but snapshot sync is unavailable", order_id)
+        return "approved", result.message or f"实盘订单已提交：{result.status}", order_id
+
+    @staticmethod
+    def _apply_live_snapshot(account_id: str, payload: dict) -> bool:
+        """Apply only an explicit cash/positions snapshot from the broker."""
+        if not isinstance(payload, dict) or "cash" not in payload or "positions" not in payload:
+            return False
+        simulation_accounts.apply_live_snapshot(
+            account_id,
+            float(payload["cash"]),
+            list(payload["positions"]),
+            payload.get("as_of") or payload.get("date"),
+        )
+        return True
+
     async def confirm_decision(
         self,
         account_id: str,
@@ -326,7 +435,7 @@ class AutomationService:
             0,
             True,
         )
-        if order_id and config.fill_time == "manual":
+        if order_id and config.execution_mode != "live" and config.fill_time == "manual":
             filled_order = await asyncio.to_thread(
                 simulation_accounts.fill_order,
                 order_id,
@@ -354,8 +463,31 @@ class AutomationService:
         prices: dict[str, float] | None = None,
         open_prices: dict[str, float] | None = None,
     ) -> dict:
+        task = await asyncio.to_thread(automation_store.get_task, account_id)
+        if task["config"].execution_mode == "live":
+            return await self.sync_live_account(account_id)
         async with self._lock_for(account_id):
             return await self._settle_account(account_id, settlement_date, prices, open_prices)
+
+    async def sync_live_account(self, account_id: str) -> dict:
+        """Reconcile live broker state without applying paper fills locally."""
+        task = await asyncio.to_thread(automation_store.get_task, account_id)
+        config: AutomationTaskConfig = task["config"]
+        if config.execution_mode != "live":
+            raise ValueError("该账户当前不是实盘执行模式")
+        if not settings.live_trading_enabled:
+            raise ValueError("服务端 LIVE_TRADING_ENABLED 未开启")
+        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        try:
+            broker = get_live_broker(account.config.live)
+            payload = await asyncio.to_thread(broker.sync)
+        except LiveBrokerUnavailableError as exc:
+            raise ValueError(str(exc)) from exc
+        mirrored = await asyncio.to_thread(self._apply_live_snapshot, account_id, payload)
+        payload = {**payload, "portfolio_mirrored": mirrored}
+        await asyncio.to_thread(automation_store.add_event, account_id, "live.sync", payload)
+        await simulation_events.publish(account_id, "live.sync", payload)
+        return {"account_id": account_id, "mode": "live", "sync": payload}
 
     async def _settle_account(
         self,

@@ -1,10 +1,12 @@
 import asyncio
 
+import pytest
+
 from application import automation as automation_module
 from application.automation import AutomationService
 from application.automation_store import AutomationStore
 from engine.simulation_account import SimulationAccountService
-from models.schemas import AutomationTaskConfig, Decision, SimulationAccountConfig, TradeDecision
+from models.schemas import AutomationTaskConfig, Decision, LiveTradingConfig, SimulationAccountConfig, TradeDecision
 
 
 async def _fake_run(_ticker: str, _strategy: str | None = None):
@@ -112,3 +114,51 @@ def test_store_recovers_stale_run_without_locking_database(tmp_path):
     store.claim_run(created.run_id, symbols_total=1)
     assert store.recover_stale_runs(max_age_minutes=0) == 1
     assert store.get_run(created.run_id).status == "failed"
+
+
+def test_live_mode_requires_explicit_non_simulation_config():
+    with pytest.raises(ValueError, match="simulation_only=false"):
+        AutomationTaskConfig(execution_mode="live")
+
+
+def test_live_mode_fails_closed_when_service_gate_is_disabled(monkeypatch, tmp_path):
+    db_path = tmp_path / "live-gate.sqlite3"
+    accounts = SimulationAccountService(db_path)
+    store = AutomationStore(db_path)
+    accounts.update_config(
+        "default",
+        SimulationAccountConfig(
+            initial_cash=100_000,
+            max_single_position_pct=0.5,
+            universe=["000001"],
+            live=LiveTradingConfig(
+                provider="custom_http",
+                enabled=True,
+                endpoint="http://broker-sidecar",
+                account_id="live-1",
+            ),
+        ),
+    )
+    monkeypatch.setattr(automation_module, "simulation_accounts", accounts)
+    monkeypatch.setattr(automation_module, "automation_store", store)
+    monkeypatch.setattr(automation_module.settings, "live_trading_enabled", False)
+    monkeypatch.setattr(automation_module.research_service, "run", _fake_run)
+
+    config = AutomationTaskConfig(
+        enabled=True,
+        mode="auto",
+        execution_mode="live",
+        live_armed=True,
+        simulation_only=False,
+        universe=["000001"],
+    )
+    store.update_task("default", config=config)
+    service = AutomationService()
+
+    summary = asyncio.run(service.run_account("default", run_date="2026-08-03"))
+    assert summary.status == "completed"
+    assert summary.orders_count == 0
+    decision = store.list_decisions("default", summary.run_id)[0]
+    assert decision.risk_status == "rejected"
+    assert "LIVE_TRADING_ENABLED" in (decision.risk_reason or "")
+    assert accounts.list_orders("default") == []

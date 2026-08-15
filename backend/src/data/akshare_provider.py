@@ -644,6 +644,72 @@ def get_fund_history(
         return pd.DataFrame()
 
 
+def get_asset_spot(asset_type: str = "stock", limit: int = 1000) -> list[dict]:
+    """Get a cached realtime universe snapshot for screening.
+
+    This deliberately fetches one market-wide snapshot instead of requesting
+    one quote per symbol, which keeps screening within AkShare rate limits.
+    """
+    if asset_type not in {"stock", "etf", "lof"}:
+        raise ValueError("asset_type must be stock, etf, or lof")
+    cache_key = f"spot_universe:{asset_type}"
+    cached = _cache.get(cache_key, ttl=TTL_REALTIME)
+    if cached is not None:
+        return cached[:limit]
+    fail_key = f"fail:{cache_key}"
+    if _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
+        return []
+
+    endpoint_name = {
+        "stock": "stock_zh_a_spot_em",
+        "etf": "fund_etf_spot_em",
+        "lof": "fund_lof_spot_em",
+    }[asset_type]
+    breaker = _breakers["realtime"]
+
+    def _fetch():
+        import akshare as ak
+
+        return getattr(ak, endpoint_name)()
+
+    def _number(row, *names):
+        for name in names:
+            value = row.get(name)
+            if value is not None and not pd.isna(value):
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
+
+    try:
+        df = _retry_with_backoff(_fetch, breaker, f"spot_universe:{asset_type}")
+        records = []
+        for _, row in df.iterrows():
+            ticker = str(row.get("代码", "")).zfill(6)
+            if len(ticker) != 6:
+                continue
+            records.append(
+                {
+                    "ticker": ticker,
+                    "asset_type": asset_type,
+                    "name": str(row.get("名称", "")),
+                    "price": _number(row, "最新价", "收盘价"),
+                    "pct_chg": _number(row, "涨跌幅"),
+                    "amount": _number(row, "成交额"),
+                    "volume": _number(row, "成交量"),
+                    "turnover": _number(row, "换手率"),
+                    "total_mv": _number(row, "总市值"),
+                }
+            )
+        _cache.set(cache_key, records)
+        return records[:limit]
+    except Exception as exc:
+        logger.error(f"Failed to fetch {asset_type} spot universe: {exc}")
+        _cache.set(fail_key, {"error": str(exc)})
+        return []
+
+
 def get_breaker_status() -> dict[str, str]:
     """Get status of all circuit breakers (for monitoring API)."""
     return {name: breaker.state for name, breaker in _breakers.items()}
@@ -678,3 +744,7 @@ async def async_get_fund_realtime(*args, **kwargs) -> dict:
 
 async def async_get_fund_history(*args, **kwargs) -> pd.DataFrame:
     return await asyncio.to_thread(get_fund_history, *args, **kwargs)
+
+
+async def async_get_asset_spot(*args, **kwargs) -> list[dict]:
+    return await asyncio.to_thread(get_asset_spot, *args, **kwargs)

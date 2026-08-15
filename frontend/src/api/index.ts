@@ -6,6 +6,7 @@ import type {
   SimulationAccountConfig,
   SimulationOrder,
   SimulationBrokerStatus,
+  LiveBrokerStatus,
   SimulationEvent,
   AutomationTask,
   AutomationTaskConfig,
@@ -179,6 +180,27 @@ export async function validateSimulationBroker(accountId = "default"): Promise<S
   return res.json();
 }
 
+export async function updateLiveTradingConfig(
+  accountId: string,
+  config: Record<string, unknown>
+): Promise<Portfolio> {
+  const res = await fetch(`${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/live`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Failed to update live trading config: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function getLiveBrokerStatus(accountId = "default"): Promise<LiveBrokerStatus> {
+  const portfolio = await getPortfolio(accountId);
+  return portfolio.live_broker;
+}
+
 export function openSimulationStream(
   accountId: string,
   onEvent: (event: SimulationEvent) => void,
@@ -272,6 +294,12 @@ export function settleAutomation(
   return automationRequest(`/accounts/${encodeURIComponent(accountId)}/settle`, {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function syncLiveAccount(accountId = "default"): Promise<Record<string, unknown>> {
+  return automationRequest(`/accounts/${encodeURIComponent(accountId)}/live-sync`, {
+    method: "POST",
   });
 }
 

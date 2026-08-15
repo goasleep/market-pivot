@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Decision(str, Enum):
@@ -284,6 +284,49 @@ class ExternalSimulationConfig(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
 
 
+class LiveTradingConfig(BaseModel):
+    """Explicit configuration for a live broker adapter.
+
+    Live execution is deliberately opt-in at both the service and account
+    levels.  ``provider=none`` is the safe default and no credentials are
+    returned by API payloads.
+    """
+
+    provider: str = "none"
+    enabled: bool = False
+    account_id: str = ""
+    endpoint: str = ""
+    token: str = ""
+    require_manual_approval: bool = True
+    max_order_value: float = Field(default=0.0, ge=0)
+
+
+class LiveOrderIntent(BaseModel):
+    """Provider-neutral order request sent after Agent/risk approval."""
+
+    client_order_id: str
+    account_id: str
+    ticker: str
+    asset_type: AssetType = AssetType.STOCK
+    side: Decision
+    shares: int = Field(gt=0)
+    order_type: Literal["market", "limit"] = "market"
+    limit_price: float | None = Field(default=None, gt=0)
+    submitted_date: str
+    fill_policy: Literal["next_open", "same_close", "manual"] = "next_open"
+
+
+class LiveOrderResult(BaseModel):
+    """Normalized result returned by a live broker adapter."""
+
+    client_order_id: str
+    broker_order_id: str | None = None
+    status: Literal["submitted", "filled", "rejected", "cancelled", "unknown"]
+    message: str = ""
+    filled_shares: int = 0
+    fill_price: float | None = None
+
+
 class SimulationAccountConfig(BaseModel):
     """User-configurable rules for a daily A-share simulation account."""
 
@@ -306,6 +349,7 @@ class SimulationAccountConfig(BaseModel):
     asset_type: AssetType = AssetType.STOCK
     universe: list[str] = Field(default_factory=list)
     external: ExternalSimulationConfig = Field(default_factory=ExternalSimulationConfig)
+    live: LiveTradingConfig = Field(default_factory=LiveTradingConfig)
 
 
 class SimulationAccount(BaseModel):
@@ -354,13 +398,14 @@ class SimulationSnapshot(BaseModel):
 class AutomationTaskConfig(BaseModel):
     """Persistent configuration for an unattended daily Agent task.
 
-    ``simulation_only`` is deliberately fixed to true.  The automation layer
-    can create internal paper orders, but it never turns this task into a live
-    trading connection.
+    Paper mode remains the default.  Live mode requires an independent service
+    feature flag, account-level broker configuration, and ``live_armed``.
     """
 
     enabled: bool = False
     mode: Literal["observe", "confirm", "auto"] = "observe"
+    execution_mode: Literal["paper", "live"] = "paper"
+    live_armed: bool = False
     schedule_time: str = "15:10"
     weekdays: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
     universe: list[str] = Field(default_factory=list)
@@ -371,7 +416,7 @@ class AutomationTaskConfig(BaseModel):
     daily_loss_limit_pct: float = Field(default=0.03, ge=0, le=1)
     data_max_age_seconds: int = Field(default=86400, ge=0)
     fill_time: Literal["next_open", "same_close", "manual"] = "next_open"
-    simulation_only: Literal[True] = True
+    simulation_only: bool = True
 
     @field_validator("schedule_time")
     @classmethod
@@ -390,6 +435,12 @@ class AutomationTaskConfig(BaseModel):
         if any(day < 0 or day > 4 for day in value):
             raise ValueError("weekdays 只能包含 0 到 4")
         return sorted(set(value))
+
+    @model_validator(mode="after")
+    def validate_live_mode(self):
+        if self.execution_mode == "live" and self.simulation_only:
+            raise ValueError("实盘模式必须明确设置 simulation_only=false")
+        return self
 
 
 class AgentRunSummary(BaseModel):

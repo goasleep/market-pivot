@@ -5,7 +5,16 @@ import platform
 import sys
 from typing import Any, Protocol
 
-from models.schemas import ExternalSimulationConfig, SimulationOrder
+import httpx
+
+from config import settings
+from models.schemas import (
+    ExternalSimulationConfig,
+    LiveOrderIntent,
+    LiveOrderResult,
+    LiveTradingConfig,
+    SimulationOrder,
+)
 
 
 class SimulationBroker(Protocol):
@@ -19,6 +28,156 @@ class SimulationBroker(Protocol):
 
     def sync(self) -> dict:
         ...
+
+
+class LiveBroker(Protocol):
+    """Provider-neutral contract for a reviewed live trading gateway."""
+
+    def submit_order(self, intent: LiveOrderIntent) -> LiveOrderResult:
+        ...
+
+    def cancel_order(self, broker_order_id: str) -> LiveOrderResult:
+        ...
+
+    def sync(self) -> dict[str, Any]:
+        ...
+
+
+class LiveBrokerUnavailableError(RuntimeError):
+    """Raised when live execution is not configured or implemented."""
+
+
+class CustomHttpLiveBroker:
+    """Adapter for a user-managed broker sidecar.
+
+    The sidecar contract is intentionally small and provider-neutral:
+
+    - ``POST /orders`` receives a serialized :class:`LiveOrderIntent` and
+      returns ``{broker_order_id, status, message, filled_shares, fill_price}``.
+    - ``DELETE /orders/{broker_order_id}`` cancels an order.
+    - ``GET /sync?account_id=...`` returns provider reconciliation data.
+
+    This adapter never becomes active unless the service-level safety gate,
+    account configuration, and automation-level live arming are all enabled.
+    """
+
+    provider = "custom_http"
+
+    def __init__(self, config: LiveTradingConfig):
+        if not config.endpoint.strip():
+            raise LiveBrokerUnavailableError("custom_http 实盘 Adapter 缺少 endpoint")
+        if not config.account_id.strip():
+            raise LiveBrokerUnavailableError("custom_http 实盘 Adapter 缺少 account_id")
+        self.config = config
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if config.token:
+            headers["Authorization"] = f"Bearer {config.token}"
+        self.client = httpx.Client(
+            base_url=config.endpoint.rstrip("/"),
+            headers=headers,
+            timeout=10.0,
+        )
+
+    def submit_order(self, intent: LiveOrderIntent) -> LiveOrderResult:
+        response = self.client.post("/orders", json=intent.model_dump(mode="json"))
+        response.raise_for_status()
+        payload = response.json()
+        return LiveOrderResult(
+            client_order_id=intent.client_order_id,
+            broker_order_id=payload.get("broker_order_id") or payload.get("order_id"),
+            status=payload.get("status", "unknown"),
+            message=payload.get("message", ""),
+            filled_shares=int(payload.get("filled_shares", 0) or 0),
+            fill_price=payload.get("fill_price"),
+        )
+
+    def cancel_order(self, broker_order_id: str) -> LiveOrderResult:
+        response = self.client.delete(f"/orders/{broker_order_id}")
+        response.raise_for_status()
+        payload = response.json()
+        return LiveOrderResult(
+            client_order_id=payload.get("client_order_id", ""),
+            broker_order_id=broker_order_id,
+            status=payload.get("status", "cancelled"),
+            message=payload.get("message", ""),
+        )
+
+    def sync(self) -> dict[str, Any]:
+        response = self.client.get("/sync", params={"account_id": self.config.account_id})
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {"data": payload}
+
+    def close(self) -> None:
+        self.client.close()
+
+
+class FailClosedLiveBroker:
+    """Default live broker that refuses every order."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    def _raise(self) -> None:
+        raise LiveBrokerUnavailableError(self.reason)
+
+    def submit_order(self, intent: LiveOrderIntent) -> LiveOrderResult:
+        self._raise()
+
+    def cancel_order(self, broker_order_id: str) -> LiveOrderResult:
+        self._raise()
+
+    def sync(self) -> dict[str, Any]:
+        self._raise()
+
+
+def get_live_broker(config: LiveTradingConfig) -> LiveBroker:
+    """Build the configured live broker, failing closed for unknown providers."""
+    if not config.enabled:
+        return FailClosedLiveBroker("实盘账户未启用")
+    if config.provider == "custom_http":
+        return CustomHttpLiveBroker(config)
+    return FailClosedLiveBroker(f"实盘 Adapter 尚未实现: {config.provider}")
+
+
+def live_broker_status(config: LiveTradingConfig) -> dict[str, Any]:
+    """Return safe, non-secret readiness information for the live adapter."""
+    if not config.enabled:
+        return {
+            "provider": config.provider,
+            "enabled": False,
+            "configured": False,
+            "service_gate": settings.live_trading_enabled,
+            "can_submit_orders": False,
+            "state": "disabled",
+            "message": "实盘账户未启用",
+        }
+    if config.provider != "custom_http":
+        return {
+            "provider": config.provider,
+            "enabled": True,
+            "configured": False,
+            "service_gate": settings.live_trading_enabled,
+            "can_submit_orders": False,
+            "state": "not_implemented",
+            "message": f"实盘 Adapter 尚未实现: {config.provider}",
+        }
+    configured = bool(config.endpoint.strip() and config.account_id.strip())
+    return {
+        "provider": config.provider,
+        "enabled": True,
+        "configured": configured,
+        "service_gate": settings.live_trading_enabled,
+        "can_submit_orders": configured and settings.live_trading_enabled,
+        "state": "ready" if configured else "not_configured",
+        "message": (
+            "custom_http 实盘网关配置就绪"
+            if configured and settings.live_trading_enabled
+            else "请配置 endpoint 和 account_id"
+            if not configured
+            else "Adapter 已配置，但服务端 LIVE_TRADING_ENABLED 未开启"
+        ),
+    }
 
 
 class ExternalSimulationBroker:

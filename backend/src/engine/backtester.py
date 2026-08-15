@@ -23,6 +23,7 @@ from data.market_context import build_market_context
 from engine.trading_engine import TimeAwareTradingEngine, decision_shares
 from graph.workflow import workflow
 from models.schemas import AssetType, Decision, SimulationAccountConfig
+from observability import build_trace_config
 
 
 async def run_backtest(
@@ -139,7 +140,26 @@ async def run_backtest(
                     "market_context": context,
                     "progress": [],
                 }
-                result = await workflow.ainvoke(state)
+                run_config = build_trace_config(
+                    "backtest-agent-analysis",
+                    tags=["backtest", "agent"],
+                    metadata={
+                        "ticker": ticker,
+                        "asset_type": asset_type.value,
+                        "as_of_date": current_date,
+                        "strategy": strategy_name or "auto",
+                    },
+                )
+                invoke_options = {"config": run_config} if run_config.get("callbacks") else {}
+                try:
+                    result = await workflow.ainvoke(state, **invoke_options)
+                except TypeError as exc:
+                    # Keep simple workflow test doubles compatible with the
+                    # optional tracing config without masking other errors.
+                    if invoke_options and "unexpected keyword argument 'config'" in str(exc):
+                        result = await workflow.ainvoke(state)
+                    else:
+                        raise
                 decision = result.get("final_decision")
 
                 if decision and decision.decision != Decision.HOLD:
@@ -284,18 +304,34 @@ async def run_pool_backtest(
                         history_df=history_until_day,
                         include_live_enrichment=False,
                     )
-                    result = await workflow.ainvoke(
-                        {
+                    state = {
+                        "ticker": symbol,
+                        "asset_type": asset_type.value,
+                        "current_price": current_price,
+                        "as_of_date": current_date,
+                        "is_backtest": True,
+                        "strategy_name": strategy_name,
+                        "market_context": context,
+                        "progress": [],
+                    }
+                    run_config = build_trace_config(
+                        "backtest-agent-analysis",
+                        tags=["backtest", "agent", "pool"],
+                        metadata={
                             "ticker": symbol,
                             "asset_type": asset_type.value,
-                            "current_price": current_price,
                             "as_of_date": current_date,
-                            "is_backtest": True,
-                            "strategy_name": strategy_name,
-                            "market_context": context,
-                            "progress": [],
-                        }
+                            "strategy": strategy_name or "auto",
+                        },
                     )
+                    invoke_options = {"config": run_config} if run_config.get("callbacks") else {}
+                    try:
+                        result = await workflow.ainvoke(state, **invoke_options)
+                    except TypeError as exc:
+                        if invoke_options and "unexpected keyword argument 'config'" in str(exc):
+                            result = await workflow.ainvoke(state)
+                        else:
+                            raise
                     decision = result.get("final_decision")
                     if decision and decision.decision != Decision.HOLD:
                         if fill_time == "same_close":
