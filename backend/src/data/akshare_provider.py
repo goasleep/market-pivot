@@ -181,6 +181,7 @@ BACKOFF_BASE = 1.0  # base sleep seconds for exponential backoff
 BACKOFF_MAX = 10.0
 RANDOM_SLEEP_MIN = 0.3
 RANDOM_SLEEP_MAX = 1.5
+UPSTREAM_TIMEOUT_SECONDS = 12.0
 
 
 def _random_sleep():
@@ -290,13 +291,33 @@ def get_stock_history(
     def _fetch():
         import akshare as ak
 
-        return ak.stock_zh_a_hist(
-            symbol=ticker,
-            period="daily",
-            start_date=start_date,
-            end_date=end_date,
-            adjust=adjust,
-        )
+        try:
+            return ak.stock_zh_a_hist(
+                symbol=ticker,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+                timeout=UPSTREAM_TIMEOUT_SECONDS,
+            )
+        except Exception as primary_exc:
+            # Eastmoney occasionally closes the connection before returning a
+            # response. AkShare also exposes Tencent's historical endpoint;
+            # use it as a bounded fallback before marking the data missing.
+            market = "sh" if ticker.startswith(("5", "6", "9")) else "sz"
+            logger.warning(
+                f"History primary source failed for {ticker}, trying Tencent fallback: {primary_exc}"
+            )
+            try:
+                return ak.stock_zh_a_hist_tx(
+                    symbol=f"{market}{ticker}",
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust=adjust,
+                    timeout=UPSTREAM_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                raise primary_exc
 
     try:
         df = _retry_with_backoff(_fetch, breaker, f"history:{ticker}")
