@@ -81,14 +81,19 @@ async def search_web_ddgs(query: str, num_results: int = 8, freshness: str | Non
 async def compare_quotes(tickers: list[str], asset_type: str = "stock") -> str:
     """获取多个股票、ETF或LOF的实时行情，用于行情层面对比。"""
     kind = AssetType(asset_type)
+    requested = tickers[:10]
+    # Both the stock and fund realtime adapters fetch a whole-market snapshot
+    # for one code. Fetch that snapshot once for comparison instead of making
+    # the same expensive upstream request once per ticker.
+    snapshot = await async_get_asset_spot(kind.value, limit=5000)
+    by_ticker = {str(item.get("ticker", "")).zfill(6): item for item in snapshot}
     quotes = []
-    for ticker in tickers[:10]:
-        quote = (
-            await async_get_stock_realtime(ticker)
-            if kind == AssetType.STOCK
-            else await async_get_fund_realtime(ticker, asset_type=kind.value)
-        )
-        quotes.append({"ticker": ticker, "quote": quote})
+    for ticker in requested:
+        normalized = str(ticker).strip().lower()
+        if normalized.startswith(("sh", "sz")):
+            normalized = normalized[2:]
+        normalized = normalized.zfill(6)
+        quotes.append({"ticker": ticker, "quote": by_ticker.get(normalized, {})})
     return _dump({"asset_type": kind.value, "quotes": quotes})
 
 

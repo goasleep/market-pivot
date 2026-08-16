@@ -97,6 +97,28 @@ def test_ddgs_search_tool_maps_freshness(monkeypatch):
     assert captured == {"query": "510300 公告", "num_results": 3, "timelimit": "m"}
 
 
+def test_compare_quotes_uses_one_market_snapshot(monkeypatch):
+    calls = []
+
+    async def fake_snapshot(asset_type, *, limit=1000):
+        calls.append({"asset_type": asset_type, "limit": limit})
+        return [
+            {"ticker": "600519", "name": "贵州茅台", "price": 1500},
+            {"ticker": "000001", "name": "平安银行", "price": 10},
+        ]
+
+    monkeypatch.setattr(chat_tools, "async_get_asset_spot", fake_snapshot)
+    result = asyncio.run(
+        chat_tools.compare_quotes.ainvoke(
+            {"tickers": ["sh600519", "000001"], "asset_type": "stock"}
+        )
+    )
+
+    payload = json.loads(result)
+    assert calls == [{"asset_type": "stock", "limit": 5000}]
+    assert [item["quote"]["name"] for item in payload["quotes"]] == ["贵州茅台", "平安银行"]
+
+
 def test_parallel_search_merges_serper_and_ddgs_results(monkeypatch):
     monkeypatch.setattr(serper_provider.settings, "serper_api_key", "configured")
 
