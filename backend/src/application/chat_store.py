@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from loguru import logger
 from tortoise import Tortoise
 from tortoise.transactions import in_transaction
 
@@ -56,6 +57,7 @@ class ChatStore:
         else:
             self.db_url = settings.chat_database_url
         self._initialized = False
+        self._sqlite_fts5_enabled = False
 
     async def init(self) -> None:
         if self._initialized:
@@ -72,6 +74,7 @@ class ChatStore:
         )
         await Tortoise.generate_schemas(safe=True)
         await self._ensure_legacy_tables()
+        await self._ensure_search_indexes()
         await self._recover_interrupted_tasks()
         await self._rebuild_search_index()
         self._active_db_url = self.db_url
@@ -82,6 +85,7 @@ class ChatStore:
             await Tortoise.close_connections()
         self._active_db_url = None
         self._initialized = False
+        self._sqlite_fts5_enabled = False
 
     async def _ensure_ready(self) -> None:
         if not self._initialized:
@@ -128,6 +132,47 @@ class ChatStore:
             status="interrupted", updated_at=timestamp
         )
 
+    async def _ensure_search_indexes(self) -> None:
+        connection = Tortoise.get_connection("default")
+        dialect = connection.capabilities.dialect
+        if dialect == "sqlite":
+            try:
+                await connection.execute_script(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS chat_message_search_fts
+                    USING fts5(message_id UNINDEXED, conversation_id UNINDEXED, content, tokenize='trigram');
+                    """
+                )
+                self._sqlite_fts5_enabled = True
+            except Exception as exc:
+                logger.warning("SQLite FTS5 is unavailable; falling back to ORM content search: {}", exc)
+        elif dialect == "postgres":
+            try:
+                await connection.execute_script(
+                    """
+                    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+                    CREATE INDEX IF NOT EXISTS idx_chat_message_search_content_trgm
+                        ON chat_message_search USING gin (content gin_trgm_ops);
+                    CREATE INDEX IF NOT EXISTS idx_chat_conversations_title_trgm
+                        ON chat_conversations USING gin (title gin_trgm_ops);
+                    """
+                )
+            except Exception as exc:
+                logger.warning(
+                    "PostgreSQL trigram indexes are unavailable; falling back to ORM content search: {}", exc
+                )
+
+    async def _sync_sqlite_fts(self, message_id: str, conversation_id: str, content: str, connection=None) -> None:
+        if not self._sqlite_fts5_enabled:
+            return
+        db = connection or Tortoise.get_connection("default")
+        await db.execute_query("DELETE FROM chat_message_search_fts WHERE message_id = ?", [message_id])
+        if content:
+            await db.execute_query(
+                "INSERT INTO chat_message_search_fts(message_id, conversation_id, content) VALUES (?, ?, ?)",
+                [message_id, conversation_id, content],
+            )
+
     async def _rebuild_search_index(self) -> None:
         await ChatMessageSearch.all().delete()
         messages = await ChatMessage.all().values("message_id", "conversation_id", "parts_json")
@@ -145,6 +190,14 @@ class ChatStore:
                 )
         if entries:
             await ChatMessageSearch.bulk_create(entries)
+        if self._sqlite_fts5_enabled:
+            connection = Tortoise.get_connection("default")
+            await connection.execute_query("DELETE FROM chat_message_search_fts")
+            if entries:
+                await connection.execute_many(
+                    "INSERT INTO chat_message_search_fts(message_id, conversation_id, content) VALUES (?, ?, ?)",
+                    [(entry.message_id, entry.conversation_id, entry.content) for entry in entries],
+                )
 
     @staticmethod
     def _parts(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -182,6 +235,7 @@ class ChatStore:
         if connection is not None:
             query = query.using_db(connection)
         await query.delete()
+        await self._sync_sqlite_fts(message_id, conversation_id, content, connection)
         if content:
             await ChatMessageSearch.create(
                 message_id=message_id,
@@ -492,11 +546,19 @@ class ChatStore:
         conversations = ChatConversation.all()
         if query and query.strip():
             needle = query.strip()
-            content_ids = await (
-                ChatMessageSearch.filter(content__icontains=needle)
-                .distinct()
-                .values_list("conversation_id", flat=True)
-            )
+            if self._sqlite_fts5_enabled and len(needle) >= 3:
+                connection = Tortoise.get_connection("default")
+                rows = await connection.execute_query_dict(
+                    "SELECT DISTINCT conversation_id FROM chat_message_search_fts WHERE content MATCH ?",
+                    [needle],
+                )
+                content_ids = [row["conversation_id"] for row in rows]
+            else:
+                content_ids = await (
+                    ChatMessageSearch.filter(content__icontains=needle)
+                    .distinct()
+                    .values_list("conversation_id", flat=True)
+                )
             title_ids = await ChatConversation.filter(title__icontains=needle).values_list(
                 "conversation_id", flat=True
             )
