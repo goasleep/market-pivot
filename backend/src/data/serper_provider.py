@@ -15,6 +15,7 @@ from config import settings
 from data.akshare_provider import DataCache
 from data.anysearch_provider import async_search_web_anysearch
 from data.ddgs_provider import async_search_web_ddgs
+from data.source_registry import data_sources, utc_now
 
 _cache = DataCache(settings.database_file_path)
 _CACHE_TTL_SECONDS = 15 * 60
@@ -125,6 +126,7 @@ async def async_search_web_parallel(
 
     merged: list[dict[str, Any]] = []
     providers: list[str] = []
+    source_ids: list[str] = []
     errors: list[str] = []
     seen: set[str] = set()
     for response in responses:
@@ -134,6 +136,10 @@ async def async_search_web_parallel(
         if response.get("available"):
             source = str(response.get("source", "web search"))
             providers.append(source)
+            try:
+                source_ids.append(data_sources.get(source).source_id)
+            except ValueError:
+                pass
         else:
             error = response.get("error")
             if error:
@@ -149,6 +155,8 @@ async def async_search_web_parallel(
         "query": query,
         "results": merged[: max(1, min(int(num_results), 10))],
         "providers": providers,
+        "source_ids": list(dict.fromkeys(source_ids)),
         "source": " + ".join(providers) if providers else "",
+        "searched_at": utc_now(),
         "errors": errors,
     }

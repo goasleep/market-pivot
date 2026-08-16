@@ -8,6 +8,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
+from data.source_registry import provenance
 from engine.simulation_account import simulation_accounts
 from models.schemas import AssetType, Decision
 
@@ -36,7 +37,14 @@ def _simulation_summary(account: Any) -> dict[str, Any]:
 async def get_simulation_portfolio(account_id: str = "default") -> str:
     """查询纸面交易模拟盘账户、现金、持仓和收益；绝不连接实盘。"""
     account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
-    return _dump({"ok": True, "paper_trading": True, "portfolio": _simulation_summary(account)})
+    return _dump(
+        {
+            "ok": True,
+            "paper_trading": True,
+            "portfolio": _simulation_summary(account),
+            "provenance": provenance("paper_trading_db", freshness="local_state"),
+        }
+    )
 
 
 @tool
@@ -49,6 +57,7 @@ async def get_simulation_orders(account_id: str = "default") -> str:
             "paper_trading": True,
             "account_id": account_id,
             "orders": [order.model_dump(mode="json") for order in orders[:50]],
+            "provenance": provenance("paper_trading_db", freshness="local_state"),
         }
     )
 
@@ -84,6 +93,7 @@ async def submit_simulation_order(
             "paper_trading": True,
             "message": "已创建待成交模拟盘订单",
             "order": order.model_dump(mode="json"),
+            "provenance": provenance("paper_trading_db", freshness="local_state"),
         }
     )
 
@@ -92,7 +102,14 @@ async def submit_simulation_order(
 async def cancel_simulation_order(order_id: str) -> str:
     """取消一笔尚未成交的纸面交易订单；绝不操作实盘。"""
     order = await asyncio.to_thread(simulation_accounts.cancel_order, order_id)
-    return _dump({"ok": True, "paper_trading": True, "order": order.model_dump(mode="json")})
+    return _dump(
+        {
+            "ok": True,
+            "paper_trading": True,
+            "order": order.model_dump(mode="json"),
+            "provenance": provenance("paper_trading_db", freshness="local_state"),
+        }
+    )
 
 
 TOOLS = [get_simulation_portfolio, get_simulation_orders, submit_simulation_order, cancel_simulation_order]

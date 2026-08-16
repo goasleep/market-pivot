@@ -13,6 +13,7 @@ from data.fund_provider import (
     async_get_fund_realtime,
 )
 from data.serper_provider import async_search_web_parallel
+from data.source_registry import provenance_for_labels
 from data.stock_provider import (
     async_get_financial_data,
     async_get_stock_history,
@@ -177,6 +178,11 @@ async def build_market_context(
                 "latest_history_date": records[-1].get("date", "") if records else "",
                 "fund_nav": False,
                 "fund_metrics": bool(asset_type != AssetType.STOCK and records),
+                "provenance": provenance_for_labels(
+                    ["akshare"],
+                    as_of=as_of_date or (records[-1].get("date") if records else None),
+                    freshness="historical",
+                ),
             },
         )
 
@@ -229,5 +235,10 @@ async def build_market_context(
             "fund_nav": bool(nav_history) if asset_type != AssetType.STOCK else False,
             "fund_metrics": bool(asset_type != AssetType.STOCK and records),
             "source": "AkShare / 东方财富" if asset_type != AssetType.STOCK else "AkShare",
+            "provenance": provenance_for_labels(
+                ["akshare", *web_search.get("providers", [])],
+                as_of=as_of_date,
+                freshness="historical" if is_backtest else "latest_available",
+            ),
         },
     )

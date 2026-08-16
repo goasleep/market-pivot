@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 from data.anysearch_provider import async_search_web_anysearch
 from data.ddgs_provider import async_search_web_ddgs
 from data.serper_provider import async_search_web_parallel
+from data.source_registry import provenance, provenance_for_labels
 from data.stock_provider import async_get_stock_news
 from data.web_content import async_enrich_web_results
 from models.schemas import AssetType
@@ -26,7 +27,17 @@ async def search_web(query: str, num_results: int = 8, freshness: str | None = N
     if freshness not in allowed_freshness:
         freshness = None
     result = await async_search_web_parallel(query, num_results=num_results, tbs=freshness)
-    return _dump({"data_type": "news", **result})
+    return _dump(
+        {
+            "data_type": "news",
+            **result,
+            "provenance": provenance_for_labels(
+                result.get("providers", []),
+                fetched_at=result.get("searched_at"),
+                freshness=freshness or "latest_available",
+            ),
+        }
+    )
 
 
 @tool
@@ -34,7 +45,19 @@ async def fetch_web_content(url: str) -> str:
     """抓取一个安全的网页正文并返回清洗后的可引用文本。"""
     results = await async_enrich_web_results([{"link": url}], limit=1)
     result = results[0] if results else {"link": url, "content_status": "unavailable"}
-    return _dump({"data_type": "web_content", **result})
+    return _dump(
+        {
+            "data_type": "web_content",
+            **result,
+            "provenance": provenance(
+                "web_page",
+                as_of=str(result.get("published_at") or "") or None,
+                freshness="fetched_content",
+                status="available" if result.get("content_status") == "full_text" else "partial",
+                url=url,
+            ),
+        }
+    )
 
 
 @tool
@@ -59,6 +82,11 @@ async def get_latest_news(ticker: str, asset_type: str = "stock") -> str:
             "web_news": web_news,
             "web_providers": web_result.get("providers", []),
             "web_errors": web_result.get("errors", []),
+            "provenance": provenance_for_labels(
+                ["akshare", *web_result.get("providers", [])],
+                fetched_at=web_result.get("searched_at"),
+                freshness="latest_available",
+            ),
         }
     )
 
@@ -66,7 +94,8 @@ async def get_latest_news(ticker: str, asset_type: str = "stock") -> str:
 @tool
 async def search_web_anysearch(query: str, num_results: int = 8) -> str:
     """明确使用 AnySearch 统一搜索，返回标题、摘要、来源和链接。API Key 可选。"""
-    return _dump(await async_search_web_anysearch(query, num_results=num_results))
+    result = await async_search_web_anysearch(query, num_results=num_results)
+    return _dump({**result, "provenance": provenance("anysearch", freshness="latest_available")})
 
 
 @tool
@@ -76,7 +105,8 @@ async def search_web_ddgs(query: str, num_results: int = 8, freshness: str | Non
     if freshness not in allowed_freshness:
         freshness = None
     timelimit = {"qdr:h": "h", "qdr:d": "d", "qdr:w": "w", "qdr:m": "m", "qdr:y": "y"}.get(freshness or "")
-    return _dump(await async_search_web_ddgs(query, num_results=num_results, timelimit=timelimit))
+    result = await async_search_web_ddgs(query, num_results=num_results, timelimit=timelimit)
+    return _dump({**result, "provenance": provenance("ddgs", freshness=freshness or "latest_available")})
 
 
 TOOLS = [search_web, fetch_web_content]

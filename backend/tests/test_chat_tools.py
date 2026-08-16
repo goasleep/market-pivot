@@ -239,6 +239,7 @@ def test_compare_quotes_uses_one_market_snapshot(monkeypatch):
     payload = json.loads(result)
     assert calls == [{"asset_type": "stock", "limit": 5000}]
     assert [item["quote"]["name"] for item in payload["quotes"]] == ["贵州茅台", "平安银行"]
+    assert payload["provenance"][0]["source_id"] == "akshare"
 
 
 def test_parallel_search_merges_serper_and_ddgs_results(monkeypatch):

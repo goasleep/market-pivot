@@ -13,6 +13,7 @@ from data.fund_provider import (
     async_get_fund_nav_history,
     async_get_fund_realtime,
 )
+from data.source_registry import provenance
 from data.stock_provider import async_get_financial_data, async_get_stock_history, async_get_stock_realtime
 from models.schemas import AssetType
 from screening.fund_screener import FundScreener
@@ -20,6 +21,13 @@ from screening.fund_screener import FundScreener
 
 def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _as_of(records: list[dict[str, Any]]) -> str | None:
+    if not records:
+        return None
+    latest = records[-1]
+    return str(latest.get("date") or latest.get("日期") or latest.get("trade_date") or "") or None
 
 
 @tool
@@ -31,7 +39,19 @@ async def get_realtime_quote(ticker: str, asset_type: str = "stock") -> str:
         if kind == AssetType.STOCK
         else await async_get_fund_realtime(ticker, asset_type=kind.value)
     )
-    return _dump({"data_type": "market_data", "ticker": ticker, "asset_type": kind.value, "quote": quote})
+    return _dump(
+        {
+            "data_type": "market_data",
+            "ticker": ticker,
+            "asset_type": kind.value,
+            "quote": quote,
+            "provenance": provenance(
+                "akshare",
+                as_of=str(quote.get("data_date") or quote.get("date") or "") or None,
+                freshness="realtime",
+            ),
+        }
+    )
 
 
 @tool
@@ -44,7 +64,15 @@ async def get_historical_prices(ticker: str, asset_type: str = "stock", limit: i
         else await async_get_fund_history(ticker, asset_type=kind.value)
     )
     records = history.tail(max(1, min(limit, 250))).to_dict("records")
-    return _dump({"data_type": "market_data", "ticker": ticker, "asset_type": kind.value, "history": records})
+    return _dump(
+        {
+            "data_type": "market_data",
+            "ticker": ticker,
+            "asset_type": kind.value,
+            "history": records,
+            "provenance": provenance("akshare", as_of=_as_of(records), freshness="historical"),
+        }
+    )
 
 
 @tool
@@ -55,7 +83,15 @@ async def get_fund_nav_history(ticker: str, asset_type: str = "etf", limit: int 
         raise ValueError("asset_type 必须是 etf 或 lof")
     frame = await async_get_fund_nav_history(ticker, asset_type=kind.value)
     records = frame.tail(max(1, min(int(limit), 250))).to_dict("records")
-    return _dump({"data_type": "fund_nav", "ticker": ticker, "asset_type": kind.value, "history": records})
+    return _dump(
+        {
+            "data_type": "fund_nav",
+            "ticker": ticker,
+            "asset_type": kind.value,
+            "history": records,
+            "provenance": provenance("akshare", as_of=_as_of(records), freshness="historical"),
+        }
+    )
 
 
 @tool
@@ -64,7 +100,15 @@ async def get_fundamentals(ticker: str, asset_type: str = "stock") -> str:
     kind = AssetType(asset_type)
     if kind == AssetType.STOCK:
         data = await async_get_financial_data(ticker)
-        return _dump({"data_type": "fundamentals", "ticker": ticker, "asset_type": kind.value, "data": data})
+        return _dump(
+            {
+                "data_type": "fundamentals",
+                "ticker": ticker,
+                "asset_type": kind.value,
+                "data": data,
+                "provenance": provenance("akshare", freshness="latest_available"),
+            }
+        )
     realtime = await async_get_fund_realtime(ticker, asset_type=kind.value)
     nav = await async_get_fund_nav_history(ticker, asset_type=kind.value)
     latest_nav = nav.tail(1).to_dict("records") if not nav.empty else []
@@ -74,6 +118,7 @@ async def get_fundamentals(ticker: str, asset_type: str = "stock") -> str:
             "ticker": ticker,
             "asset_type": kind.value,
             "data": {"realtime": realtime, "latest_nav": latest_nav},
+            "provenance": provenance("akshare", freshness="latest_available"),
         }
     )
 
@@ -92,7 +137,14 @@ async def compare_quotes(tickers: list[str], asset_type: str = "stock") -> str:
             normalized = normalized[2:]
         normalized = normalized.zfill(6)
         quotes.append({"ticker": ticker, "quote": by_ticker.get(normalized, {})})
-    return _dump({"data_type": "market_data", "asset_type": kind.value, "quotes": quotes})
+    return _dump(
+        {
+            "data_type": "market_data",
+            "asset_type": kind.value,
+            "quotes": quotes,
+            "provenance": provenance("akshare", freshness="realtime"),
+        }
+    )
 
 
 @tool
@@ -127,6 +179,7 @@ async def screen_assets(
                 "screen_type": "polars_fund_snapshot",
                 "count": len(screened),
                 "results": screened,
+                "provenance": provenance("akshare", freshness="realtime"),
             }
         )
 
@@ -149,6 +202,7 @@ async def screen_assets(
             "screen_type": "realtime_snapshot",
             "count": len(records),
             "results": records[: max(1, min(limit, 50))],
+            "provenance": provenance("akshare", freshness="realtime"),
         }
     )
 

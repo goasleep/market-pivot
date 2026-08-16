@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 
 from agents.technical_analyst import calculate_technical_indicators
 from data.fund_provider import async_get_fund_history
+from data.source_registry import provenance
 from data.stock_provider import async_get_stock_history
 from domain.risk_tools import build_trade_plan as _build_trade_plan
 from domain.risk_tools import calculate_risk_metrics as _calculate_risk_metrics
@@ -38,6 +39,7 @@ async def compute_technical_indicators(ticker: str, asset_type: str = "stock", l
             "asset_type": kind.value,
             "history_count": len(frame),
             "indicators": calculate_technical_indicators(frame),
+            "provenance": provenance("akshare", freshness="historical"),
         }
     )
 
@@ -65,6 +67,7 @@ async def calculate_risk_metrics(
                 available_capital=available_capital,
                 max_loss_pct=max_loss_pct,
             ),
+            "provenance": provenance("derived", freshness="calculated"),
         }
     )
 
@@ -94,6 +97,7 @@ async def build_trade_plan(
                 available_capital=available_capital,
                 max_loss_pct=max_loss_pct,
             ),
+            "provenance": provenance("derived", freshness="calculated"),
         }
     )
 
@@ -120,13 +124,26 @@ async def run_backtest(
         strategy_name=strategy_name,
         decision_interval=decision_interval,
     )
-    return _dump({"data_type": "backtest", "paper_trading": True, "result": result})
+    return _dump(
+        {
+            "data_type": "backtest",
+            "paper_trading": True,
+            "result": result,
+            "provenance": provenance("akshare", freshness="historical"),
+        }
+    )
 
 
 @tool
 async def list_trading_strategies() -> str:
     """列出系统支持的研究和交易策略。"""
-    return _dump(await asyncio.to_thread(list_strategies))
+    return _dump(
+        {
+            "data_type": "strategies",
+            "strategies": await asyncio.to_thread(list_strategies),
+            "provenance": provenance("derived", freshness="configuration"),
+        }
+    )
 
 
 TOOLS = [compute_technical_indicators, calculate_risk_metrics, build_trade_plan, run_backtest, list_trading_strategies]
