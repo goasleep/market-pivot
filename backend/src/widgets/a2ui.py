@@ -8,6 +8,7 @@ JavaScript is executed on the client.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 from uuid import uuid4
 
@@ -96,13 +97,29 @@ def render_stock_card(
         _text("pb", _ref("/pbLabel"), "caption"),
         _text("volume", _ref("/volumeLabel"), "caption"),
     ]
-    pct = float(stock_data.get("pct_chg") or 0)
+    try:
+        price = float(stock_data["price"])
+    except (KeyError, TypeError, ValueError):
+        return []
+    if not math.isfinite(price) or price <= 0:
+        return []
+
+    try:
+        pct = float(stock_data["pct_chg"])
+    except (KeyError, TypeError, ValueError):
+        pct = None
+    if pct is None or not math.isfinite(pct):
+        change_label = "涨跌幅 暂无"
+        change_tone = "secondary"
+    else:
+        change_label = f"{'▲' if pct >= 0 else '▼'} {abs(pct):.2f}%"
+        change_tone = "positive" if pct >= 0 else "negative"
     data = {
         "ticker": stock_data.get("ticker", ""),
         "name": stock_data.get("name", ""),
-        "priceLabel": f"¥{float(stock_data.get('price') or 0):.2f}",
-        "changeLabel": f"{'▲' if pct >= 0 else '▼'} {abs(pct):.2f}%",
-        "changeTone": "positive" if pct >= 0 else "negative",
+        "priceLabel": f"¥{price:.2f}",
+        "changeLabel": change_label,
+        "changeTone": change_tone,
         "peLabel": f"PE {stock_data.get('pe', '-')}",
         "pbLabel": f"PB {stock_data.get('pb', '-')}",
         "volumeLabel": f"成交量 {stock_data.get('volume', '-')}",
@@ -373,6 +390,37 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
         quote = dict(payload.get("quote") or {})
         quote["ticker"] = payload.get("ticker", quote.get("ticker", ""))
         return render_stock_card(quote, surface_id)
+
+    if tool_name in {"search_web", "search_web_ddgs"}:
+        items = []
+        for item in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+            if not isinstance(item, dict) or not str(item.get("link", "")).startswith(("http://", "https://")):
+                continue
+            items.append(
+                {
+                    "title": str(item.get("title", "")),
+                    "link": str(item.get("link", "")),
+                    "snippet": str(item.get("snippet", "")),
+                    "source": str(item.get("source", "")),
+                    "date": str(item.get("date", "")),
+                }
+            )
+        surface_id = surface_id or f"search-{uuid4().hex}"
+        components = [
+            {"id": "root", "component": "Card", "children": ["title", "list"]},
+            _text("title", f"搜索结果（{len(items)} 条）", "h3"),
+            {"id": "list", "component": "List", "items": _ref("/items"), "itemTemplate": "searchItem"},
+            {
+                "id": "searchItem",
+                "component": "SearchResultItem",
+                "title": _ref("title"),
+                "link": _ref("link"),
+                "snippet": _ref("snippet"),
+                "source": _ref("source"),
+                "date": _ref("date"),
+            },
+        ]
+        return _surface(surface_id, components, {"items": items})
 
     if tool_name == "compare_quotes":
         rows = []
