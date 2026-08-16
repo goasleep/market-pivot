@@ -14,16 +14,11 @@ from uuid import uuid4
 
 from loguru import logger
 
-from agents.stock_agent import StockIntent, stock_agent
-from application.research import research_service
+from agents.stock_agent import stock_agent
 from config import settings
 from widgets.a2ui import (
     render_activity,
-    render_agent_pipeline,
-    render_decision_dashboard,
     render_markdown,
-    render_signal_gauge,
-    render_stock_card,
     render_tool_result,
 )
 
@@ -675,159 +670,21 @@ class ChatTaskManager:
                 await self._emit_a2ui(task_input, surface)
         return artifacts
 
-    async def _emit_analysis_progress(
-        self,
-        task_input: ChatTaskInput,
-        update: dict[str, Any],
-        progress_state: dict[str, Any],
-    ) -> None:
-        """Persist progress from a long-running analysis tool invocation."""
-        if not progress_state["status_sent"] and update.get("data_status"):
-            status = update["data_status"]
-            await self._emit_text(
-                task_input,
-                "数据状态："
-                f"历史={'正常' if status.get('history') else '缺失'}，"
-                f"实时={'正常' if status.get('realtime') else '缺失'}，"
-                f"财务={'正常' if status.get('financial') else '不适用/缺失'}，"
-                f"新闻={'正常' if status.get('news') else '缺失'}。",
-            )
-            progress_state["status_sent"] = True
+    @staticmethod
+    def _queue_unique_artifacts(target: list[dict[str, Any]], artifacts: list[dict[str, Any]]) -> None:
+        """Keep one visible report per instrument in a single Agent Loop task."""
+        existing = {
+            (item.get("name"), item.get("ticker"), item.get("asset_type"))
+            for item in target
+        }
+        for artifact in artifacts:
+            key = (artifact.get("name"), artifact.get("ticker"), artifact.get("asset_type"))
+            if key in existing and any(key):
+                continue
+            target.append(artifact)
+            existing.add(key)
 
-        if not progress_state["realtime_sent"] and update.get("realtime"):
-            await self._emit_a2ui(
-                task_input,
-                render_stock_card(update["realtime"], progress_state["stock_surface"]),
-            )
-            progress_state["realtime_sent"] = True
 
-        node = "debate" if update.get("node") == "merge_debate" else update.get("node", "")
-        for stage in progress_state["stages"]:
-            if stage["name"] == node:
-                stage["status"] = "done"
-                break
-        current_stage = next(
-            (stage["name"] for stage in progress_state["stages"] if stage["status"] == "pending"),
-            "",
-        )
-        await self._emit_a2ui(
-            task_input,
-            render_agent_pipeline(
-                progress_state["stages"],
-                current_stage,
-                progress_state["pipeline_surface"],
-                include_create=not progress_state["pipeline_created"],
-            ),
-        )
-        progress_state["pipeline_created"] = True
-
-    async def _run_analysis(
-        self,
-        task_input: ChatTaskInput,
-        pending_artifacts: list[dict[str, Any]] | None = None,
-    ) -> bool:
-        """Use the structured analysis workflow for analysis requests."""
-        request = stock_agent.resolve(
-            task_input.message,
-            task_input.history,
-            strategy=task_input.strategy,
-            conversation_id=task_input.conversation_id,
-            asset_type=task_input.asset_type,
-        )
-        if request.intent != StockIntent.ANALYZE or not request.ticker:
-            return False
-
-        await self._emit_text(task_input, f"股票 Agent：开始分析 {request.ticker}。")
-        stages = [
-            {"name": "market_data", "label": "Market Data", "status": "pending"},
-            {"name": "technical", "label": "Technical", "status": "pending"},
-            {"name": "fundamentals", "label": "Fundamentals", "status": "pending"},
-            {"name": "sentiment", "label": "Sentiment", "status": "pending"},
-            {"name": "debate", "label": "Debate", "status": "pending"},
-            {"name": "risk", "label": "Risk", "status": "pending"},
-            {"name": "portfolio", "label": "Portfolio", "status": "pending"},
-        ]
-        pipeline_surface = f"pipeline-{task_input.task_id}"
-        stock_surface = f"stock-{task_input.task_id}"
-        dashboard_surface = f"dashboard-{task_input.task_id}"
-        gauge_surface = f"gauge-{task_input.task_id}"
-        accumulated: dict[str, Any] = {}
-        status_sent = False
-        realtime_sent = False
-        pipeline_created = False
-
-        async for update in stock_agent.analyze_stream(request):
-            if not status_sent and update.get("data_status"):
-                status = update["data_status"]
-                await self._emit_text(
-                    task_input,
-                    "数据状态："
-                    f"历史={'正常' if status.get('history') else '缺失'}，"
-                    f"实时={'正常' if status.get('realtime') else '缺失'}，"
-                    f"财务={'正常' if status.get('financial') else '不适用/缺失'}，"
-                    f"新闻={'正常' if status.get('news') else '缺失'}。",
-                )
-                status_sent = True
-            if not realtime_sent and update.get("realtime"):
-                await self._emit_a2ui(task_input, render_stock_card(update["realtime"], stock_surface))
-                realtime_sent = True
-
-            node = "debate" if update.get("node") == "merge_debate" else update.get("node", "")
-            for stage in stages:
-                if stage["name"] == node:
-                    stage["status"] = "done"
-                    break
-            current_stage = next((stage["name"] for stage in stages if stage["status"] == "pending"), "")
-            await self._emit_a2ui(
-                task_input,
-                render_agent_pipeline(
-                    stages,
-                    current_stage,
-                    pipeline_surface,
-                    include_create=not pipeline_created,
-                ),
-            )
-            pipeline_created = True
-            accumulated = update.get("state", accumulated)
-
-        decision = accumulated.get("final_decision")
-        if not decision:
-            await self._emit_text(task_input, "分析流程完成，但没有返回最终决策。")
-            return True
-
-        dashboard = decision.dashboard.model_dump() if decision.dashboard else None
-        if dashboard:
-            await self._emit_a2ui(task_input, render_decision_dashboard(dashboard, dashboard_surface))
-            attribution = dashboard.get("signal_attribution", {})
-            if attribution:
-                await self._emit_a2ui(task_input, render_signal_gauge(attribution, gauge_surface))
-
-        decision_label = {"buy": "买入", "sell": "卖出", "hold": "观望"}.get(
-            decision.decision.value, decision.decision.value
-        )
-        summary = f"**{decision_label}** {decision.ticker} | 置信度：{decision.confidence:.0%}"
-        if decision.target_price:
-            summary += f" | 目标价：¥{decision.target_price}"
-        if decision.stop_loss:
-            summary += f" | 止损价：¥{decision.stop_loss}"
-        if decision.position_size:
-            summary += f" | 建议仓位：{decision.position_size:.0%}"
-        await self._emit_text(task_input, summary)
-        if decision.reasoning:
-            await self._emit_text(task_input, f"\n\n**决策依据：**\n{decision.reasoning}")
-        artifacts = await research_service.create_artifacts(
-            decision,
-            accumulated.get("market_context"),
-            source="chat-analysis",
-            conversation_id=task_input.conversation_id,
-            task_id=task_input.task_id,
-        )
-        if pending_artifacts is None:
-            for artifact in artifacts:
-                await self._emit_artifact(task_input, artifact)
-        else:
-            pending_artifacts.extend(artifacts)
-        return True
 
     async def _run(self, task_input: ChatTaskInput) -> None:
         task_id = task_input.task_id
@@ -840,47 +697,29 @@ class ChatTaskManager:
                 task_input,
                 render_activity("Agent 正在规划任务并选择数据工具", "running", orchestration_surface),
             )
+            request = stock_agent.prepare(
+                message=task_input.message,
+                history=task_input.history,
+                strategy=task_input.strategy,
+                conversation_id=task_input.conversation_id,
+                asset_type=task_input.asset_type,
+            )
             pending_artifacts: list[dict[str, Any]] = []
-            handled = await self._run_analysis(task_input, pending_artifacts)
-            if not handled:
-                request = stock_agent.prepare(
-                    message=task_input.message,
-                    history=task_input.history,
-                    strategy=task_input.strategy,
-                    conversation_id=task_input.conversation_id,
-                    asset_type=task_input.asset_type,
-                )
-                analysis_progress = {
-                    "stages": [
-                        {"name": "market_data", "label": "Market Data", "status": "pending"},
-                        {"name": "technical", "label": "Technical", "status": "pending"},
-                        {"name": "fundamentals", "label": "Fundamentals", "status": "pending"},
-                        {"name": "sentiment", "label": "Sentiment", "status": "pending"},
-                        {"name": "debate", "label": "Debate", "status": "pending"},
-                        {"name": "risk", "label": "Risk", "status": "pending"},
-                        {"name": "portfolio", "label": "Portfolio", "status": "pending"},
-                    ],
-                    "pipeline_surface": f"pipeline-{task_id}",
-                    "stock_surface": f"stock-{task_id}",
-                    "status_sent": False,
-                    "realtime_sent": False,
-                    "pipeline_created": False,
-                }
-
-                async def on_analysis_progress(update: dict[str, Any]) -> None:
-                    await self._emit_analysis_progress(task_input, update, analysis_progress)
-
-                seen_tool_events: set[str] = set()
-                async for event in stock_agent.chat(request, progress_callback=on_analysis_progress):
-                    if event.get("type") == "tool":
-                        event_key = f"{event.get('name', 'unknown')}:{event.get('result', '')}"
-                        if event_key not in seen_tool_events:
-                            seen_tool_events.add(event_key)
-                            pending_artifacts.extend(await self._emit_tool_event(task_input, event))
-                    else:
-                        text = event.get("text", "")
-                        if text:
-                            await self._emit_text(task_input, text)
+            seen_tool_events: set[str] = set()
+            async for event in stock_agent.chat(request):
+                if event.get("type") == "tool":
+                    event_key = f"{event.get('name', 'unknown')}:{event.get('result', '')}"
+                    if event_key not in seen_tool_events:
+                        seen_tool_events.add(event_key)
+                        self._queue_unique_artifacts(
+                            pending_artifacts,
+                            await self._emit_tool_event(task_input, event),
+                        )
+                else:
+                    text = event.get("text", "")
+                    if text:
+                        prefix = "分析摘要：" if event.get("type") == "reasoning" else ""
+                        await self._emit_text(task_input, f"{prefix}{text}")
             await self._emit_a2ui(
                 task_input,
                 render_activity(

@@ -41,6 +41,7 @@ class AgentLoopState(TypedDict, total=False):
     tools: list[StructuredTool]
     tool_map: dict[str, StructuredTool]
     tool_events: Annotated[list[dict[str, Any]], operator.add]
+    reasoning_events: Annotated[list[dict[str, Any]], operator.add]
     final_response: str
     max_steps_reached: bool
 
@@ -64,6 +65,12 @@ async def decide_next_action(state: AgentLoopState) -> dict[str, Any]:
     step = state.get("step", 0) + 1
     final_response = _content_text(response.content)
     max_steps_reached = bool(response.tool_calls and step >= state.get("max_steps", DEFAULT_MAX_STEPS))
+    reasoning_events: list[dict[str, Any]] = []
+    if response.tool_calls and not max_steps_reached:
+        tool_names = [str(call.get("name", "数据工具")) for call in response.tool_calls]
+        model_summary = final_response.strip().splitlines()[0][:240] if final_response.strip() else ""
+        summary = model_summary or f"第 {step} 轮：需要先获取 {', '.join(tool_names)} 的数据，再继续判断。"
+        reasoning_events.append({"step": step, "text": summary})
     if max_steps_reached:
         final_response = (
             f"{final_response}\n\n"
@@ -74,6 +81,7 @@ async def decide_next_action(state: AgentLoopState) -> dict[str, Any]:
         "messages": [*state["messages"], response],
         "step": step,
         "final_response": final_response,
+        "reasoning_events": reasoning_events,
         "max_steps_reached": max_steps_reached,
     }
 
@@ -213,6 +221,7 @@ async def run_agent_loop(
             "step": 0,
             "max_steps": max_steps,
             "tool_events": [],
+            "reasoning_events": [],
         },
         config=config,
     )
@@ -234,6 +243,7 @@ async def stream_agent_loop(
             "step": 0,
             "max_steps": max_steps,
             "tool_events": [],
+            "reasoning_events": [],
         },
         config=config,
         stream_mode="updates",

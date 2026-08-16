@@ -198,3 +198,9 @@ def test_generated_html_source_is_compacted_when_a_file_artifact_exists():
 
     assert "<!doctype html>" not in response
     assert "文件产物" in response
+
+
+def test_long_generated_report_is_compacted_when_artifact_exists():
+    response = _compact_generated_report("标题\n" + ("很长的分析内容。\n" * 20))
+
+    assert response == "完整 HTML 报告已生成文件产物，请点击下方卡片预览或下载。"

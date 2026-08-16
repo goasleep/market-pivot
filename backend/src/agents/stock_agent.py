@@ -29,12 +29,14 @@ _RAW_HTML_SOURCE = re.compile(r"(?:<!doctype\s+html|<html\b).*", flags=re.IGNORE
 def _compact_generated_report(text: str) -> str:
     """Keep the chat concise when a report file has already been generated."""
     match = _HTML_SOURCE_BLOCK.search(text) or _RAW_HTML_SOURCE.search(text)
-    if match is None:
-        return text
-    lead = text[: match.start()].strip()
-    tail = text[match.end() :].strip()
     notice = "完整 HTML 报告已生成文件产物，请点击下方卡片预览或下载。"
-    return "\n\n".join(part for part in (lead, notice, tail) if part)
+    if match is not None:
+        lead = text[: match.start()].strip()
+        tail = text[match.end() :].strip()
+        return "\n\n".join(part for part in (lead, notice, tail) if part)
+    if len(text) > 1600 or text.count("\n") > 18:
+        return notice
+    return text
 
 
 class StockIntent(str, Enum):
@@ -244,6 +246,7 @@ class StockAgent:
             "需要全网最新资讯、公告或行业信息时调用 search_web，工具会并行查询 Serper 和 DDGS；"
             "若需要明确使用免费元搜索，可调用 search_web_ddgs；搜索结果必须注明来源和链接。"
             "如果用户要综合分析，调用 run_fund_or_stock_analysis，并且必须传入正确的 asset_type（stock、etf 或 lof）。"
+            "每次调用工具前可以先给出一句简短的公开分析摘要，说明接下来要核对什么；不要输出详细内部思维链。"
             "完成工具调用后，用中文简洁回答，"
             "如果工具结果包含 artifacts，说明报告文件已经生成；禁止再次输出 HTML 或 Markdown 源码，只需给出简短结论。"
             "明确数据日期、来源和数据缺失。产品只服务于小散户的短中期基金交易研究和模拟交易，不承诺收益，"
@@ -281,6 +284,9 @@ class StockAgent:
                         "status": event.get("status", "completed"),
                         "result": event.get("result", ""),
                     }
+                for event in node_update.get("reasoning_events", []):
+                    if isinstance(event, dict) and event.get("text"):
+                        yield {"type": "reasoning", "text": str(event["text"])}
                 if node_update.get("final_response"):
                     final_response = node_update["final_response"]
         if final_response:
