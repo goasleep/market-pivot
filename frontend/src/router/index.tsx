@@ -1,5 +1,5 @@
 import { createBrowserRouter, Outlet, NavLink } from "react-router-dom";
-import { LayoutDashboard, FlaskConical, Wallet, Brain, MessageSquare, Settings, Bot, Sparkles } from "lucide-react";
+import { LayoutDashboard, FlaskConical, Wallet, Brain, MessageSquare, Settings, Bot, Sparkles, Archive } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { DashboardPage } from "@/pages/dashboard";
 import { AnalysisPage } from "@/pages/analysis";
@@ -8,6 +8,7 @@ import { PortfolioPage } from "@/pages/portfolio";
 import { ChatPage } from "@/pages/chat";
 import { SettingsPage } from "@/pages/settings";
 import { AutomationPage } from "@/pages/automation";
+import { RecordsPage } from "@/pages/records";
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -16,6 +17,7 @@ const navItems = [
   { to: "/backtest", label: "Backtest", icon: FlaskConical },
   { to: "/portfolio", label: "Portfolio", icon: Wallet },
   { to: "/automation", label: "Agent 自动化", icon: Bot },
+  { to: "/records", label: "研究报告", icon: Archive },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -76,6 +78,7 @@ export const router = createBrowserRouter([
       { path: "/backtest", element: <BacktestPage /> },
       { path: "/portfolio", element: <PortfolioPage /> },
       { path: "/automation", element: <AutomationPage /> },
+      { path: "/records", element: <RecordsPage /> },
       { path: "/settings", element: <SettingsPage /> },
     ],
   },
