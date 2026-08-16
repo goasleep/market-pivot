@@ -4,9 +4,11 @@ import json
 import pytest
 
 from agents import chat_tools
+from agents.sentiment_analyst import analyze as analyze_sentiment
 from agents.stock_agent import StockAgent, _compact_generated_report
 from application.research import research_service
 from data import serper_provider
+from data.web_content import extract_article_content
 from engine.simulation_account import SimulationAccountService
 from graph.agent_loop import (
     LONG_RUNNING_TOOL_TIMEOUT_SECONDS,
@@ -14,7 +16,7 @@ from graph.agent_loop import (
     tool_attempts,
     tool_timeout_seconds,
 )
-from models.schemas import AssetType, Decision, TradeDecision
+from models.schemas import AssetType, Decision, MarketContext, TradeDecision
 from widgets.a2ui import render_activity
 
 
@@ -145,6 +147,93 @@ def test_parallel_search_merges_serper_and_ddgs_results(monkeypatch):
 
     assert result["providers"] == ["Serper / Google Search", "DDGS metasearch"]
     assert [item["link"] for item in result["results"]] == ["https://same.example", "https://ddgs.example"]
+
+
+def test_web_content_extractor_removes_non_article_markup():
+    result = extract_article_content(
+        """
+        <html><head><title>半导体行业快讯</title><script>恶意指令</script></head>
+        <body><nav>导航菜单</nav><article><p>半导体设备订单在近期出现改善，相关公司披露了新的业务进展。</p>
+        <p>市场参与者仍需关注估值、出口限制和需求波动等风险因素。</p>
+        <p>该信息仅代表公开报道中的行业变化，不能直接视为具体标的的买卖建议。</p></article>
+        <footer>版权信息</footer></body></html>
+        """
+    )
+
+    assert result["content_status"] == "full_text"
+    assert "半导体设备订单" in result["content"]
+    assert "恶意指令" not in result["content"]
+    assert "导航菜单" not in result["content"]
+    assert result["page_title"] == "半导体行业快讯"
+
+
+def test_sentiment_does_not_use_snippet_only_results_for_llm_signal():
+    class ExplodingLLM:
+        async def chat_json(self, *args, **kwargs):
+            raise AssertionError("snippet-only evidence must not call the LLM")
+
+    report = asyncio.run(
+        analyze_sentiment(
+            "512480",
+            context=MarketContext(
+                ticker="512480",
+                asset_type=AssetType.ETF,
+                web_results=[
+                    {
+                        "title": "半导体 ETF 上涨",
+                        "snippet": "搜索摘要",
+                        "link": "https://example.com/news",
+                        "content_status": "snippet_only",
+                    }
+                ],
+            ),
+            llm=ExplodingLLM(),
+        )
+    )
+
+    assert report.signal == Decision.HOLD
+    assert report.confidence == 0.3
+    assert report.key_data["evidence_level"] == "snippet_only"
+
+
+def test_sentiment_prompt_contains_fetched_content(monkeypatch):
+    captured = {}
+
+    class FakeLLM:
+        async def chat_json(self, prompt, *, system):
+            captured["prompt"] = prompt
+            return {
+                "signal": "hold",
+                "confidence": 0.7,
+                "reasoning": "基于已抓取正文",
+                "sentiment_score": 0.1,
+                "key_themes": ["需求"]
+            }
+
+    report = asyncio.run(
+        analyze_sentiment(
+            "512480",
+            context=MarketContext(
+                ticker="512480",
+                asset_type=AssetType.ETF,
+                web_results=[
+                    {
+                        "title": "半导体行业报道",
+                        "snippet": "摘要不应作为主要证据",
+                        "content": "正文明确提到半导体设备订单出现改善，但行业仍面临需求波动风险。",
+                        "content_status": "full_text",
+                        "link": "https://example.com/news",
+                    }
+                ],
+            ),
+            llm=FakeLLM(),
+        )
+    )
+
+    assert report.signal == Decision.HOLD
+    assert "订单出现改善" in captured["prompt"]
+    assert "证据等级：full_text" in captured["prompt"]
+    assert "A-share stock" not in captured["prompt"]
 
 
 def test_analysis_tool_passes_asset_type_to_workflow(monkeypatch):

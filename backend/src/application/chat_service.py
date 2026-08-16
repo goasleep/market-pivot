@@ -100,6 +100,17 @@ class ChatStore:
 
                 CREATE INDEX IF NOT EXISTS idx_chat_task_events_task
                     ON chat_task_events(task_id, sequence ASC);
+
+                CREATE TABLE IF NOT EXISTS chat_message_references (
+                    message_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    reference_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (message_id, position)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_chat_message_references_message
+                    ON chat_message_references(message_id, position ASC);
                 """
             )
             connection.execute(
@@ -190,9 +201,20 @@ class ChatStore:
                 raise ValueError(f"会话已有正在执行的任务: {active['task_id']}")
 
             self._ensure_conversation(connection, conversation_id, title)
+            connection.execute(
+                """
+                DELETE FROM chat_message_references
+                 WHERE message_id IN (
+                     SELECT message_id FROM chat_messages WHERE conversation_id = ?
+                 )
+                """,
+                (conversation_id,),
+            )
             connection.execute("DELETE FROM chat_messages WHERE conversation_id = ?", (conversation_id,))
             for position, item in enumerate(history):
                 role = item.get("role", "user")
+                item_timestamp = str(item.get("created_at") or timestamp)
+                message_id = f"msg-{uuid4().hex}"
                 connection.execute(
                     """
                     INSERT INTO chat_messages
@@ -200,15 +222,27 @@ class ChatStore:
                     VALUES (?, ?, ?, ?, 'completed', NULL, ?, ?, ?)
                     """,
                     (
-                        f"msg-{uuid4().hex}",
+                        message_id,
                         conversation_id,
                         role,
                         _json(self._parts(item)),
                         position,
-                        timestamp,
-                        timestamp,
+                        item_timestamp,
+                        item_timestamp,
                     ),
                 )
+                references = item.get("references")
+                if isinstance(references, list):
+                    for reference_position, reference in enumerate(references):
+                        if isinstance(reference, dict):
+                            connection.execute(
+                                """
+                                INSERT INTO chat_message_references
+                                  (message_id, position, reference_json, created_at)
+                                VALUES (?, ?, ?, ?)
+                                """,
+                                (message_id, reference_position, _json(reference), item_timestamp),
+                            )
             user_position = len(history)
             connection.execute(
                 """
@@ -426,16 +460,65 @@ class ChatStore:
         return dict(row) if row else None
 
     @staticmethod
-    def _message_payload(row: sqlite3.Row) -> dict[str, Any]:
+    def _message_payload(row: sqlite3.Row, references: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         status = row["status"]
         return {
             "id": row["message_id"],
             "role": row["role"],
             "parts": json.loads(row["parts_json"]),
+            "created_at": row["created_at"],
+            "references": references or [],
             "status": status,
             "task_id": row["task_id"],
             "loading": status in {"pending", "running"},
         }
+
+    @staticmethod
+    def _references_by_message(
+        connection: sqlite3.Connection,
+        message_ids: list[str],
+    ) -> dict[str, list[dict[str, Any]]]:
+        if not message_ids:
+            return {}
+        references: dict[str, list[dict[str, Any]]] = {}
+        for offset in range(0, len(message_ids), 900):
+            batch = message_ids[offset : offset + 900]
+            placeholders = ",".join("?" for _ in batch)
+            rows = connection.execute(
+                f"""
+                SELECT message_id, reference_json
+                  FROM chat_message_references
+                 WHERE message_id IN ({placeholders})
+                 ORDER BY message_id, position ASC
+                """,
+                batch,
+            ).fetchall()
+            for row in rows:
+                try:
+                    reference = json.loads(row["reference_json"])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if isinstance(reference, dict):
+                    references.setdefault(row["message_id"], []).append(reference)
+        return references
+
+    def set_references(self, message_id: str, references: list[dict[str, Any]]) -> None:
+        with self._thread_lock, self._connect() as connection:
+            timestamp = _now()
+            connection.execute(
+                "DELETE FROM chat_message_references WHERE message_id = ?",
+                (message_id,),
+            )
+            for position, reference in enumerate(references):
+                connection.execute(
+                    """
+                    INSERT INTO chat_message_references
+                      (message_id, position, reference_json, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (message_id, position, _json(reference), timestamp),
+                )
+            connection.commit()
 
     def get_conversation(self, conversation_id: str) -> dict[str, Any] | None:
         with self._thread_lock, self._connect() as connection:
@@ -448,12 +531,19 @@ class ChatStore:
                 "SELECT * FROM chat_messages WHERE conversation_id = ? ORDER BY position ASC",
                 (conversation_id,),
             ).fetchall()
+            references_by_message = self._references_by_message(
+                connection,
+                [message["message_id"] for message in messages],
+            )
         return {
             "conversation_id": conversation["conversation_id"],
             "title": conversation["title"],
             "created_at": conversation["created_at"],
             "updated_at": conversation["updated_at"],
-            "messages": [self._message_payload(row) for row in messages],
+            "messages": [
+                self._message_payload(row, references_by_message.get(row["message_id"]))
+                for row in messages
+            ],
         }
 
     def list_conversations(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -467,6 +557,14 @@ class ChatStore:
                     "SELECT * FROM chat_messages WHERE conversation_id = ? ORDER BY position ASC",
                     (row["conversation_id"],),
                 ).fetchall()
+            references_by_message = self._references_by_message(
+                connection,
+                [
+                    message["message_id"]
+                    for messages in messages_by_conversation.values()
+                    for message in messages
+                ],
+            )
         return [
             {
                 "conversation_id": row["conversation_id"],
@@ -474,7 +572,11 @@ class ChatStore:
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
                 "messages": [
-                    self._message_payload(message) for message in messages_by_conversation[row["conversation_id"]]
+                    self._message_payload(
+                        message,
+                        references_by_message.get(message["message_id"]),
+                    )
+                    for message in messages_by_conversation[row["conversation_id"]]
                 ],
             }
             for row in rows
@@ -502,6 +604,15 @@ class ChatStore:
             ).fetchone()
             if active:
                 return False
+            connection.execute(
+                """
+                DELETE FROM chat_message_references
+                 WHERE message_id IN (
+                     SELECT message_id FROM chat_messages WHERE conversation_id = ?
+                 )
+                """,
+                (conversation_id,),
+            )
             cursor = connection.execute("DELETE FROM chat_conversations WHERE conversation_id = ?", (conversation_id,))
             connection.execute("DELETE FROM chat_messages WHERE conversation_id = ?", (conversation_id,))
             connection.execute("DELETE FROM chat_tasks WHERE conversation_id = ?", (conversation_id,))
@@ -634,7 +745,47 @@ class ChatTaskManager:
             {"event": "artifact", "data": _json({"artifact": artifact})},
         )
 
-    async def _emit_tool_event(self, task_input: ChatTaskInput, event: dict[str, Any]) -> list[dict[str, Any]]:
+    @staticmethod
+    def _tool_references(name: str, payload: Any) -> list[dict[str, Any]]:
+        references: list[dict[str, Any]] = []
+
+        def collect(value: Any) -> None:
+            if isinstance(value, list):
+                for item in value:
+                    collect(item)
+                return
+            if not isinstance(value, dict):
+                return
+            link = value.get("link") or value.get("url")
+            if isinstance(link, str) and link.startswith(("http://", "https://")):
+                references.append(
+                    {
+                        "title": str(value.get("title") or value.get("name") or link),
+                        "url": link,
+                        "snippet": str(value["snippet"]) if value.get("snippet") else None,
+                        "date": str(value["date"]) if value.get("date") else None,
+                    }
+                )
+            for child in value.values():
+                collect(child)
+
+        collect(payload)
+
+        unique: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for reference in references:
+            key = str(reference.get("url"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append({key: value for key, value in reference.items() if value is not None})
+        return unique
+
+    async def _emit_tool_event(
+        self,
+        task_input: ChatTaskInput,
+        event: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Render tool progress and, when possible, its structured result."""
         name = str(event.get("name", "unknown"))
         status = str(event.get("status", "completed"))
@@ -657,6 +808,7 @@ class ChatTaskManager:
             render_activity(name, status, error=error_message),
         )
         artifacts: list[dict[str, Any]] = []
+        references: list[dict[str, Any]] = []
         if result:
             try:
                 tool_payload = json.loads(str(result))
@@ -668,7 +820,9 @@ class ChatTaskManager:
             surface = render_tool_result(name, str(result))
             if surface:
                 await self._emit_a2ui(task_input, surface)
-        return artifacts
+            if status != "failed":
+                references = self._tool_references(name, tool_payload)
+        return artifacts, references
 
     @staticmethod
     def _queue_unique_artifacts(target: list[dict[str, Any]], artifacts: list[dict[str, Any]]) -> None:
@@ -682,6 +836,19 @@ class ChatTaskManager:
             if key in existing and any(key):
                 continue
             target.append(artifact)
+            existing.add(key)
+
+    @staticmethod
+    def _queue_unique_references(target: list[dict[str, Any]], references: list[dict[str, Any]]) -> None:
+        existing = {
+            str(item.get("url") or f"{item.get('title')}:{item.get('source')}")
+            for item in target
+        }
+        for reference in references:
+            key = str(reference.get("url") or f"{reference.get('title')}:{reference.get('source')}")
+            if key in existing:
+                continue
+            target.append(reference)
             existing.add(key)
 
 
@@ -705,16 +872,16 @@ class ChatTaskManager:
                 asset_type=task_input.asset_type,
             )
             pending_artifacts: list[dict[str, Any]] = []
+            pending_references: list[dict[str, Any]] = []
             seen_tool_events: set[str] = set()
             async for event in stock_agent.chat(request):
                 if event.get("type") == "tool":
                     event_key = f"{event.get('name', 'unknown')}:{event.get('result', '')}"
                     if event_key not in seen_tool_events:
                         seen_tool_events.add(event_key)
-                        self._queue_unique_artifacts(
-                            pending_artifacts,
-                            await self._emit_tool_event(task_input, event),
-                        )
+                        artifacts, references = await self._emit_tool_event(task_input, event)
+                        self._queue_unique_artifacts(pending_artifacts, artifacts)
+                        self._queue_unique_references(pending_references, references)
                 else:
                     text = event.get("text", "")
                     if text:
@@ -731,6 +898,12 @@ class ChatTaskManager:
             )
             for artifact in pending_artifacts:
                 await self._emit_artifact(task_input, artifact)
+            if pending_references:
+                self.store.set_references(task_input.assistant_message_id, pending_references)
+                await self._broadcast(
+                    task_id,
+                    {"event": "references", "data": _json({"references": pending_references})},
+                )
             record = self.store.get_task(task_id)
             if record is None or record["status"] == "cancel_requested":
                 raise asyncio.CancelledError

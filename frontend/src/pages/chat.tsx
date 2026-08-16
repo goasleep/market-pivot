@@ -4,6 +4,7 @@ import {
   ChatMessage,
   type ChatMessagePart,
   type ChatMessageData,
+  type ChatReference,
 } from "@/components/chat/ChatMessage";
 import type { A2UIAction, A2UIMessage } from "@/components/chat/A2UIRenderer";
 import { Button } from "@/components/ui/button";
@@ -95,6 +96,8 @@ function normalizeConversation(conversation: Conversation): Conversation {
     ...conversation,
     messages: conversation.messages.map((message) => ({
       ...message,
+      createdAt: message.createdAt || conversation.updatedAt || new Date().toISOString(),
+      references: message.references || [],
       parts: dedupeParts(message.parts),
     })),
   };
@@ -236,6 +239,13 @@ function hydrateServerConversation(raw: Record<string, unknown>): Conversation {
       return {
         id: typeof message.id === "string" ? message.id : undefined,
         role: message.role === "assistant" ? "assistant" : "user",
+        createdAt:
+          typeof message.created_at === "string"
+            ? message.created_at
+            : new Date().toISOString(),
+        references: Array.isArray(message.references)
+          ? (message.references as ChatReference[])
+          : [],
         parts: Array.isArray(message.parts)
           ? dedupeParts(message.parts as ChatMessageData["parts"])
           : [],
@@ -259,6 +269,8 @@ export function ChatPage() {
     null,
   );
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [selectedReferences, setSelectedReferences] = useState<ChatReference[]>([]);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -559,6 +571,34 @@ export function ChatPage() {
     [updateConversation],
   );
 
+  const setAssistantReferences = useCallback(
+    (conversationId: string, messageIndex: number, references: ChatReference[]) => {
+      updateConversation(conversationId, (item) => {
+        const message = item.messages[messageIndex];
+        if (!message || message.role !== "assistant") return item;
+        const messages = [...item.messages];
+        messages[messageIndex] = { ...message, references };
+        return { ...item, messages, updatedAt: new Date().toISOString() };
+      });
+    },
+    [updateConversation],
+  );
+
+  const setTaskReferences = useCallback(
+    (conversationId: string, taskId: string, references: ChatReference[]) => {
+      updateConversation(conversationId, (item) => {
+        const messageIndex = item.messages.findIndex(
+          (message) => message.role === "assistant" && message.taskId === taskId,
+        );
+        if (messageIndex < 0) return item;
+        const messages = [...item.messages];
+        messages[messageIndex] = { ...messages[messageIndex], references };
+        return { ...item, messages, updatedAt: new Date().toISOString() };
+      });
+    },
+    [updateConversation],
+  );
+
   const sendMessage = useCallback(
     async (text: string) => {
       if (!text.trim() || sending || !activeConversation) return;
@@ -571,12 +611,15 @@ export function ChatPage() {
       const userMessage: ChatMessageData = {
         id: crypto.randomUUID(),
         role: "user",
+        createdAt: new Date().toISOString(),
         parts: [{ type: "text", content: text.trim() }],
       };
       const taskId = crypto.randomUUID();
       const assistantMessage: ChatMessageData = {
         id: crypto.randomUUID(),
         role: "assistant",
+        createdAt: new Date().toISOString(),
+        references: [],
         parts: [],
         loading: true,
         status: "pending",
@@ -628,6 +671,12 @@ export function ChatPage() {
               type: "artifact",
               content: data.artifact as ChatMessagePart["content"],
             });
+          if (Array.isArray(data.references))
+            setAssistantReferences(
+              conversationId,
+              assistantIndex,
+              data.references as ChatReference[],
+            );
         };
 
         const consumeStream = async (response: Response) => {
@@ -675,6 +724,8 @@ export function ChatPage() {
               message: text.trim(),
               history: baseMessages.map((message) => ({
                 role: message.role,
+                created_at: message.createdAt,
+                references: message.references || [],
                 content: message.parts
                   .filter((part) => part.type === "text")
                   .map((part) => part.content)
@@ -762,6 +813,7 @@ export function ChatPage() {
       appendToAssistant,
       editingMessageIndex,
       sending,
+      setAssistantReferences,
       updateConversation,
     ],
   );
@@ -863,6 +915,13 @@ export function ChatPage() {
                     content: data.artifact,
                   });
                 }
+                if (Array.isArray(data.references)) {
+                  setTaskReferences(
+                    conversationId,
+                    resumedTaskId,
+                    data.references as ChatReference[],
+                  );
+                }
               } catch {
                 // Ignore incomplete SSE frames.
               }
@@ -915,7 +974,12 @@ export function ChatPage() {
         abortControllerRef.current = null;
       }
     };
-  }, [activeConversation?.conversationId, appendToTask, resumedTaskId]);
+  }, [
+    activeConversation?.conversationId,
+    appendToTask,
+    resumedTaskId,
+    setTaskReferences,
+  ]);
 
   const beginEdit = useCallback(
     (messageIndex: number) => {
@@ -952,6 +1016,29 @@ export function ChatPage() {
     }).catch(() => {
       // Interactive surfaces remain usable locally if the action endpoint is unavailable.
     });
+  }, []);
+
+  const regenerateMessage = useCallback(
+    (messageIndex: number) => {
+      if (sending || !activeConversation) return;
+      const previousUser = [...activeConversation.messages]
+        .slice(0, messageIndex)
+        .reverse()
+        .find((message) => message.role === "user");
+      if (!previousUser) return;
+      const text = previousUser.parts
+        .filter((part) => part.type === "text")
+        .map((part) => String(part.content))
+        .join("\n")
+        .trim();
+      if (text) void sendMessage(text);
+    },
+    [activeConversation, sendMessage, sending],
+  );
+
+  const openReferences = useCallback((references: ChatReference[]) => {
+    setSelectedReferences(references);
+    setSourcesOpen(true);
   }, []);
 
   const messages = activeConversation?.messages || [];
@@ -1152,6 +1239,12 @@ export function ChatPage() {
                       )
                   }
                   onEdit={() => beginEdit(index)}
+                  onRegenerate={
+                    message.role === "assistant"
+                      ? () => regenerateMessage(index)
+                      : undefined
+                  }
+                  onOpenReferences={openReferences}
                   onAction={handleA2UIAction}
                 />
               ))}
@@ -1219,6 +1312,61 @@ export function ChatPage() {
           </div>
         </div>
       </main>
+      {sourcesOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/20 md:hidden"
+          onClick={() => setSourcesOpen(false)}
+        />
+      )}
+      {sourcesOpen && (
+        <aside className="fixed inset-y-0 right-0 z-40 flex w-[min(92vw,340px)] shrink-0 flex-col border-l bg-card shadow-2xl md:relative md:z-0 md:w-[320px] md:shadow-none">
+          <div className="flex h-14 shrink-0 items-center justify-between border-b px-4">
+            <div>
+              <p className="text-sm font-semibold">Reference</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {selectedReferences.length} 个参考链接
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setSourcesOpen(false)}
+              aria-label="关闭数据来源"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            <div className="space-y-1.5">
+              {selectedReferences.map((reference, index) => (
+                <article
+                  key={`${reference.url || reference.title}-${index}`}
+                  className="rounded-lg border border-border/70 bg-background/50 px-3 py-2 transition-colors hover:border-primary/40 hover:bg-primary/[0.03]"
+                >
+                  <div className="flex items-start gap-2">
+                    <div className="min-w-0 flex-1">
+                      <a
+                        href={reference.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="line-clamp-2 text-sm font-medium leading-5 text-foreground hover:text-primary"
+                      >
+                        {reference.title}
+                      </a>
+                      {reference.snippet && (
+                        <p className="mt-1 line-clamp-1 text-xs leading-5 text-muted-foreground">
+                          {reference.snippet}
+                        </p>
+                      )}
+                    </div>
+                    <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground" />
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+        </aside>
+      )}
     </div>
   );
 }

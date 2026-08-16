@@ -2,11 +2,37 @@
 
 A 股 AI Agent 模拟交易系统 — 基于多智能体协作的回测 + 纸上交易框架。
 
+当前产品定位是面向短中期基金交易研究的辅助工具。系统使用股票或 ETF 的底层资产数据进行研究和模拟，不执行真实交易，也不把股票分析直接等同于基金专项分析。
+
 ## 技术栈
 
-- **后端**：Python 3.11+ / FastAPI / LangGraph / DeepSeek API / AkShare
+- **后端**：Python 3.11+ / FastAPI / LangGraph / DeepSeek API / AkShare / Serper / DDGS
 - **前端**：React / Vite / TailwindCSS / shadcn/ui
 - **Monorepo**：pnpm workspaces
+
+## 核心功能
+
+### 研究报告
+
+每次完成一次研究分析后，系统会生成一份独立的 HTML 研究报告，并在前端的 **研究报告** 菜单中按报告维度集中展示。报告支持：
+
+- 按标的、资产类型、来源和生成时间查看与搜索
+- 在线预览和下载
+- 查看关联对话作为追溯入口；对话不是报告列表的主维度
+- 在报告元数据中记录生成时间、数据状态和联网搜索条数
+
+报告内容由“数据上下文 + 多 Agent 分析 + 综合决策 + 固定报告模板”共同决定。固定模板负责报告结构，LLM 负责综合结论、风险、交易计划和各 Agent 观点；实时分析还会加入联网搜索结果，回测场景保持历史 as-of 数据边界，不主动查询实时网页。
+
+报告文件保存到配置的 S3 兼容对象存储，报告索引和元数据保存到 SQLite。后端代理预览与下载请求，因此对象存储不需要公开读权限。
+
+### 并行联网搜索
+
+`search_web` 会并行查询两个来源并合并去重：
+
+- **Serper**：通过 Google Serper API 获取搜索结果，需要 `SERPER_API_KEY`，适合稳定的生产搜索
+- **DDGS**：开源的 Python 元搜索库，不需要 API Key；它本身免费，但依赖的上游搜索引擎可能限流、阻断或调整服务，不能视为无限量、无条件可用的生产服务
+
+如果没有配置 Serper，`search_web` 仍会使用 DDGS；如果需要明确只使用 DDGS，可调用 `search_web_ddgs`。搜索结果会保留标题、摘要、来源和链接，并写入研究报告的“联网搜索结果”部分。
 
 ## 快速开始
 
@@ -33,17 +59,47 @@ uv sync
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入 DeepSeek API Key 和 S3 兼容对象存储配置
+# 编辑 .env 填入 DeepSeek API Key；生成研究报告时还需要 S3 兼容对象存储配置
 ```
 
-如需启用 Serper，在 `.env` 中配置 `SERPER_API_KEY`。综合搜索会并行查询 Serper 和 DDGS，再合并去重；未配置 Serper 时仍会使用 DDGS。也可以直接调用 `search_web_ddgs` 使用 DDGS 元搜索。
+联网搜索配置：
 
-产物报告使用 S3 兼容对象存储，不再写入后端本地磁盘。支持 AWS S3、MinIO、Ceph、Cloudflare R2 等服务；通过 `S3_ENDPOINT_URL`、`S3_BUCKET`、`S3_ACCESS_KEY_ID` 和 `S3_SECRET_ACCESS_KEY` 配置。预览和下载仍通过后端 `/api/artifacts/{artifact_id}/...` 接口代理，因此对象不需要公开读权限。
+```dotenv
+# Serper；留空时 search_web 仍会并行使用 DDGS
+SERPER_API_KEY=
+SERPER_BASE_URL=https://google.serper.dev
+SERPER_GL=cn
+SERPER_HL=zh-cn
+
+# DDGS 元搜索参数
+DDGS_REGION=cn-zh
+DDGS_SAFESEARCH=moderate
+```
+
+综合搜索会并行查询 Serper 和 DDGS，再合并去重；未配置 Serper 时仍会使用 DDGS。也可以直接调用 `search_web_ddgs` 使用 DDGS 元搜索。
+
+产物报告默认使用 S3 兼容对象存储，不写入后端本地磁盘。支持 AWS S3、MinIO、Ceph、Cloudflare R2 等服务；通过以下配置项设置：
+
+```dotenv
+S3_ENDPOINT_URL=
+S3_BUCKET=
+S3_REGION=us-east-1
+S3_ACCESS_KEY_ID=
+S3_SECRET_ACCESS_KEY=
+S3_SESSION_TOKEN=
+S3_ADDRESSING_STYLE=path
+S3_ARTIFACTS_PREFIX=a-share-agent/artifacts
+```
+
+单元测试可以显式注入本地存储适配器；生产环境应配置 S3 兼容对象存储。
 
 ### 启动开发服务器
 
 ```bash
-# 同时启动前后端
+# 同时启动前后端（推荐）
+make dev
+
+# 也可以直接使用 pnpm
 pnpm dev
 
 # 或分别启动
@@ -67,6 +123,15 @@ Chat 页面支持股票、ETF 和 LOF 的行情查询与研究。Analysis 页面
 
 场内基金使用 AkShare 的 `fund_etf_*` 或 `fund_lof_*` 接口；股票仍使用股票行情接口。默认分析和订单均为研究/模拟用途；实盘需额外配置并通过独立安全门禁。
 
+研究报告接口包括：
+
+```text
+GET /api/artifacts
+GET /api/artifacts/{artifact_id}
+GET /api/artifacts/{artifact_id}/preview
+GET /api/artifacts/{artifact_id}/download
+```
+
 ### LangSmith 追踪
 
 在 `.env` 中配置 `LANGSMITH_TRACING=true` 和 `LANGSMITH_API_KEY` 后，Stock Agent 的路由及 LangGraph 分析流程会发送到 `LANGSMITH_PROJECT` 指定的项目。API Key 只通过环境变量读取，不会显示在前端。
@@ -89,6 +154,17 @@ Chat 页面支持股票、ETF 和 LOF 的行情查询与研究。Analysis 页面
 实盘模式需要同时满足 `LIVE_TRADING_ENABLED=true`、自动化任务 `execution_mode=live` 且 `live_armed=true`、账户配置启用 `custom_http` Adapter。Adapter 对接一个由用户自行维护的交易网关：`POST /orders` 接收标准化订单，`DELETE /orders/{id}` 撤单，`GET /sync?account_id=...` 返回现金和持仓快照。默认配置和未实现的 provider 都会 fail-closed；未完成券商适配、风控和人工审批前，不应启用真实账户。
 
 回测页面的股票代码支持逗号分隔的股票池，例如 `000737,600519`。批量回测会让每个股票使用各自的历史 as-of 上下文，并合并到同一个组合中计算资金曲线和交易成本。
+
+### 测试与构建
+
+```bash
+# 后端测试与静态检查
+cd backend && uv run pytest
+cd backend && uv run ruff check src
+
+# 前端类型检查与生产构建
+pnpm build:frontend
+```
 
 自动化接口包括：
 
@@ -131,6 +207,8 @@ a-share-agent/
 │   │   ├── api/             # FastAPI 路由
 │   │   ├── agents/          # Agent 角色定义
 │   │   ├── data/            # 数据源封装 (AkShare)
+│   │   ├── artifacts/        # 研究报告生成、索引与对象存储
+│   │   ├── application/      # 对话、研究与任务服务
 │   │   ├── llm/             # DeepSeek LLM 适配器
 │   │   ├── engine/          # 回测 + 模拟交易引擎
 │   │   ├── graph/           # LangGraph 工作流

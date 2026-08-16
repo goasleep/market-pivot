@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   A2UIRenderer,
   createMarkdownSurface,
@@ -9,7 +10,16 @@ import { WidgetRenderer } from "./WidgetRenderer";
 import { ArtifactCard } from "./ArtifactCard";
 import type { Artifact } from "@/types";
 import { cn } from "@/lib/utils";
-import { Bot, Loader2, Pencil, User } from "lucide-react";
+import {
+  Check,
+  Copy,
+  ExternalLink,
+  Loader2,
+  Pencil,
+  RefreshCw,
+  User,
+  Bot,
+} from "lucide-react";
 
 export interface ChatMessagePart {
   type: "text" | "a2ui" | "widget" | "artifact";
@@ -17,10 +27,20 @@ export interface ChatMessagePart {
   widgetType?: string;
 }
 
+export interface ChatReference {
+  title: string;
+  url?: string;
+  source?: string;
+  snippet?: string;
+  date?: string;
+}
+
 export interface ChatMessageData {
   id?: string;
   role: "user" | "assistant";
   parts: ChatMessagePart[];
+  createdAt?: string;
+  references?: ChatReference[];
   loading?: boolean;
   status?:
     | "pending"
@@ -36,7 +56,30 @@ interface ChatMessageProps {
   message: ChatMessageData;
   editable?: boolean;
   onEdit?: () => void;
+  onRegenerate?: () => void;
+  onOpenReferences?: (references: ChatReference[]) => void;
   onAction?: (action: A2UIAction) => void;
+}
+
+function messageText(message: ChatMessageData): string {
+  const text = message.parts
+    .filter((part) => part.type === "text")
+    .map((part) => String(part.content))
+    .join("\n\n")
+    .trim();
+  const references = (message.references || []).filter((reference) => reference.url);
+  if (!references.length) return text;
+  return [text, "\n参考来源：", ...references.map((item) => `${item.title} · ${item.url || item.source}`)]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatMessageTime(value?: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (number: number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 /**
@@ -47,9 +90,26 @@ export function ChatMessage({
   message,
   editable = false,
   onEdit,
+  onRegenerate,
+  onOpenReferences,
   onAction,
 }: ChatMessageProps) {
   const isUser = message.role === "user";
+  const [copied, setCopied] = useState(false);
+  const references = (message.references || []).filter((reference) => reference.url);
+  const timestamp = formatMessageTime(message.createdAt);
+
+  const copyMessage = async () => {
+    const content = messageText(message);
+    if (!content) return;
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      // Clipboard permissions can be unavailable in embedded browsers.
+    }
+  };
 
   return (
     <div
@@ -78,7 +138,7 @@ export function ChatMessage({
         )}
       >
         <div className="flex items-start gap-2">
-          <div className="flex flex-col items-end gap-2">
+          <div className={cn("flex flex-col gap-2", isUser ? "items-end" : "items-start")}>
             {message.parts.map((part, i) => {
               if (part.type === "text") {
                 if (!isUser) {
@@ -163,6 +223,42 @@ export function ChatMessage({
             </button>
           )}
         </div>
+        <div className={cn("flex items-center gap-1.5 text-xs text-muted-foreground", isUser && "justify-end")}>
+          {timestamp && (!message.loading || isUser) && <span className="mr-1 tabular-nums">{timestamp}</span>}
+          {isUser && <button
+              type="button"
+              onClick={() => void copyMessage()}
+              aria-label="复制消息"
+              title="复制消息"
+              className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground"
+            >
+              {copied ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+            </button>}
+        </div>
+        {!isUser && !message.loading && message.parts.length > 0 && (
+          <div className="flex items-center gap-1 text-muted-foreground">
+            <button type="button" onClick={() => void copyMessage()} aria-label="复制回复" title="复制回复" className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground">
+              {copied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
+            </button>
+            <button type="button" onClick={onRegenerate} disabled={!onRegenerate} aria-label="重新生成" title="重新生成" className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40">
+              <RefreshCw className="h-4 w-4" />
+            </button>
+            {references.length > 0 && (
+              <>
+                <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
+                <button
+                  type="button"
+                  onClick={() => onOpenReferences?.(references)}
+                  className="flex items-center gap-1.5 rounded-full border border-border/80 bg-background/60 px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-primary"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Reference
+                  <span className="rounded-full bg-primary/10 px-1.5 text-[10px]">{references.length}</span>
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

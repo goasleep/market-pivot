@@ -31,7 +31,8 @@ install:
 	cd backend && uv sync
 
 dev:
-	pnpm dev
+	@pnpm exec concurrently --kill-others-on-fail --names frontend,backend --prefix-colors blue,green \
+		"pnpm dev:frontend" "pnpm dev:backend"
 
 build:
 	pnpm build:frontend

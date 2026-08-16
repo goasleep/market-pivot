@@ -16,6 +16,7 @@ from data.akshare_provider import (
     async_get_stock_realtime,
 )
 from data.serper_provider import async_search_web_parallel
+from data.web_content import async_enrich_web_results
 from models.schemas import AssetType, MarketContext
 
 
@@ -129,7 +130,8 @@ async def build_market_context(
         num_results=8,
         tbs="qdr:m",
     )
-    web_results = web_search.get("results", [])
+    web_results = await async_enrich_web_results(web_search.get("results", []))
+    full_text_count = sum(item.get("content_status") == "full_text" for item in web_results)
     live_price = current_price if current_price and current_price > 0 else None
     price = float(live_price if live_price is not None else realtime.get("price", 0.0) or 0.0)
     return MarketContext(
@@ -148,6 +150,7 @@ async def build_market_context(
             "financial": asset_type == AssetType.STOCK and bool(financial),
             "news": bool(news),
             "web_search": bool(web_results),
+            "web_full_text": full_text_count,
             "web_search_source": web_search.get("source", "") if web_results else "",
             "latest_history_date": records[-1].get("date", "") if records else "",
             "source": "AkShare / 东方财富" if asset_type != AssetType.STOCK else "AkShare",
