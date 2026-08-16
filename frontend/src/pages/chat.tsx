@@ -41,6 +41,71 @@ interface ChatStore {
   conversations: Conversation[];
 }
 
+function a2uiMessages(content: A2UIMessage | A2UIMessage[]): A2UIMessage[] {
+  return Array.isArray(content) ? content : [content];
+}
+
+function a2uiMessageKey(message: A2UIMessage): string {
+  return JSON.stringify(message);
+}
+
+function dedupeParts(parts: ChatMessagePart[]): ChatMessagePart[] {
+  const artifactIds = new Set<string>();
+  const a2uiKeys = new Set<string>();
+  const result: ChatMessagePart[] = [];
+
+  for (const part of parts) {
+    if (part.type === "artifact") {
+      const content = part.content;
+      const artifactId =
+        content && typeof content === "object" && !Array.isArray(content)
+          ? (content as Record<string, unknown>).artifact_id
+          : undefined;
+      if (typeof artifactId === "string") {
+        if (artifactIds.has(artifactId)) continue;
+        artifactIds.add(artifactId);
+      }
+      result.push(part);
+      continue;
+    }
+
+    if (part.type !== "a2ui") {
+      result.push(part);
+      continue;
+    }
+
+    const content = a2uiMessages(part.content as A2UIMessage | A2UIMessage[]).filter(
+      (message) => {
+        const key = a2uiMessageKey(message);
+        if (a2uiKeys.has(key)) return false;
+        a2uiKeys.add(key);
+        return true;
+      },
+    );
+    if (content.length > 0) {
+      result.push({ ...part, content });
+    }
+  }
+
+  return result;
+}
+
+function normalizeConversation(conversation: Conversation): Conversation {
+  return {
+    ...conversation,
+    messages: conversation.messages.map((message) => ({
+      ...message,
+      parts: dedupeParts(message.parts),
+    })),
+  };
+}
+
+function hasRunningTask(conversation: Conversation): boolean {
+  return conversation.messages.some(
+    (message) => message.role === "assistant" && message.loading && message.taskId,
+  );
+}
+
 const SUGGESTIONS = [
   { label: "分析 ETF 510300", text: "分析 ETF 510300，适合我的短中期交易吗？" },
   { label: "查询实时行情", text: "查询 600519 的实时行情" },
@@ -102,7 +167,12 @@ function loadStore(): ChatStore {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as ChatStore;
-      if (parsed.conversations?.length) return parsed;
+      if (parsed.conversations?.length) {
+        return {
+          ...parsed,
+          conversations: parsed.conversations.map(normalizeConversation),
+        };
+      }
     }
 
     // Migrate the previous split current/history format once.
@@ -130,7 +200,10 @@ function loadStore(): ChatStore {
         ...item,
         createdAt: item.createdAt || item.updatedAt || new Date().toISOString(),
       }));
-      return { activeId: conversations[0].conversationId, conversations };
+      return {
+        activeId: conversations[0].conversationId,
+        conversations: conversations.map(normalizeConversation),
+      };
     }
   } catch {
     // Fall through to a clean local store.
@@ -154,7 +227,7 @@ function hydrateServerConversation(raw: Record<string, unknown>): Conversation {
     title: String(raw.title || "新对话"),
     createdAt: String(raw.created_at || new Date().toISOString()),
     updatedAt: String(raw.updated_at || new Date().toISOString()),
-    messages: rawMessages.map((rawMessage) => {
+      messages: rawMessages.map((rawMessage) => {
       const message = rawMessage as Record<string, unknown>;
       const status =
         typeof message.status === "string"
@@ -164,7 +237,7 @@ function hydrateServerConversation(raw: Record<string, unknown>): Conversation {
         id: typeof message.id === "string" ? message.id : undefined,
         role: message.role === "assistant" ? "assistant" : "user",
         parts: Array.isArray(message.parts)
-          ? (message.parts as ChatMessageData["parts"])
+          ? dedupeParts(message.parts as ChatMessageData["parts"])
           : [],
         loading: Boolean(message.loading),
         status,
@@ -246,7 +319,19 @@ export function ChatPage() {
           const localOnly = current.conversations.filter(
             (conversation) => !serverIds.has(conversation.conversationId),
           );
-          const merged = [...conversations, ...localOnly];
+          const merged = conversations.map((serverConversation) => {
+            const localConversation = current.conversations.find(
+              (conversation) =>
+                conversation.conversationId === serverConversation.conversationId,
+            );
+            // A live task owns its local message until its stream finishes. The
+            // initial server-history request may otherwise replace it with a
+            // snapshot, after which the same SSE events are appended again.
+            return localConversation && hasRunningTask(localConversation)
+              ? localConversation
+              : serverConversation;
+          });
+          merged.push(...localOnly);
           const activeId = merged.some(
             (conversation) => conversation.conversationId === current.activeId,
           )
@@ -376,14 +461,35 @@ export function ChatPage() {
           assistant.parts[assistant.parts.length - 1]?.type === "a2ui"
         ) {
           const previous = assistant.parts[assistant.parts.length - 1];
-          const previousMessages = Array.isArray(previous.content)
-            ? previous.content
-            : [previous.content];
-          const nextMessages = Array.isArray(part.content)
-            ? part.content
-            : [part.content];
-          previous.content = [...(previousMessages as A2UIMessage[]), ...(nextMessages as A2UIMessage[])];
+          const previousMessages = a2uiMessages(
+            previous.content as A2UIMessage | A2UIMessage[],
+          );
+          const nextMessages = a2uiMessages(
+            part.content as A2UIMessage | A2UIMessage[],
+          );
+          const existingKeys = new Set(previousMessages.map(a2uiMessageKey));
+          previous.content = [
+            ...previousMessages,
+            ...nextMessages.filter((message) => {
+              const key = a2uiMessageKey(message);
+              if (existingKeys.has(key)) return false;
+              existingKeys.add(key);
+              return true;
+            }),
+          ];
         } else {
+          if (
+            part.type === "artifact" &&
+            typeof (part.content as Record<string, unknown>)?.artifact_id === "string" &&
+            assistant.parts.some(
+              (existingPart) =>
+                existingPart.type === "artifact" &&
+                (existingPart.content as Record<string, unknown>)?.artifact_id ===
+                  (part.content as Record<string, unknown>).artifact_id,
+            )
+          ) {
+            return item;
+          }
           assistant.parts.push(part);
         }
         return { ...item, messages, updatedAt: new Date().toISOString() };
@@ -416,17 +522,35 @@ export function ChatPage() {
             previous.content += part.content;
           }
         } else if (part.type === "a2ui" && previous?.type === "a2ui") {
-          const previousMessages = Array.isArray(previous.content)
-            ? previous.content
-            : [previous.content];
-          const nextMessages = Array.isArray(part.content)
-            ? part.content
-            : [part.content];
+          const previousMessages = a2uiMessages(
+            previous.content as A2UIMessage | A2UIMessage[],
+          );
+          const nextMessages = a2uiMessages(
+            part.content as A2UIMessage | A2UIMessage[],
+          );
+          const existingKeys = new Set(previousMessages.map(a2uiMessageKey));
           previous.content = [
             ...(previousMessages as A2UIMessage[]),
-            ...(nextMessages as A2UIMessage[]),
+            ...nextMessages.filter((message) => {
+              const key = a2uiMessageKey(message);
+              if (existingKeys.has(key)) return false;
+              existingKeys.add(key);
+              return true;
+            }),
           ];
         } else {
+          if (
+            part.type === "artifact" &&
+            typeof (part.content as Record<string, unknown>)?.artifact_id === "string" &&
+            assistant.parts.some(
+              (existingPart) =>
+                existingPart.type === "artifact" &&
+                (existingPart.content as Record<string, unknown>)?.artifact_id ===
+                  (part.content as Record<string, unknown>).artifact_id,
+            )
+          ) {
+            return item;
+          }
           assistant.parts.push(part);
         }
         return { ...item, messages, updatedAt: new Date().toISOString() };
