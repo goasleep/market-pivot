@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from application.backtest_jobs import backtest_jobs
-from engine.backtester import run_backtest, run_pool_backtest
+from application.backtest_service import run_backtest, run_pool_backtest
 from models.schemas import AssetType
 
 router = APIRouter()

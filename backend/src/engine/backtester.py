@@ -18,12 +18,15 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from application.research import research_service
 from data.akshare_provider import async_get_fund_history, async_get_stock_history
 from data.market_context import build_market_context
 from engine.trading_engine import TimeAwareTradingEngine, decision_shares
-from graph.workflow import workflow
 from models.schemas import AssetType, Decision, SimulationAccountConfig
-from observability import build_trace_config
+
+# Kept as a module alias for existing test doubles and callers that patch the
+# workflow. Production invocation is routed through ResearchService below.
+workflow = research_service.workflow
 
 
 async def run_backtest(
@@ -140,26 +143,22 @@ async def run_backtest(
                     "market_context": context,
                     "progress": [],
                 }
-                run_config = build_trace_config(
-                    "backtest-agent-analysis",
-                    tags=["backtest", "agent"],
-                    metadata={
-                        "ticker": ticker,
-                        "asset_type": asset_type.value,
-                        "as_of_date": current_date,
-                        "strategy": strategy_name or "auto",
-                    },
+                result = await research_service.run_state(
+                    state,
+                    trace_config=research_service.build_trace_config(
+                        ticker,
+                        asset_type,
+                        run_name="backtest-agent-analysis",
+                        tags=["backtest", "agent"],
+                        metadata={
+                            "ticker": ticker,
+                            "asset_type": asset_type.value,
+                            "as_of_date": current_date,
+                            "strategy": strategy_name or "auto",
+                        },
+                    ),
+                    workflow_override=workflow,
                 )
-                invoke_options = {"config": run_config} if run_config.get("callbacks") else {}
-                try:
-                    result = await workflow.ainvoke(state, **invoke_options)
-                except TypeError as exc:
-                    # Keep simple workflow test doubles compatible with the
-                    # optional tracing config without masking other errors.
-                    if invoke_options and "unexpected keyword argument 'config'" in str(exc):
-                        result = await workflow.ainvoke(state)
-                    else:
-                        raise
                 decision = result.get("final_decision")
 
                 if decision and decision.decision != Decision.HOLD:
@@ -314,24 +313,22 @@ async def run_pool_backtest(
                         "market_context": context,
                         "progress": [],
                     }
-                    run_config = build_trace_config(
-                        "backtest-agent-analysis",
-                        tags=["backtest", "agent", "pool"],
-                        metadata={
-                            "ticker": symbol,
-                            "asset_type": asset_type.value,
-                            "as_of_date": current_date,
-                            "strategy": strategy_name or "auto",
-                        },
+                    result = await research_service.run_state(
+                        state,
+                        trace_config=research_service.build_trace_config(
+                            symbol,
+                            asset_type,
+                            run_name="backtest-agent-analysis",
+                            tags=["backtest", "agent", "pool"],
+                            metadata={
+                                "ticker": symbol,
+                                "asset_type": asset_type.value,
+                                "as_of_date": current_date,
+                                "strategy": strategy_name or "auto",
+                            },
+                        ),
+                        workflow_override=workflow,
                     )
-                    invoke_options = {"config": run_config} if run_config.get("callbacks") else {}
-                    try:
-                        result = await workflow.ainvoke(state, **invoke_options)
-                    except TypeError as exc:
-                        if invoke_options and "unexpected keyword argument 'config'" in str(exc):
-                            result = await workflow.ainvoke(state)
-                        else:
-                            raise
                     decision = result.get("final_decision")
                     if decision and decision.decision != Decision.HOLD:
                         if fill_time == "same_close":

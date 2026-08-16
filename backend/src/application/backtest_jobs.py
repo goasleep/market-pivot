@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
-from engine.backtester import run_backtest, run_pool_backtest
+from application.backtest_service import run_backtest, run_pool_backtest
 
 
 @dataclass
