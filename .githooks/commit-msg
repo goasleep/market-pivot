@@ -1,0 +1,31 @@
+#!/bin/sh
+
+set -eu
+
+commit_message_file=$1
+subject=$(sed -n '/^[^#]/p' "$commit_message_file" | sed -n '1p')
+
+case "$subject" in
+  Merge\ *)
+    exit 0
+    ;;
+esac
+
+if ! printf '%s\n' "$subject" | grep -Eq '^(feat|fix|docs|refactor|test|chore|build|ci|perf|style|revert)(\([a-z0-9._/-]+\))?: .+'; then
+  echo "Commit rejected: use Conventional Commits, for example 'feat: add quote comparison'" >&2
+  exit 1
+fi
+
+if printf '%s\n' "$subject" | awk 'length($0) > 72 { exit 1 }'; then
+  :
+else
+  echo "Commit rejected: subject must be 72 characters or fewer" >&2
+  exit 1
+fi
+
+case "$subject" in
+  *.)
+    echo "Commit rejected: subject must not end with a period" >&2
+    exit 1
+    ;;
+esac

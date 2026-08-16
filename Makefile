@@ -1,7 +1,8 @@
-.PHONY: help install setup dev build up start down restart logs docker-build clean
+.PHONY: help init install-hooks install setup dev build up start down restart logs docker-build clean
 
 help:
 	@echo "Available commands:"
+	@echo "  make init         Initialize the project and install Git hooks"
 	@echo "  make setup        Initialize .env and install local dependencies"
 	@echo "  make install      Install frontend (pnpm) and backend (uv) dependencies"
 	@echo "  make dev          Start local development servers"
@@ -13,9 +14,17 @@ help:
 	@echo "  make restart      Restart Compose services"
 	@echo "  make logs         Follow Compose service logs"
 
+init: setup
+
 setup:
+	$(MAKE) install-hooks
 	@test -f .env || cp .env.example .env
 	$(MAKE) install
+
+install-hooks:
+	git config core.hooksPath .githooks
+	chmod +x .githooks/commit-msg .githooks/pre-commit
+	@echo "Git hooks installed via core.hooksPath=.githooks"
 
 install:
 	pnpm install

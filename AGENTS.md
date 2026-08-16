@@ -63,6 +63,8 @@ Git history is not available in this checkout, so no project-specific convention
 - If the change affects both backend and frontend, run both sets of checks and verify the final diff with `git diff --check`.
 - The commit body is optional, but use it when the subject cannot explain the behavior change or when configuration, API, cache, or schema impact needs to be recorded.
 - When handing off a commit, report the commit hash, summarize the included changes, list validation commands, and explicitly mention intentionally excluded worktree changes.
+- Run `make init` on a new checkout to install dependencies and configure the versioned hooks under `.githooks/`.
+- The `commit-msg` hook enforces the Conventional Commits subject format and basic subject limits; the `pre-commit` hook runs staged-file checks for backend and frontend changes. Hooks may be bypassed with `--no-verify` only when the reason is documented in the handoff.
 
 ## Security & Configuration Tips
 
