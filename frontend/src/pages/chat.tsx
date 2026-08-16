@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   ChatMessage,
+  type ChatMessagePart,
   type ChatMessageData,
 } from "@/components/chat/ChatMessage";
 import type { A2UIAction, A2UIMessage } from "@/components/chat/A2UIRenderer";
@@ -174,6 +176,8 @@ function hydrateServerConversation(raw: Record<string, unknown>): Conversation {
 }
 
 export function ChatPage() {
+  const [searchParams] = useSearchParams();
+  const requestedConversationId = searchParams.get("conversation");
   const [store, setStore] = useState<ChatStore>(() => loadStore());
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
@@ -214,6 +218,17 @@ export function ChatPage() {
   }, [search, store.conversations]);
 
   useEffect(() => saveStore(store), [store]);
+
+  useEffect(() => {
+    if (!requestedConversationId) return;
+    setStore((current) =>
+      current.conversations.some(
+        (conversation) => conversation.conversationId === requestedConversationId,
+      ) && current.activeId !== requestedConversationId
+        ? { ...current, activeId: requestedConversationId }
+        : current,
+    );
+  }, [requestedConversationId]);
 
   useEffect(() => {
     let mounted = true;
@@ -336,8 +351,8 @@ export function ChatPage() {
       conversationId: string,
       messageIndex: number,
       part: {
-        type: "text" | "a2ui" | "widget";
-        content: string | A2UIMessage | A2UIMessage[];
+        type: ChatMessagePart["type"];
+        content: ChatMessagePart["content"];
         widgetType?: string;
       },
     ) => {
@@ -382,8 +397,8 @@ export function ChatPage() {
       conversationId: string,
       taskId: string,
       part: {
-        type: "text" | "a2ui" | "widget";
-        content: string | A2UIMessage | A2UIMessage[];
+        type: ChatMessagePart["type"];
+        content: ChatMessagePart["content"];
         widgetType?: string;
       },
     ) => {
@@ -483,6 +498,11 @@ export function ChatPage() {
             appendToAssistant(conversationId, assistantIndex, {
               type: "a2ui",
               content: data.a2ui as A2UIMessage | A2UIMessage[],
+            });
+          if (data.artifact !== undefined)
+            appendToAssistant(conversationId, assistantIndex, {
+              type: "artifact",
+              content: data.artifact as ChatMessagePart["content"],
             });
         };
 
@@ -656,31 +676,11 @@ export function ChatPage() {
     let disposed = false;
     let lastEventId = "";
 
-    const refreshConversation = async () => {
-      const response = await fetch(
-        `/api/chat/conversations/${encodeURIComponent(conversationId)}`,
-        { signal: reconnectController.signal },
-      );
-      if (!response.ok) return;
-      const conversation = hydrateServerConversation(await response.json());
-      setStore((current) => ({
-        ...current,
-        conversations: current.conversations.map((item) =>
-          item.conversationId === conversation.conversationId ? conversation : item,
-        ),
-      }));
-    };
-
-    // SSE is the primary transport. Poll the durable conversation as a fallback
-    // for browser buffering or a reconnect that is waiting on the next event.
-    const syncTimer = window.setInterval(() => {
-      if (!disposed) void refreshConversation().catch(() => undefined);
-    }, 1000);
-
     const waitBeforeReconnect = () =>
       new Promise<void>((resolve) => window.setTimeout(resolve, 1000));
 
     const consumeReconnectStream = async () => {
+      let terminalStatus: ChatMessageData["status"] | null = null;
       while (!disposed && !reconnectController.signal.aborted) {
         try {
           const response = await fetch(
@@ -690,6 +690,10 @@ export function ChatPage() {
               headers: lastEventId ? { "Last-Event-ID": lastEventId } : undefined,
             },
           );
+          if (response.status === 404) {
+            terminalStatus = "interrupted";
+            break;
+          }
           if (!response.ok) throw new Error(`重连失败（${response.status}）`);
           const reader = response.body?.getReader();
           if (!reader) throw new Error("重连没有收到流式响应");
@@ -729,19 +733,30 @@ export function ChatPage() {
                     content: data.a2ui,
                   });
                 }
+                if (data.artifact !== undefined) {
+                  appendToTask(conversationId, resumedTaskId, {
+                    type: "artifact",
+                    content: data.artifact,
+                  });
+                }
               } catch {
                 // Ignore incomplete SSE frames.
               }
             }
           }
           lastEventId = currentEventId;
-          await refreshConversation();
           const taskResponse = await fetch(
             `/api/chat/tasks/${encodeURIComponent(resumedTaskId)}`,
             { signal: reconnectController.signal },
           );
-          const task = taskResponse.ok ? await taskResponse.json() : null;
-          if (!task || ["completed", "failed", "cancelled", "interrupted"].includes(task.status)) {
+          if (taskResponse.status === 404) {
+            terminalStatus = "interrupted";
+            break;
+          }
+          if (!taskResponse.ok) throw new Error(`任务状态查询失败（${taskResponse.status}）`);
+          const task = (await taskResponse.json()) as { status?: string };
+          if (task.status && TERMINAL_TASK_STATUSES.has(task.status)) {
+            terminalStatus = task.status as ChatMessageData["status"];
             break;
           }
         } catch {
@@ -750,19 +765,27 @@ export function ChatPage() {
         }
       }
       if (!disposed) {
+        if (terminalStatus) {
+          updateConversation(conversationId, (item) => ({
+            ...item,
+            messages: item.messages.map((message) =>
+              message.role === "assistant" && message.taskId === resumedTaskId
+                ? { ...message, loading: false, status: terminalStatus }
+                : message,
+            ),
+          }));
+        }
         activeTaskIdRef.current = null;
         if (abortControllerRef.current === reconnectController) {
           abortControllerRef.current = null;
         }
         setSending(false);
-        await refreshConversation().catch(() => undefined);
       }
     };
 
     void consumeReconnectStream();
     return () => {
       disposed = true;
-      window.clearInterval(syncTimer);
       reconnectController.abort();
       if (abortControllerRef.current === reconnectController) {
         abortControllerRef.current = null;
@@ -1013,11 +1036,6 @@ export function ChatPage() {
         </div>
         <div className="border-t bg-card/80 p-3 md:p-5">
           <div className="mx-auto max-w-4xl">
-            {sending && !activeConversationSending && (
-              <div className="mb-2 rounded-lg border border-primary/15 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
-                另一个对话正在生成中；任务不会因切换而终止，完成后即可继续发送。
-              </div>
-            )}
             {editingMessageIndex !== null && (
               <div className="mb-2 flex items-center justify-between rounded-lg bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
                 <span>正在编辑最后一条消息，提交后会重新生成回复</span>

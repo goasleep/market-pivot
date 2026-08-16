@@ -15,6 +15,7 @@ from uuid import uuid4
 from loguru import logger
 
 from agents.stock_agent import StockIntent, stock_agent
+from application.research import research_service
 from config import settings
 from widgets.a2ui import (
     render_activity,
@@ -127,7 +128,11 @@ class ChatStore:
     def _parts(item: dict[str, Any]) -> list[dict[str, Any]]:
         parts = item.get("parts")
         if isinstance(parts, list) and parts:
-            return [part for part in parts if isinstance(part, dict) and part.get("type") in {"text", "a2ui", "widget"}]
+            return [
+                part
+                for part in parts
+                if isinstance(part, dict) and part.get("type") in {"text", "a2ui", "widget", "artifact"}
+            ]
         return [_text_part(str(item.get("content", "")))]
 
     def _ensure_conversation(self, connection: sqlite3.Connection, conversation_id: str, title: str) -> None:
@@ -621,17 +626,106 @@ class ChatTaskManager:
                 {"event": "a2ui", "data": _json({"a2ui": message})},
             )
 
-    async def _emit_tool_event(self, task_input: ChatTaskInput, event: dict[str, Any]) -> None:
+    async def _emit_artifact(self, task_input: ChatTaskInput, artifact: dict[str, Any]) -> None:
+        """Persist and stream one generated file artifact."""
+        if not self.store.append_part(
+            task_input.assistant_message_id,
+            {"type": "artifact", "content": artifact},
+            task_input.task_id,
+        ):
+            raise asyncio.CancelledError
+        await self._broadcast(
+            task_input.task_id,
+            {"event": "artifact", "data": _json({"artifact": artifact})},
+        )
+
+    async def _emit_tool_event(self, task_input: ChatTaskInput, event: dict[str, Any]) -> list[dict[str, Any]]:
         """Render tool progress and, when possible, its structured result."""
         name = str(event.get("name", "unknown"))
-        await self._emit_a2ui(task_input, render_activity(name, str(event.get("status", "completed"))))
+        status = str(event.get("status", "completed"))
         result = event.get("result")
+        error_message = ""
+        if status == "failed" and result:
+            try:
+                payload = json.loads(str(result))
+                error = payload.get("error", {}) if isinstance(payload, dict) else {}
+                if isinstance(error, dict):
+                    code = str(error.get("code", "tool_error"))
+                    message = str(error.get("message", "工具执行失败"))
+                    error_message = f"{code}: {message}"
+                else:
+                    error_message = str(error)
+            except (TypeError, json.JSONDecodeError):
+                error_message = str(result)
+        await self._emit_a2ui(
+            task_input,
+            render_activity(name, status, error=error_message),
+        )
+        artifacts: list[dict[str, Any]] = []
         if result:
+            try:
+                tool_payload = json.loads(str(result))
+            except (TypeError, json.JSONDecodeError):
+                tool_payload = {}
+            for artifact in tool_payload.get("artifacts", []) if isinstance(tool_payload, dict) else []:
+                if isinstance(artifact, dict):
+                    artifacts.append(artifact)
             surface = render_tool_result(name, str(result))
             if surface:
                 await self._emit_a2ui(task_input, surface)
+        return artifacts
 
-    async def _run_analysis(self, task_input: ChatTaskInput) -> bool:
+    async def _emit_analysis_progress(
+        self,
+        task_input: ChatTaskInput,
+        update: dict[str, Any],
+        progress_state: dict[str, Any],
+    ) -> None:
+        """Persist progress from a long-running analysis tool invocation."""
+        if not progress_state["status_sent"] and update.get("data_status"):
+            status = update["data_status"]
+            await self._emit_text(
+                task_input,
+                "数据状态："
+                f"历史={'正常' if status.get('history') else '缺失'}，"
+                f"实时={'正常' if status.get('realtime') else '缺失'}，"
+                f"财务={'正常' if status.get('financial') else '不适用/缺失'}，"
+                f"新闻={'正常' if status.get('news') else '缺失'}。",
+            )
+            progress_state["status_sent"] = True
+
+        if not progress_state["realtime_sent"] and update.get("realtime"):
+            await self._emit_a2ui(
+                task_input,
+                render_stock_card(update["realtime"], progress_state["stock_surface"]),
+            )
+            progress_state["realtime_sent"] = True
+
+        node = "debate" if update.get("node") == "merge_debate" else update.get("node", "")
+        for stage in progress_state["stages"]:
+            if stage["name"] == node:
+                stage["status"] = "done"
+                break
+        current_stage = next(
+            (stage["name"] for stage in progress_state["stages"] if stage["status"] == "pending"),
+            "",
+        )
+        await self._emit_a2ui(
+            task_input,
+            render_agent_pipeline(
+                progress_state["stages"],
+                current_stage,
+                progress_state["pipeline_surface"],
+                include_create=not progress_state["pipeline_created"],
+            ),
+        )
+        progress_state["pipeline_created"] = True
+
+    async def _run_analysis(
+        self,
+        task_input: ChatTaskInput,
+        pending_artifacts: list[dict[str, Any]] | None = None,
+    ) -> bool:
         """Use the structured analysis workflow for analysis requests."""
         request = stock_agent.resolve(
             task_input.message,
@@ -721,6 +815,18 @@ class ChatTaskManager:
         await self._emit_text(task_input, summary)
         if decision.reasoning:
             await self._emit_text(task_input, f"\n\n**决策依据：**\n{decision.reasoning}")
+        artifacts = await research_service.create_artifacts(
+            decision,
+            accumulated.get("market_context"),
+            source="chat-analysis",
+            conversation_id=task_input.conversation_id,
+            task_id=task_input.task_id,
+        )
+        if pending_artifacts is None:
+            for artifact in artifacts:
+                await self._emit_artifact(task_input, artifact)
+        else:
+            pending_artifacts.extend(artifacts)
         return True
 
     async def _run(self, task_input: ChatTaskInput) -> None:
@@ -734,7 +840,8 @@ class ChatTaskManager:
                 task_input,
                 render_activity("Agent 正在规划任务并选择数据工具", "running", orchestration_surface),
             )
-            handled = await self._run_analysis(task_input)
+            pending_artifacts: list[dict[str, Any]] = []
+            handled = await self._run_analysis(task_input, pending_artifacts)
             if not handled:
                 request = stock_agent.prepare(
                     message=task_input.message,
@@ -743,13 +850,33 @@ class ChatTaskManager:
                     conversation_id=task_input.conversation_id,
                     asset_type=task_input.asset_type,
                 )
+                analysis_progress = {
+                    "stages": [
+                        {"name": "market_data", "label": "Market Data", "status": "pending"},
+                        {"name": "technical", "label": "Technical", "status": "pending"},
+                        {"name": "fundamentals", "label": "Fundamentals", "status": "pending"},
+                        {"name": "sentiment", "label": "Sentiment", "status": "pending"},
+                        {"name": "debate", "label": "Debate", "status": "pending"},
+                        {"name": "risk", "label": "Risk", "status": "pending"},
+                        {"name": "portfolio", "label": "Portfolio", "status": "pending"},
+                    ],
+                    "pipeline_surface": f"pipeline-{task_id}",
+                    "stock_surface": f"stock-{task_id}",
+                    "status_sent": False,
+                    "realtime_sent": False,
+                    "pipeline_created": False,
+                }
+
+                async def on_analysis_progress(update: dict[str, Any]) -> None:
+                    await self._emit_analysis_progress(task_input, update, analysis_progress)
+
                 seen_tool_events: set[str] = set()
-                async for event in stock_agent.chat(request):
+                async for event in stock_agent.chat(request, progress_callback=on_analysis_progress):
                     if event.get("type") == "tool":
                         event_key = f"{event.get('name', 'unknown')}:{event.get('result', '')}"
                         if event_key not in seen_tool_events:
                             seen_tool_events.add(event_key)
-                            await self._emit_tool_event(task_input, event)
+                            pending_artifacts.extend(await self._emit_tool_event(task_input, event))
                     else:
                         text = event.get("text", "")
                         if text:
@@ -763,6 +890,8 @@ class ChatTaskManager:
                     include_create=False,
                 ),
             )
+            for artifact in pending_artifacts:
+                await self._emit_artifact(task_input, artifact)
             record = self.store.get_task(task_id)
             if record is None or record["status"] == "cancel_requested":
                 raise asyncio.CancelledError

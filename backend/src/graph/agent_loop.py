@@ -16,7 +16,22 @@ from llm.service import get_llm_service
 
 DEFAULT_MAX_STEPS = 100
 TOOL_TIMEOUT_SECONDS = 60
+LONG_RUNNING_TOOL_TIMEOUT_SECONDS = 300
 LLM_TIMEOUT_SECONDS = 90
+
+
+def tool_timeout_seconds(name: str) -> int:
+    """Return the execution budget for a tool invocation."""
+    if name == "run_fund_or_stock_analysis":
+        return LONG_RUNNING_TOOL_TIMEOUT_SECONDS
+    return TOOL_TIMEOUT_SECONDS
+
+
+def tool_attempts(name: str) -> int:
+    """Return retry count without duplicating expensive or mutating work."""
+    if name == "run_fund_or_stock_analysis":
+        return 1
+    return 1 if name.startswith(("submit_", "cancel_", "create_", "fill_")) else 2
 
 
 class AgentLoopState(TypedDict, total=False):
@@ -103,21 +118,33 @@ async def execute_tool_calls(
             tool_messages.append(ToolMessage(content=result, tool_call_id=call_id))
             continue
 
-        attempts = 1 if name.startswith(("submit_", "cancel_", "create_", "fill_")) else 2
+        attempts = tool_attempts(name)
+        timeout_seconds = tool_timeout_seconds(name)
         result: str | None = None
         error_payload: dict[str, Any] | None = None
         for attempt in range(attempts):
             try:
                 value = await asyncio.wait_for(
                     tool.ainvoke(args, config=config),
-                    timeout=TOOL_TIMEOUT_SECONDS,
+                    timeout=timeout_seconds,
                 )
                 result = str(value)
                 break
             except asyncio.TimeoutError:
-                error_payload = {"code": "tool_timeout", "message": f"工具 {name} 执行超过 {TOOL_TIMEOUT_SECONDS} 秒"}
+                error_payload = {
+                    "code": "tool_timeout",
+                    "message": f"工具 {name} 执行超过 {timeout_seconds} 秒",
+                    "timeout_seconds": timeout_seconds,
+                    "attempt": attempt + 1,
+                    "attempts": attempts,
+                }
             except Exception as exc:  # Tool failures are observations, not model failures.
-                error_payload = {"code": "tool_error", "message": str(exc)[:500]}
+                error_payload = {
+                    "code": "tool_error",
+                    "message": str(exc)[:500],
+                    "attempt": attempt + 1,
+                    "attempts": attempts,
+                }
             if attempt + 1 < attempts:
                 await asyncio.sleep(0.2 * (attempt + 1))
         if result is None:

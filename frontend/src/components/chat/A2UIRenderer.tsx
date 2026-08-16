@@ -330,7 +330,9 @@ function RenderComponent({
     }
     case "Activity": {
       const status = displayValue(resolve(component.status));
-      return <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-xs text-muted-foreground"><span className={cn("h-2 w-2 rounded-full", status === "completed" ? "bg-green-500" : "animate-pulse bg-primary")} /><span>已调用数据工具：{displayValue(resolve(component.name))}</span><span className="ml-auto">{status === "completed" ? "完成" : status === "running" ? "执行中" : status}</span></div>;
+      const error = displayValue(resolve(component.error));
+      const failed = status === "failed";
+      return <div className={cn("flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs", failed ? "border-destructive/50 bg-destructive/5 text-destructive" : "border-border/70 bg-background/40 text-muted-foreground")} title={error || undefined}><span className={cn("h-2 w-2 rounded-full", status === "completed" ? "bg-green-500" : failed ? "bg-destructive" : "animate-pulse bg-primary")} /><span>已调用数据工具：{displayValue(resolve(component.name))}</span><span className="ml-auto">{status === "completed" ? "完成" : status === "running" ? "执行中" : status}</span>{error && <span className="basis-full pl-4">原因：{error}</span>}</div>;
     }
     case "DataTable": {
       const rows = resolve(component.rows);

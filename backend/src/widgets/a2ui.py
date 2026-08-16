@@ -342,6 +342,7 @@ def render_activity(
     status: str = "completed",
     surface_id: str | None = None,
     include_create: bool = True,
+    error: str | None = None,
 ) -> list[dict[str, Any]]:
     """Render a tool invocation as a compact, structured activity item."""
     surface_id = surface_id or f"activity-{uuid4().hex}"
@@ -353,9 +354,10 @@ def render_activity(
                 "component": "Activity",
                 "name": _ref("/name"),
                 "status": _ref("/status"),
+                "error": _ref("/error"),
             }
         ],
-        {"name": name, "status": status},
+        {"name": name, "status": status, "error": error or ""},
         include_create,
     )
 
