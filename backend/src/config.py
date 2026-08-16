@@ -97,6 +97,25 @@ class Settings(BaseSettings):
     database_path: str = "./data/cache.db"
     data_cache_path: str | None = None  # backwards-compatible legacy environment variable
 
+    # S3-compatible artifact storage.  The backend proxies preview/download
+    # requests, so objects do not need to be public.
+    s3_endpoint_url: str = ""
+    s3_bucket: str = ""
+    s3_region: str = "us-east-1"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_session_token: str = ""
+    s3_addressing_style: str = "path"
+    s3_artifacts_prefix: str = "a-share-agent/artifacts"
+
+    # Serper web search. The search tool stays disabled until a key is set.
+    serper_api_key: str = ""
+    serper_base_url: str = "https://google.serper.dev"
+    serper_gl: str = "cn"
+    serper_hl: str = "zh-cn"
+    ddgs_region: str = "cn-zh"
+    ddgs_safesearch: str = "moderate"
+
     # LangSmith observability
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""

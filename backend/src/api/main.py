@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
-from api.routers import analysis, automation, backtest, chat, config, health, market, portfolio
+from api.routers import analysis, artifacts, automation, backtest, chat, config, health, market, portfolio
 from application.automation import automation_scheduler
 
 
@@ -47,6 +47,7 @@ async def key_error_handler(request: Request, exc: KeyError):
 
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
+app.include_router(artifacts.router, prefix="/api/artifacts", tags=["artifacts"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(automation.router, prefix="/api/automation", tags=["automation"])

@@ -182,6 +182,7 @@ class MarketContext(BaseModel):
     history: list[dict] = Field(default_factory=list)
     financial: dict = Field(default_factory=dict)
     news: list[dict] = Field(default_factory=list)
+    web_results: list[dict] = Field(default_factory=list)
     market_regime: str = "unknown"
     is_backtest: bool = False
     data_status: dict[str, Any] = Field(default_factory=dict)

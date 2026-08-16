@@ -34,9 +34,10 @@ class AnalysisResult(BaseModel):
     stop_loss: float | None = None
     position_size: float | None = None
     reasoning: str
-    agent_reports: dict[str, str] = {}
+    agent_reports: dict[str, str] = Field(default_factory=dict)
     dashboard: dict | None = None  # full structured dashboard
-    data_status: dict = {}
+    data_status: dict = Field(default_factory=dict)
+    artifacts: list[dict] = Field(default_factory=list)
 
 
 @router.post("/run")
@@ -65,18 +66,20 @@ async def run_analysis(req: AnalysisRequest):
             reasoning="Analysis pipeline returned no decision.",
         )
 
+    market_context = result.get("market_context")
+    artifacts = await research_service.create_artifacts(
+        decision,
+        market_context,
+        source="analysis-api",
+    )
+
     return AnalysisResult(
-            ticker=decision.ticker,
-            asset_type=decision.asset_type,
-        decision=decision.decision.value,
-        confidence=decision.confidence,
-        target_price=decision.target_price,
-        stop_loss=decision.stop_loss,
-        position_size=decision.position_size,
-        reasoning=decision.reasoning,
-        agent_reports=decision.agent_reports if req.show_reasoning else {},
-        dashboard=decision.dashboard.model_dump() if decision.dashboard else None,
-        data_status=result.get("market_context").data_status if result.get("market_context") else {},
+        **research_service.decision_payload(
+            decision,
+            market_context,
+            show_reasoning=req.show_reasoning,
+            artifacts=artifacts,
+        )
     )
 
 
@@ -131,26 +134,20 @@ async def stream_analysis(
             decision = final_state.get("final_decision")
 
             if decision:
+                market_context = final_state.get("market_context")
+                artifacts = await research_service.create_artifacts(
+                    decision,
+                    market_context,
+                    source="analysis-stream",
+                )
+                payload = research_service.decision_payload(
+                    decision,
+                    market_context,
+                    artifacts=artifacts,
+                )
                 yield {
                     "event": "complete",
-                    "data": json.dumps(
-                        {
-                            "ticker": decision.ticker,
-                            "asset_type": decision.asset_type.value,
-                            "decision": decision.decision.value,
-                            "confidence": decision.confidence,
-                            "target_price": decision.target_price,
-                            "stop_loss": decision.stop_loss,
-                            "position_size": decision.position_size,
-                            "reasoning": decision.reasoning,
-                            "agent_reports": decision.agent_reports,
-                            "dashboard": decision.dashboard.model_dump() if decision.dashboard else None,
-                            "data_status": final_state.get("market_context").data_status
-                            if final_state.get("market_context")
-                            else {},
-                        },
-                        ensure_ascii=False,
-                    ),
+                    "data": json.dumps(payload, ensure_ascii=False),
                 }
             else:
                 yield {

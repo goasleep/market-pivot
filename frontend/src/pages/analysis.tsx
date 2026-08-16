@@ -8,6 +8,7 @@ import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { executeAnalysisInSimulation, streamAnalysis } from "@/api";
 import type { AnalysisResult, AssetType, SSEProgress } from "@/types";
+import { ArtifactCard } from "@/components/chat/ArtifactCard";
 import { Loader2, Search, Send } from "lucide-react";
 
 const STAGE_LABELS: Record<string, string> = {
@@ -231,6 +232,16 @@ export function AnalysisPage() {
                 <div className="rounded-md border p-3"><Label className="text-xs text-muted-foreground">趋势与量价</Label><p>{result.dashboard.data_perspective.trend_status || "—"} · {result.dashboard.data_perspective.volume_analysis || "—"}</p></div>
                 <div className="rounded-md border p-3"><Label className="text-xs text-muted-foreground">执行计划</Label><p>{result.dashboard.battle_plan.position_strategy || "—"}</p><p className="text-xs text-muted-foreground">{result.dashboard.battle_plan.action_items.join("；")}</p></div>
                 <div className="rounded-md border p-3 md:col-span-2"><Label className="text-xs text-muted-foreground">阶段计划</Label><p>{result.dashboard.phase_decision.pre_market || "—"} {result.dashboard.phase_decision.intraday || "—"} {result.dashboard.phase_decision.post_market || "—"}</p></div>
+              </div>
+            )}
+            {result.artifacts && result.artifacts.length > 0 && (
+              <div className="space-y-2">
+                <Label className="text-xs text-muted-foreground">分析产物</Label>
+                <div className="flex flex-wrap gap-3">
+                  {result.artifacts.map((artifact) => (
+                    <ArtifactCard key={artifact.artifact_id} artifact={artifact} />
+                  ))}
+                </div>
               </div>
             )}
           </CardContent>

@@ -5,12 +5,14 @@ import {
   type A2UIMessage,
 } from "./A2UIRenderer";
 import { WidgetRenderer } from "./WidgetRenderer";
+import { ArtifactCard } from "./ArtifactCard";
+import type { Artifact } from "@/types";
 import { cn } from "@/lib/utils";
 import { Bot, Loader2, Pencil, User } from "lucide-react";
 
 export interface ChatMessagePart {
-  type: "text" | "a2ui" | "widget";
-  content: string | A2UIMessage | A2UIMessage[];
+  type: "text" | "a2ui" | "widget" | "artifact";
+  content: string | A2UIMessage | A2UIMessage[] | Artifact;
   widgetType?: string;
 }
 
@@ -122,6 +124,13 @@ export function ChatMessage({
                       messages={messages as A2UIMessage[]}
                       onAction={onAction}
                     />
+                  </div>
+                );
+              }
+              if (part.type === "artifact") {
+                return (
+                  <div key={i} className="w-full overflow-hidden rounded-lg">
+                    <ArtifactCard artifact={part.content as Artifact} />
                   </div>
                 );
               }

@@ -14,9 +14,18 @@ import type {
   AgentDecisionAudit,
   SimulationSnapshot,
   AssetType,
+  Artifact,
 } from "@/types";
 
 const BASE_URL = "/api";
+
+export async function getArtifacts(limit = 100): Promise<Artifact[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const res = await fetch(`${BASE_URL}/artifacts?${params.toString()}`);
+  if (!res.ok) throw new Error(`Failed to fetch artifacts: ${res.statusText}`);
+  const data = (await res.json()) as { artifacts?: Artifact[] };
+  return data.artifacts || [];
+}
 
 export async function runAnalysis(
   ticker: string,

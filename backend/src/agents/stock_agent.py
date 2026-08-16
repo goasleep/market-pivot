@@ -4,20 +4,37 @@ The StockAgent keeps the chat surface focused on stock research tasks while
 delegating analysis to the existing multi-agent LangGraph workflow.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, AsyncIterator, Sequence
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Sequence
 
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
 
 from agents.chat_tools import build_chat_tools
-from data.market_context import build_market_context
+from application.research import research_service
 from graph.agent_loop import stream_agent_loop
-from graph.workflow import workflow
 from models.schemas import AssetType
 from observability import build_trace_config
+
+_HTML_SOURCE_BLOCK = re.compile(
+    r"```(?:html|xhtml)?\s*(?:<!doctype\s+html|<html\b).*?```",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_RAW_HTML_SOURCE = re.compile(r"(?:<!doctype\s+html|<html\b).*", flags=re.IGNORECASE | re.DOTALL)
+
+
+def _compact_generated_report(text: str) -> str:
+    """Keep the chat concise when a report file has already been generated."""
+    match = _HTML_SOURCE_BLOCK.search(text) or _RAW_HTML_SOURCE.search(text)
+    if match is None:
+        return text
+    lead = text[: match.start()].strip()
+    tail = text[match.end() :].strip()
+    notice = "完整 HTML 报告已生成文件产物，请点击下方卡片预览或下载。"
+    return "\n\n".join(part for part in (lead, notice, tail) if part)
 
 
 class StockIntent(str, Enum):
@@ -159,36 +176,76 @@ class StockAgent:
             conversation_id=kwargs.get("conversation_id"),
         )
 
-    def _analysis_tool(self) -> StructuredTool:
+    def _analysis_tool(
+        self,
+        progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> StructuredTool:
         async def run_analysis(
             ticker: str,
             config: RunnableConfig,
-            asset_type: str = "stock",
+            asset_type: Literal["stock", "etf", "lof"],
             strategy: str | None = None,
         ) -> str:
             """运行综合研究分析，适合用户要求趋势、买卖、风险或交易建议时使用。"""
+            normalized_tickers = self.extract_tickers(ticker)
+            if len(normalized_tickers) != 1:
+                raise ValueError("ticker 必须是单个六位 A 股代码，例如 600519 或 510300")
+            try:
+                normalized_asset_type = AssetType(asset_type)
+            except ValueError as exc:
+                raise ValueError("asset_type 必须是 stock、etf 或 lof") from exc
             request = self.prepare(
-                f"分析 {ticker}",
+                f"分析 {normalized_tickers[0]}",
                 strategy=strategy,
-                asset_type=asset_type,
+                asset_type=normalized_asset_type.value,
             )
-            _, result = await self.analyze(request, config=config)
+            if progress_callback is None:
+                _, result = await self.analyze(request, config=config)
+            else:
+                result: dict[str, Any] = {}
+                async for update in self.analyze_stream(
+                    request,
+                    config=config,
+                    progress_callback=progress_callback,
+                ):
+                    result = update.get("state", result)
             decision = result.get("final_decision")
-            return decision.model_dump_json() if decision is not None else "{}"
+            if decision is None:
+                return "{}"
+            market_context = result.get("market_context")
+            artifacts = await research_service.create_artifacts(
+                decision,
+                market_context,
+                source="chat-tool-analysis",
+            )
+            payload = research_service.decision_payload(decision, market_context, artifacts=artifacts)
+            return json.dumps(payload, ensure_ascii=False)
 
         return StructuredTool.from_function(
             coroutine=run_analysis,
             name="run_fund_or_stock_analysis",
-            description="运行短中期股票、ETF或LOF研究分析。只有用户明确需要分析、判断、策略或风险建议时调用。",
+            description=(
+                "运行短中期股票、ETF或LOF研究分析。只有用户明确需要分析、判断、策略或风险建议时调用。"
+                "必须同时传入 ticker 和 asset_type；asset_type 只能是 stock、etf 或 lof。"
+            ),
         )
 
-    async def chat(self, request: StockAgentRequest) -> AsyncIterator[dict[str, Any]]:
+    async def chat(
+        self,
+        request: StockAgentRequest,
+        *,
+        progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         """Run the LangGraph LLM/tool loop and stream its trace to the UI."""
-        tools = build_chat_tools(self._analysis_tool())
+        tools = build_chat_tools(self._analysis_tool(progress_callback))
         system = (
             "你是 A-Share Agent 的对话入口。你必须自行判断用户意图，并在需要事实数据时调用工具；"
             "禁止根据记忆编造行情、历史价格或新闻。行情、历史、新闻、对比和策略都必须通过工具获取。"
-            "如果用户要综合分析，调用 run_fund_or_stock_analysis。完成工具调用后，用中文简洁回答，"
+            "需要全网最新资讯、公告或行业信息时调用 search_web，工具会并行查询 Serper 和 DDGS；"
+            "若需要明确使用免费元搜索，可调用 search_web_ddgs；搜索结果必须注明来源和链接。"
+            "如果用户要综合分析，调用 run_fund_or_stock_analysis，并且必须传入正确的 asset_type（stock、etf 或 lof）。"
+            "完成工具调用后，用中文简洁回答，"
+            "如果工具结果包含 artifacts，说明报告文件已经生成；禁止再次输出 HTML 或 Markdown 源码，只需给出简短结论。"
             "明确数据日期、来源和数据缺失。产品只服务于小散户的短中期基金交易研究和模拟交易，不承诺收益，"
             "股票分析不能冒充基金建议。若只是闲聊或询问能力，可以直接回答。"
             "系统支持查询模拟盘账户、持仓和订单；只有用户明确要求时才可创建或取消模拟盘订单，"
@@ -200,6 +257,7 @@ class StockAgent:
             {"role": "user", "content": request.message},
         ]
         final_response = ""
+        artifacts_generated = False
         chat_config = build_trace_config(
             "stock-agent-chat",
             tags=["stock-agent", "chat", request.intent.value],
@@ -211,6 +269,12 @@ class StockAgent:
                 if not isinstance(node_update, dict):
                     continue
                 for event in node_update.get("tool_events", []):
+                    if event.get("name") == "run_fund_or_stock_analysis":
+                        try:
+                            tool_payload = json.loads(str(event.get("result", "")))
+                            artifacts_generated = bool(tool_payload.get("artifacts"))
+                        except (TypeError, json.JSONDecodeError):
+                            pass
                     yield {
                         "type": "tool",
                         "name": event.get("name", "unknown"),
@@ -220,7 +284,8 @@ class StockAgent:
                 if node_update.get("final_response"):
                     final_response = node_update["final_response"]
         if final_response:
-            yield {"type": "text", "text": final_response}
+            text = _compact_generated_report(final_response) if artifacts_generated else final_response
+            yield {"type": "text", "text": text}
 
     async def analyze(
         self,
@@ -233,92 +298,77 @@ class StockAgent:
             raise ValueError("A stock code is required for analysis")
 
         ticker = request.ticker
-        context = await build_market_context(ticker, asset_type=request.asset_type)
-        state: dict[str, Any] = {
-            "ticker": ticker,
-            "asset_type": request.asset_type.value,
-            "current_price": context.current_price,
-            "market_context": context,
-            "conversation_history": request.history[-12:],
-            "progress": [],
-            "user_message": request.message,
-        }
-        if request.strategy:
-            state["strategy_name"] = request.strategy
+        run_config = self._analysis_trace_config(request, config)
+        result = await research_service.run(
+            ticker,
+            strategy=request.strategy,
+            asset_type=request.asset_type,
+            conversation_history=request.history,
+            trace_config=run_config,
+        )
+        context = result.get("market_context")
+        return context.realtime if context else {}, result
 
+    async def analyze_stream(
+        self,
+        request: StockAgentRequest,
+        *,
+        config: RunnableConfig | None = None,
+        progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream actual LangGraph node updates for the chat UI."""
+        if not request.ticker:
+            raise ValueError("A stock code is required for analysis")
+
+        ticker = request.ticker
+        run_config = self._analysis_trace_config(request, config)
+        async for update in research_service.stream(
+            ticker,
+            strategy=request.strategy,
+            asset_type=request.asset_type,
+            conversation_history=request.history,
+            trace_config=run_config,
+        ):
+            context = update.get("state", {}).get("market_context")
+            event = {
+                **update,
+                "realtime": context.realtime if context else {},
+                "data_status": context.data_status if context else {},
+            }
+            if progress_callback is not None:
+                await progress_callback(event)
+            yield event
+
+    @staticmethod
+    def _analysis_trace_config(
+        request: StockAgentRequest,
+        config: RunnableConfig | None,
+    ) -> RunnableConfig:
+        """Reuse the parent chat trace when analysis is invoked as a tool."""
         if config is None:
-            run_config = build_trace_config(
+            return build_trace_config(
                 "stock-agent-analysis",
                 tags=["stock-agent", "chat", request.intent.value],
                 metadata={
-                    "ticker": ticker,
+                    "ticker": request.ticker or "",
                     "intent": request.intent.value,
                     "strategy": request.strategy or "auto",
                     "conversation_id": request.conversation_id or "",
                 },
                 session_id=request.conversation_id,
             )
-        else:
-            # Nested analysis is already inside the chat/tool trace. Reusing
-            # its config preserves the Langfuse parent observation instead of
-            # opening a second root trace with a fresh callback handler.
-            run_config = {
-                **config,
-                "run_name": "stock-agent-analysis",
-                "tags": [*config.get("tags", []), "stock-agent", "analysis"],
-                "metadata": {
-                    **config.get("metadata", {}),
-                    "ticker": ticker,
-                    "intent": request.intent.value,
-                    "strategy": request.strategy or "auto",
-                    "conversation_id": request.conversation_id or "",
-                },
-            }
-        result = await workflow.ainvoke(state, config=run_config)
-        return context.realtime, result
-
-    async def analyze_stream(self, request: StockAgentRequest) -> AsyncIterator[dict[str, Any]]:
-        """Stream actual LangGraph node updates for the chat UI."""
-        if not request.ticker:
-            raise ValueError("A stock code is required for analysis")
-
-        ticker = request.ticker
-        context = await build_market_context(ticker, asset_type=request.asset_type)
-        state: dict[str, Any] = {
-            "ticker": ticker,
-            "asset_type": request.asset_type.value,
-            "current_price": context.current_price,
-            "market_context": context,
-            "conversation_history": request.history[-12:],
-            "progress": [],
-            "user_message": request.message,
-        }
-        if request.strategy:
-            state["strategy_name"] = request.strategy
-
-        run_config = build_trace_config(
-            "stock-agent-analysis",
-            tags=["stock-agent", "chat", request.intent.value],
-            metadata={
-                "ticker": ticker,
+        return {
+            **config,
+            "run_name": "stock-agent-analysis",
+            "tags": [*config.get("tags", []), "stock-agent", "analysis"],
+            "metadata": {
+                **config.get("metadata", {}),
+                "ticker": request.ticker or "",
                 "intent": request.intent.value,
                 "strategy": request.strategy or "auto",
                 "conversation_id": request.conversation_id or "",
             },
-            session_id=request.conversation_id,
-        )
-        accumulated: dict[str, Any] = dict(state)
-        async for update in workflow.astream(state, config=run_config, stream_mode="updates"):
-            node_name, node_update = next(iter(update.items()))
-            if isinstance(node_update, dict):
-                accumulated.update(node_update)
-            yield {
-                "node": node_name,
-                "update": node_update,
-                "state": accumulated,
-                "realtime": context.realtime,
-                "data_status": context.data_status,
-            }
+        }
 
 
 stock_agent = StockAgent()

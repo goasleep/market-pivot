@@ -12,6 +12,25 @@ export interface AnalysisResult {
   agent_reports: Record<string, string>;
   dashboard?: DashboardData | null;
   data_status?: Record<string, unknown>;
+  artifacts?: Artifact[];
+}
+
+export interface Artifact {
+  artifact_id: string;
+  name: string;
+  artifact_type: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+  ticker?: string | null;
+  asset_type?: AssetType | null;
+  source?: string;
+  conversation_id?: string | null;
+  task_id?: string | null;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+  preview_url: string;
+  download_url: string;
 }
 
 export interface BacktestResult {
