@@ -33,8 +33,12 @@ uv sync
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入 DeepSeek API Key
+# 编辑 .env 填入 DeepSeek API Key 和 S3 兼容对象存储配置
 ```
+
+如需启用 Serper，在 `.env` 中配置 `SERPER_API_KEY`。综合搜索会并行查询 Serper 和 DDGS，再合并去重；未配置 Serper 时仍会使用 DDGS。也可以直接调用 `search_web_ddgs` 使用 DDGS 元搜索。
+
+产物报告使用 S3 兼容对象存储，不再写入后端本地磁盘。支持 AWS S3、MinIO、Ceph、Cloudflare R2 等服务；通过 `S3_ENDPOINT_URL`、`S3_BUCKET`、`S3_ACCESS_KEY_ID` 和 `S3_SECRET_ACCESS_KEY` 配置。预览和下载仍通过后端 `/api/artifacts/{artifact_id}/...` 接口代理，因此对象不需要公开读权限。
 
 ### 启动开发服务器
 

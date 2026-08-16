@@ -16,6 +16,8 @@ from data.akshare_provider import (
     async_get_stock_news,
     async_get_stock_realtime,
 )
+from data.ddgs_provider import async_search_web_ddgs
+from data.serper_provider import async_search_web_parallel
 from engine.simulation_account import simulation_accounts
 from models.schemas import AssetType, Decision
 from strategies.skill_manager import list_strategies
@@ -54,6 +56,25 @@ async def get_historical_prices(ticker: str, asset_type: str = "stock", limit: i
 async def get_latest_news(ticker: str) -> str:
     """获取股票的最新新闻和舆情。ETF/LOF没有个股新闻时返回空结果。"""
     return _dump({"ticker": ticker, "news": await async_get_stock_news(ticker, limit=10)})
+
+
+@tool
+async def search_web(query: str, num_results: int = 8, freshness: str | None = None) -> str:
+    """并行使用 Serper 和 DDGS 搜索最新网页资讯，并合并去重结果。"""
+    allowed_freshness = {None, "qdr:h", "qdr:d", "qdr:w", "qdr:m", "qdr:y"}
+    if freshness not in allowed_freshness:
+        freshness = None
+    return _dump(await async_search_web_parallel(query, num_results=num_results, tbs=freshness))
+
+
+@tool
+async def search_web_ddgs(query: str, num_results: int = 8, freshness: str | None = None) -> str:
+    """明确使用 DDGS 免费元搜索，返回标题、摘要、来源和链接。"""
+    allowed_freshness = {None, "qdr:h", "qdr:d", "qdr:w", "qdr:m", "qdr:y"}
+    if freshness not in allowed_freshness:
+        freshness = None
+    timelimit = {"qdr:h": "h", "qdr:d": "d", "qdr:w": "w", "qdr:m": "m", "qdr:y": "y"}.get(freshness or "")
+    return _dump(await async_search_web_ddgs(query, num_results=num_results, timelimit=timelimit))
 
 
 @tool
@@ -203,6 +224,8 @@ def build_chat_tools(analysis_tool: StructuredTool) -> list[StructuredTool]:
         get_realtime_quote,
         get_historical_prices,
         get_latest_news,
+        search_web,
+        search_web_ddgs,
         compare_quotes,
         list_trading_strategies,
         screen_assets,

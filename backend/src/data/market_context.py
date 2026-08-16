@@ -15,6 +15,7 @@ from data.akshare_provider import (
     async_get_stock_news,
     async_get_stock_realtime,
 )
+from data.serper_provider import async_search_web_parallel
 from models.schemas import AssetType, MarketContext
 
 
@@ -122,6 +123,13 @@ async def build_market_context(
         realtime = await async_get_fund_realtime(ticker, asset_type=asset_type.value)
         financial = {"ticker": ticker, "not_applicable": "场内基金不适用个股财务指标"}
         news = []
+    asset_label = "股票" if asset_type == AssetType.STOCK else f"{asset_type.value.upper()} 场内基金"
+    web_search = await async_search_web_parallel(
+        f"{ticker} {asset_label} 最新公告 新闻 走势",
+        num_results=8,
+        tbs="qdr:m",
+    )
+    web_results = web_search.get("results", [])
     live_price = current_price if current_price and current_price > 0 else None
     price = float(live_price if live_price is not None else realtime.get("price", 0.0) or 0.0)
     return MarketContext(
@@ -132,12 +140,15 @@ async def build_market_context(
         history=records,
         financial=financial,
         news=news,
+        web_results=web_results,
         market_regime=_detect_regime(records),
         data_status={
             "history": bool(records),
             "realtime": bool(realtime.get("price")),
             "financial": asset_type == AssetType.STOCK and bool(financial),
             "news": bool(news),
+            "web_search": bool(web_results),
+            "web_search_source": web_search.get("source", "") if web_results else "",
             "latest_history_date": records[-1].get("date", "") if records else "",
             "source": "AkShare / 东方财富" if asset_type != AssetType.STOCK else "AkShare",
         },

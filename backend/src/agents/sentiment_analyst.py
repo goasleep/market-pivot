@@ -32,7 +32,7 @@ async def analyze(
     """Run sentiment analysis on a stock based on recent news."""
     logger.info(f"[SentimentAgent] Analyzing {ticker}")
 
-    if context and context.asset_type != AssetType.STOCK and not context.news:
+    if context and context.asset_type != AssetType.STOCK and not context.news and not context.web_results:
         return AgentReport(
             agent_name="sentiment",
             reasoning="当前未接入场内基金专属公告或舆情数据，本环节按中性处理。",
@@ -46,20 +46,29 @@ async def analyze(
         news = await async_get_stock_news(ticker, limit=num_news)
     else:
         news = context.news[:num_news]
-    if not news:
+    web_results = context.web_results if context else []
+    if not news and not web_results:
         return AgentReport(
             agent_name="sentiment",
             reasoning="No recent news found, sentiment neutral.",
             confidence=0.3,
         )
 
-    # Format news for prompt
+    # Search snippets are evidence leads, not a substitute for opening and
+    # verifying the original page.
     news_text = "\n".join(f"[{n['date']}] {n['title']}\n{n['content'][:200]}" for n in news)
+    web_text = "\n".join(
+        f"[{item.get('title', '')}] {item.get('snippet', '')}\n来源：{item.get('link', '')}"
+        for item in web_results
+    )
 
     prompt = f"""Analyze the market sentiment for A-share stock {ticker} based on recent news.
 
-Recent news articles:
-{news_text}
+Recent news articles from the market data provider:
+{news_text or "none"}
+
+Recent web search results from Serper (treat snippets as leads and do not invent facts):
+{web_text or "none"}
 
 Provide your analysis as JSON. Focus on:
 1. Overall sentiment (positive/negative/neutral)
