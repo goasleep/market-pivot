@@ -55,6 +55,15 @@ No tests are currently checked in. Add backend tests under `backend/tests/` usin
 
 Git history is not available in this checkout, so no project-specific convention can be verified. Use short, imperative subjects such as `Add portfolio risk limits` or `Fix chat stream handling`. Keep commits focused. Pull requests should explain the change, list validation commands, link an issue when relevant, and include screenshots for visible frontend changes. Call out configuration, API, cache, or schema changes.
 
+### Commit Requirements
+
+- Write a short, imperative commit subject in English, normally no longer than 72 characters, without a trailing period.
+- Keep one logical feature or fix per commit; do not include unrelated user changes, generated files, secrets, caches, or `__pycache__/` files.
+- Before committing, run the checks relevant to the changed areas. For backend changes, run `uv run ruff check src tests` and `uv run pytest`; for frontend changes, run `pnpm build:frontend` and `pnpm lint`.
+- If the change affects both backend and frontend, run both sets of checks and verify the final diff with `git diff --check`.
+- The commit body is optional, but use it when the subject cannot explain the behavior change or when configuration, API, cache, or schema impact needs to be recorded.
+- When handing off a commit, report the commit hash, summarize the included changes, list validation commands, and explicitly mention intentionally excluded worktree changes.
+
 ## Security & Configuration Tips
 
 Treat DeepSeek credentials and cached market data as local configuration. Never hard-code keys or commit `.env` files. Changes to trading, backtesting, or external data access should preserve the research-only disclaimer and safely handle missing or stale data.
