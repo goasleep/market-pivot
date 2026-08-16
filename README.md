@@ -195,8 +195,11 @@ make down
 ```
 
 Docker 启动后访问 http://localhost:5173，后端健康检查地址为
-http://localhost:8000/api/health。DeepSeek 配置和运行数据统一由后端 SQLite 数据库管理；可通过
-`FRONTEND_PORT` 和 `BACKEND_PORT` 修改映射端口。
+http://localhost:8000/api/health。会话历史通过 Tortoise ORM 保存，默认使用
+`DATABASE_PATH` 指定的 SQLite 文件；设置 `DATABASE_URL` 后可切换到 PostgreSQL，例如
+`postgres://postgres:password@localhost:5432/a_share_agent`。行情缓存、配置和模拟盘等其他
+现有模块仍使用 `DATABASE_PATH` 指定的本地 SQLite 文件。可通过 `FRONTEND_PORT` 和
+`BACKEND_PORT` 修改映射端口。
 
 ## 项目结构
 

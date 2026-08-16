@@ -96,6 +96,7 @@ class Settings(BaseSettings):
     # Unified SQLite database (cache, settings, and future trading records)
     database_path: str = "./data/cache.db"
     data_cache_path: str | None = None  # backwards-compatible legacy environment variable
+    database_url: str | None = None  # optional Tortoise URL for chat persistence
 
     # S3-compatible artifact storage.  The backend proxies preview/download
     # requests, so objects do not need to be public.
@@ -132,6 +133,12 @@ class Settings(BaseSettings):
         p = Path(self.data_cache_path or self.database_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
+
+    @property
+    def chat_database_url(self) -> str:
+        if self.database_url:
+            return self.database_url
+        return f"sqlite://{self.database_file_path.expanduser().resolve()}"
 
 
 settings = Settings()

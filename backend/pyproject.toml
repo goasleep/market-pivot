@@ -24,6 +24,8 @@ dependencies = [
     "boto3>=1.35.0",
     "loguru>=0.7.0",
     "langsmith>=0.1.0",
+    "tortoise-orm>=1.1.7",
+    "asyncpg>=0.30.0",
 ]
 
 [tool.uv]

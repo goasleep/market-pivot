@@ -10,15 +10,18 @@ from starlette.requests import Request
 
 from api.routers import analysis, artifacts, automation, backtest, chat, config, health, market, portfolio
 from application.automation import automation_scheduler
+from application.chat_service import chat_store
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    await chat_store.init()
     await automation_scheduler.start()
     try:
         yield
     finally:
         await automation_scheduler.stop()
+        await chat_store.close()
 
 app = FastAPI(
     title="A-Share Agent API",

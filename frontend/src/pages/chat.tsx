@@ -165,6 +165,19 @@ function titleFromMessages(messages: ChatMessageData[]) {
   return text.length > 30 ? `${text.slice(0, 30)}…` : text;
 }
 
+function conversationSearchText(conversation: Conversation) {
+  return [
+    conversation.title,
+    ...conversation.messages.flatMap((message) =>
+      message.parts
+        .filter((part) => part.type === "text")
+        .map((part) => (typeof part.content === "string" ? part.content : "")),
+    ),
+  ]
+    .join("\n")
+    .toLocaleLowerCase();
+}
+
 function loadStore(): ChatStore {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -296,9 +309,9 @@ export function ChatPage() {
   );
 
   const visibleConversations = useMemo(() => {
-    const query = search.trim().toLowerCase();
+    const query = search.trim().toLocaleLowerCase();
     return store.conversations
-      .filter((item) => !query || item.title.toLowerCase().includes(query))
+      .filter((item) => !query || conversationSearchText(item).includes(query))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }, [search, store.conversations]);
 
@@ -1090,7 +1103,7 @@ export function ChatPage() {
             <Input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="搜索历史会话"
+              placeholder="搜索标题或对话内容"
               className="pl-9"
             />
           </div>

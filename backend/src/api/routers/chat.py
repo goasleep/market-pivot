@@ -50,7 +50,7 @@ async def chat_send(req: ChatRequest):
     task_id = req.task_id or f"task-{uuid4().hex}"
     history = [item.model_dump(exclude_none=True) for item in req.history]
     try:
-        _, assistant_message_id = chat_store.prepare_task(
+        _, assistant_message_id = await chat_store.prepare_task(
             conversation_id=conversation_id,
             task_id=task_id,
             message=req.message,
@@ -88,7 +88,7 @@ async def cancel_chat_task(task_id: str):
 @router.get("/tasks/{task_id}")
 async def get_chat_task(task_id: str):
     """Return durable status for a chat task after a browser refresh."""
-    result = chat_store.get_task(task_id)
+    result = await chat_store.get_task(task_id)
     if result is None:
         raise HTTPException(status_code=404, detail="聊天任务不存在")
     return result
@@ -97,7 +97,7 @@ async def get_chat_task(task_id: str):
 @router.get("/tasks/{task_id}/stream")
 async def reconnect_chat_task(request: Request, task_id: str, last_event_id: int = 0):
     """Reconnect a browser to an existing server-owned chat SSE task."""
-    record = chat_store.get_task(task_id)
+    record = await chat_store.get_task(task_id)
     if record is None:
         raise HTTPException(status_code=404, detail="聊天任务不存在")
 
@@ -113,15 +113,15 @@ async def reconnect_chat_task(request: Request, task_id: str, last_event_id: int
 
 
 @router.get("/conversations")
-async def list_chat_conversations():
+async def list_chat_conversations(q: str | None = None):
     """List durable chat history for the current local installation."""
-    return {"conversations": chat_store.list_conversations()}
+    return {"conversations": await chat_store.list_conversations(query=q)}
 
 
 @router.get("/conversations/{conversation_id}")
 async def get_chat_conversation(conversation_id: str):
     """Load one durable conversation, including partial or cancelled messages."""
-    conversation = chat_store.get_conversation(conversation_id)
+    conversation = await chat_store.get_conversation(conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     return conversation
@@ -129,16 +129,16 @@ async def get_chat_conversation(conversation_id: str):
 
 @router.patch("/conversations/{conversation_id}")
 async def rename_chat_conversation(conversation_id: str, req: ConversationUpdate):
-    if not chat_store.rename_conversation(conversation_id, req.title):
+    if not await chat_store.rename_conversation(conversation_id, req.title):
         raise HTTPException(status_code=404, detail="会话不存在")
-    return chat_store.get_conversation(conversation_id)
+    return await chat_store.get_conversation(conversation_id)
 
 
 @router.delete("/conversations/{conversation_id}")
 async def delete_chat_conversation(conversation_id: str):
-    if chat_store.get_conversation(conversation_id) is None:
+    if await chat_store.get_conversation(conversation_id) is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    if not chat_store.delete_conversation(conversation_id):
+    if not await chat_store.delete_conversation(conversation_id):
         raise HTTPException(status_code=409, detail="会话仍有任务运行，无法删除")
     return {"conversation_id": conversation_id, "deleted": True}
 

@@ -8,6 +8,7 @@ services:
       DEEPSEEK_BASE_URL: "${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}"
       DEEPSEEK_MODEL: "${DEEPSEEK_MODEL:-deepseek-v4-flash}"
       DATABASE_PATH: /app/data/cache.db
+      DATABASE_URL: "${DATABASE_URL:-}"
       S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-}"
       S3_BUCKET: "${S3_BUCKET:-}"
       S3_REGION: "${S3_REGION:-us-east-1}"
