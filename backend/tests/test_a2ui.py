@@ -1,4 +1,6 @@
-from widgets.a2ui import CATALOG_ID, render_agent_pipeline, render_stock_card
+import json
+
+from widgets.a2ui import CATALOG_ID, render_agent_pipeline, render_stock_card, render_tool_result
 
 
 def test_stock_card_uses_a2ui_surface_and_data_model():
