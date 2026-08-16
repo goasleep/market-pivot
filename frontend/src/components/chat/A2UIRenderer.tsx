@@ -67,6 +67,20 @@ export function createMarkdownSurface(text: string, surfaceId: string): A2UIMess
   ];
 }
 
+export function MarkdownInline({ text }: { text: string }) {
+  const lines = text.split("\n");
+  return (
+    <>
+      {lines.map((line, index) => (
+        <span key={index}>
+          {inlineMarkdown(line)}
+          {index < lines.length - 1 && <br />}
+        </span>
+      ))}
+    </>
+  );
+}
+
 interface A2UIRendererProps {
   messages: A2UIMessage[];
   onAction?: (action: A2UIAction) => void;
@@ -317,6 +331,32 @@ function RenderComponent({
     }
     case "StrategyItem":
       return <div className="rounded-lg border px-3 py-2"><div className="flex items-center justify-between text-sm font-medium"><span>{displayValue(resolve(component.name))}</span>{Boolean(resolve(component.active)) && <Badge variant="success">启用</Badge>}</div><p className="mt-1 text-xs text-muted-foreground">{displayValue(resolve(component.description))}</p></div>;
+    case "SearchResultItem": {
+      const link = displayValue(resolve(component.link)).trim();
+      const title = displayValue(resolve(component.title)) || link;
+      const snippet = displayValue(resolve(component.snippet));
+      const source = displayValue(resolve(component.source));
+      const date = displayValue(resolve(component.date));
+      const isExternalLink = /^https?:\/\//i.test(link);
+      return (
+        <article className="rounded-lg border px-3 py-2">
+          {isExternalLink ? (
+            <a
+              href={link}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm font-medium text-primary underline underline-offset-2 hover:opacity-80"
+            >
+              {title}
+            </a>
+          ) : (
+            <p className="text-sm font-medium">{title}</p>
+          )}
+          {(source || date) && <p className="mt-1 text-xs text-muted-foreground">{[source, date].filter(Boolean).join(" · ")}</p>}
+          {snippet && <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{snippet}</p>}
+        </article>
+      );
+    }
     case "StatusItem": {
       const status = displayValue(resolve(component.status));
       return <div className="flex items-center justify-between rounded-md bg-muted/50 px-2 py-1 text-xs"><span>{displayValue(resolve(component.label))}</span><Badge variant={status === "closed" ? "success" : status === "open" ? "destructive" : "warning"}>{status}</Badge></div>;
@@ -428,9 +468,58 @@ function MarkdownTable({ lines }: { lines: string[] }) {
 }
 
 function inlineMarkdown(text: string): ReactNode {
+  const linkPattern = /(\[[^\]\n]+\]\((https?:\/\/[^)\s]+)\)|https?:\/\/[^\s<]+)/g;
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+
+  while ((match = linkPattern.exec(text))) {
+    if (match.index > cursor) {
+      nodes.push(...inlineMarkdownTokens(text.slice(cursor, match.index), key));
+      key += 1;
+    }
+
+    const markdownLabel = match[1];
+    const rawUrl = markdownLabel ? match[2] : match[0];
+    const { url, suffix } = trimUrlSuffix(rawUrl);
+    const label = markdownLabel
+      ? markdownLabel.slice(1, markdownLabel.lastIndexOf("]("))
+      : url;
+    nodes.push(
+      <a
+        key={`link-${key}`}
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="break-all text-primary underline underline-offset-2 hover:opacity-80"
+      >
+        {markdownLabel ? inlineMarkdownTokens(label, key) : label}
+      </a>,
+    );
+    key += 1;
+    if (suffix) nodes.push(<span key={`suffix-${key}`}>{suffix}</span>);
+    key += 1;
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor < text.length) {
+    nodes.push(...inlineMarkdownTokens(text.slice(cursor), key));
+  }
+  return nodes.length ? nodes : inlineMarkdownTokens(text, 0);
+}
+
+function inlineMarkdownTokens(text: string, keyOffset: number): ReactNode[] {
   return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, index) => {
-    if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
-    if (part.startsWith("`") && part.endsWith("`")) return <code key={index} className="rounded bg-muted px-1">{part.slice(1, -1)}</code>;
-    return <span key={index}>{part}</span>;
+    const key = keyOffset + index;
+    if (part.startsWith("**") && part.endsWith("**")) return <strong key={key}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith("`") && part.endsWith("`")) return <code key={key} className="rounded bg-muted px-1">{part.slice(1, -1)}</code>;
+    return <span key={key}>{part}</span>;
   });
+}
+
+function trimUrlSuffix(rawUrl: string): { url: string; suffix: string } {
+  const match = rawUrl.match(/^(.*?)([),.，。；：！？、》）】]*)$/u);
+  const url = match?.[1] || rawUrl;
+  return { url, suffix: match?.[2] || "" };
 }

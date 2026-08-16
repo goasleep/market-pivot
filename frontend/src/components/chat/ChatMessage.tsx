@@ -1,6 +1,7 @@
 import {
   A2UIRenderer,
   createMarkdownSurface,
+  MarkdownInline,
   type A2UIAction,
   type A2UIMessage,
 } from "./A2UIRenderer";
@@ -103,7 +104,7 @@ export function ChatMessage({
                         : "bg-muted text-foreground",
                     )}
                   >
-                    <MarkdownText text={String(part.content)} />
+                    <MarkdownInline text={String(part.content)} />
                   </div>
                 );
               }
@@ -164,36 +165,5 @@ export function ChatMessage({
         </div>
       </div>
     </div>
-  );
-}
-
-/**
- * Simple inline markdown renderer.
- * Handles **bold** and line breaks without external deps.
- */
-function MarkdownText({ text }: { text: string }) {
-  const lines = text.split("\n");
-
-  return (
-    <>
-      {lines.map((line, i) => {
-        const parts = line.split(/(\*\*[^*]+\*\*)/g);
-        return (
-          <span key={i}>
-            {parts.map((part, j) => {
-              if (part.startsWith("**") && part.endsWith("**")) {
-                return (
-                  <strong key={j} className="font-semibold">
-                    {part.slice(2, -2)}
-                  </strong>
-                );
-              }
-              return <span key={j}>{part}</span>;
-            })}
-            {i < lines.length - 1 && <br />}
-          </span>
-        );
-      })}
-    </>
   );
 }
