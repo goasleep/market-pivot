@@ -243,8 +243,9 @@ class StockAgent:
         system = (
             "你是 A-Share Agent 的对话入口。你必须自行判断用户意图，并在需要事实数据时调用工具；"
             "禁止根据记忆编造行情、历史价格或新闻。行情、历史、新闻、对比和策略都必须通过工具获取。"
-            "需要全网最新资讯、公告或行业信息时调用 search_web，工具会并行查询 Serper 和 DDGS；"
-            "若需要明确使用免费元搜索，可调用 search_web_ddgs；搜索结果必须注明来源和链接。"
+            "需要全网最新资讯、公告或行业信息时调用 search_web，工具会并行查询已配置的 AnySearch、Serper 和 DDGS；"
+            "若需要明确使用 AnySearch，可调用 search_web_anysearch；若需要明确使用免费元搜索，可调用 search_web_ddgs；"
+            "搜索结果必须注明来源和链接。"
             "如果用户要综合分析，调用 run_fund_or_stock_analysis，并且必须传入正确的 asset_type（stock、etf 或 lof）。"
             "每次调用工具前可以先给出一句简短的公开分析摘要，说明接下来要核对什么；不要输出详细内部思维链。"
             "完成工具调用后，用中文简洁回答，"

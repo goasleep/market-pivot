@@ -13,6 +13,7 @@ from loguru import logger
 
 from config import settings
 from data.akshare_provider import DataCache
+from data.anysearch_provider import async_search_web_anysearch
 from data.ddgs_provider import async_search_web_ddgs
 
 _cache = DataCache(settings.database_file_path)
@@ -112,11 +113,14 @@ async def async_search_web_parallel(
     num_results: int = 8,
     tbs: str | None = None,
 ) -> dict[str, Any]:
-    """Run Serper and DDGS concurrently, then merge and deduplicate results."""
+    """Run configured premium providers and DDGS concurrently, then merge results."""
     timelimit = {"qdr:h": "h", "qdr:d": "d", "qdr:w": "w", "qdr:m": "m", "qdr:y": "y"}.get(tbs or "")
-    tasks = [async_search_web_ddgs(query, num_results=num_results, timelimit=timelimit)]
+    tasks = []
+    if settings.anysearch_api_key.strip():
+        tasks.append(async_search_web_anysearch(query, num_results=num_results))
     if settings.serper_api_key.strip():
-        tasks.insert(0, async_search_web(query, num_results=num_results, tbs=tbs))
+        tasks.append(async_search_web(query, num_results=num_results, tbs=tbs))
+    tasks.append(async_search_web_ddgs(query, num_results=num_results, timelimit=timelimit))
     responses = await asyncio.gather(*tasks, return_exceptions=True)
 
     merged: list[dict[str, Any]] = []

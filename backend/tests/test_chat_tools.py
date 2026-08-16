@@ -81,6 +81,24 @@ def test_search_web_tool_returns_source_aware_results(monkeypatch):
     assert captured == {"query": "510300 最新公告", "num_results": 5, "tbs": "qdr:w"}
 
 
+def test_anysearch_tool_returns_normalised_results(monkeypatch):
+    captured = {}
+
+    async def fake_search(query, *, num_results=8):
+        captured.update({"query": query, "num_results": num_results})
+        return {
+            "available": True,
+            "source": "AnySearch",
+            "results": [{"title": "公告", "link": "https://example.com", "snippet": "摘要"}],
+        }
+
+    monkeypatch.setattr(chat_tools, "async_search_web_anysearch", fake_search)
+    result = asyncio.run(chat_tools.search_web_anysearch.ainvoke({"query": "510300 最新公告", "num_results": 5}))
+
+    assert json.loads(result)["results"][0]["link"] == "https://example.com"
+    assert captured == {"query": "510300 最新公告", "num_results": 5}
+
+
 def test_ddgs_search_tool_maps_freshness(monkeypatch):
     captured = {}
 
@@ -122,7 +140,15 @@ def test_compare_quotes_uses_one_market_snapshot(monkeypatch):
 
 
 def test_parallel_search_merges_serper_and_ddgs_results(monkeypatch):
+    monkeypatch.setattr(serper_provider.settings, "anysearch_api_key", "configured")
     monkeypatch.setattr(serper_provider.settings, "serper_api_key", "configured")
+
+    async def fake_anysearch(query, *, num_results=8):
+        return {
+            "available": True,
+            "source": "AnySearch",
+            "results": [{"title": "AnySearch 结果", "link": "https://any.example", "snippet": "anysearch"}],
+        }
 
     async def fake_serper(query, *, num_results=8, tbs=None):
         return {
@@ -141,12 +167,17 @@ def test_parallel_search_merges_serper_and_ddgs_results(monkeypatch):
             ],
         }
 
+    monkeypatch.setattr(serper_provider, "async_search_web_anysearch", fake_anysearch)
     monkeypatch.setattr(serper_provider, "async_search_web", fake_serper)
     monkeypatch.setattr(serper_provider, "async_search_web_ddgs", fake_ddgs)
     result = asyncio.run(serper_provider.async_search_web_parallel("510300 公告", num_results=5))
 
-    assert result["providers"] == ["Serper / Google Search", "DDGS metasearch"]
-    assert [item["link"] for item in result["results"]] == ["https://same.example", "https://ddgs.example"]
+    assert result["providers"] == ["AnySearch", "Serper / Google Search", "DDGS metasearch"]
+    assert [item["link"] for item in result["results"]] == [
+        "https://any.example",
+        "https://same.example",
+        "https://ddgs.example",
+    ]
 
 
 def test_web_content_extractor_removes_non_article_markup():

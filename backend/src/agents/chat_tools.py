@@ -16,6 +16,7 @@ from data.akshare_provider import (
     async_get_stock_news,
     async_get_stock_realtime,
 )
+from data.anysearch_provider import async_search_web_anysearch
 from data.ddgs_provider import async_search_web_ddgs
 from data.serper_provider import async_search_web_parallel
 from engine.simulation_account import simulation_accounts
@@ -60,11 +61,17 @@ async def get_latest_news(ticker: str) -> str:
 
 @tool
 async def search_web(query: str, num_results: int = 8, freshness: str | None = None) -> str:
-    """并行使用 Serper 和 DDGS 搜索最新网页资讯，并合并去重结果。"""
+    """并行使用已配置的 AnySearch、Serper 和 DDGS 搜索最新网页资讯，并合并去重结果。"""
     allowed_freshness = {None, "qdr:h", "qdr:d", "qdr:w", "qdr:m", "qdr:y"}
     if freshness not in allowed_freshness:
         freshness = None
     return _dump(await async_search_web_parallel(query, num_results=num_results, tbs=freshness))
+
+
+@tool
+async def search_web_anysearch(query: str, num_results: int = 8) -> str:
+    """明确使用 AnySearch 统一搜索，返回标题、摘要、来源和链接。API Key 可选。"""
+    return _dump(await async_search_web_anysearch(query, num_results=num_results))
 
 
 @tool
@@ -230,6 +237,7 @@ def build_chat_tools(analysis_tool: StructuredTool) -> list[StructuredTool]:
         get_historical_prices,
         get_latest_news,
         search_web,
+        search_web_anysearch,
         search_web_ddgs,
         compare_quotes,
         list_trading_strategies,

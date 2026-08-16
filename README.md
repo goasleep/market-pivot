@@ -6,7 +6,7 @@ A 股 AI Agent 模拟交易系统 — 基于多智能体协作的回测 + 纸上
 
 ## 技术栈
 
-- **后端**：Python 3.11+ / FastAPI / LangGraph / DeepSeek API / AkShare / Serper / DDGS
+- **后端**：Python 3.11+ / FastAPI / LangGraph / DeepSeek API / AkShare / AnySearch / Serper / DDGS
 - **前端**：React / Vite / TailwindCSS / shadcn/ui
 - **Monorepo**：pnpm workspaces
 
@@ -27,12 +27,13 @@ A 股 AI Agent 模拟交易系统 — 基于多智能体协作的回测 + 纸上
 
 ### 并行联网搜索
 
-`search_web` 会并行查询两个来源并合并去重：
+`search_web` 会并行查询已配置的服务和 DDGS，并合并去重：
 
+- **AnySearch**：统一搜索 API，支持匿名访问；配置 `ANYSEARCH_API_KEY` 后会加入综合 `search_web`，也可以通过 `search_web_anysearch` 显式调用
 - **Serper**：通过 Google Serper API 获取搜索结果，需要 `SERPER_API_KEY`，适合稳定的生产搜索
 - **DDGS**：开源的 Python 元搜索库，不需要 API Key；它本身免费，但依赖的上游搜索引擎可能限流、阻断或调整服务，不能视为无限量、无条件可用的生产服务
 
-如果没有配置 Serper，`search_web` 仍会使用 DDGS；如果需要明确只使用 DDGS，可调用 `search_web_ddgs`。搜索结果会保留标题、摘要、来源和链接，并写入研究报告的“联网搜索结果”部分。
+如果没有配置 AnySearch 或 Serper，`search_web` 仍会使用 DDGS；需要明确指定供应商时，可调用 `search_web_anysearch` 或 `search_web_ddgs`。搜索结果会保留标题、摘要、来源和链接，并写入研究报告的“联网搜索结果”部分。
 
 ## 快速开始
 
@@ -71,12 +72,18 @@ SERPER_BASE_URL=https://google.serper.dev
 SERPER_GL=cn
 SERPER_HL=zh-cn
 
+# AnySearch；API Key 可选。配置后会自动加入 search_web；不配置时仍可显式调用 search_web_anysearch 使用匿名额度
+ANYSEARCH_API_KEY=
+ANYSEARCH_BASE_URL=https://api.anysearch.com
+ANYSEARCH_ZONE=cn
+ANYSEARCH_LANGUAGE=zh-CN
+
 # DDGS 元搜索参数
 DDGS_REGION=cn-zh
 DDGS_SAFESEARCH=moderate
 ```
 
-综合搜索会并行查询 Serper 和 DDGS，再合并去重；未配置 Serper 时仍会使用 DDGS。也可以直接调用 `search_web_ddgs` 使用 DDGS 元搜索。
+综合搜索会并行查询已配置的 AnySearch、Serper 和 DDGS，再合并去重；未配置 AnySearch/Serper 时仍会使用 DDGS。也可以直接调用 `search_web_anysearch` 或 `search_web_ddgs` 指定搜索供应商。
 
 产物报告默认使用 S3 兼容对象存储，不写入后端本地磁盘。支持 AWS S3、MinIO、Ceph、Cloudflare R2 等服务；通过以下配置项设置：
 

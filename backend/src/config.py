@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     serper_base_url: str = "https://google.serper.dev"
     serper_gl: str = "cn"
     serper_hl: str = "zh-cn"
+    # AnySearch web search. The API key is optional; without one the provider
+    # uses AnySearch's anonymous tier when explicitly selected.
+    anysearch_api_key: str = ""
+    anysearch_base_url: str = "https://api.anysearch.com"
+    anysearch_zone: str = "cn"
+    anysearch_language: str = "zh-CN"
     ddgs_region: str = "cn-zh"
     ddgs_safesearch: str = "moderate"
 
