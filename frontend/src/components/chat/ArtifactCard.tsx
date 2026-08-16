@@ -6,6 +6,7 @@ import {
   FileCode2,
   FileText,
   Image,
+  Film,
 } from "lucide-react";
 import type { Artifact } from "@/types";
 
@@ -18,6 +19,8 @@ function iconFor(mimeType: string) {
     return <FileCode2 className="h-7 w-7 text-sky-600" />;
   if (mimeType.startsWith("image/"))
     return <Image className="h-7 w-7 text-violet-600" />;
+  if (mimeType.startsWith("video/"))
+    return <Film className="h-7 w-7 text-fuchsia-600" />;
   return <FileText className="h-7 w-7 text-blue-600" />;
 }
 
@@ -25,6 +28,31 @@ function formatSize(size: number) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function previewContent(artifact: Artifact) {
+  if (artifact.mime_type.startsWith("image/")) {
+    return (
+      <div className="flex h-full items-center justify-center overflow-auto bg-slate-950/5 p-4">
+        <img src={artifact.preview_url} alt={artifact.name} className="max-h-full max-w-full object-contain" />
+      </div>
+    );
+  }
+  if (artifact.mime_type.startsWith("video/")) {
+    return (
+      <div className="flex h-full items-center justify-center bg-slate-950 p-4">
+        <video src={artifact.preview_url} controls className="max-h-full max-w-full" />
+      </div>
+    );
+  }
+  return (
+    <iframe
+      title={`预览 ${artifact.name}`}
+      src={artifact.preview_url}
+      className="h-full w-full border-0"
+      sandbox="allow-scripts"
+    />
+  );
 }
 
 export function ArtifactCard({ artifact }: ArtifactCardProps) {
@@ -119,12 +147,7 @@ export function ArtifactCard({ artifact }: ArtifactCardProps) {
                 </button>
               </header>
               <div className="min-h-0 flex-1 bg-white">
-                <iframe
-                  title={`预览 ${artifact.name}`}
-                  src={artifact.preview_url}
-                  className="h-full w-full border-0"
-                  sandbox="allow-scripts"
-                />
+                {previewContent(artifact)}
               </div>
             </aside>
           </div>,

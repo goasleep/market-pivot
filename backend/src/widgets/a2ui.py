@@ -73,10 +73,10 @@ def _card_children(title_id: str, title: str, body_ids: list[str]) -> list[dict[
     ]
 
 
-def render_stock_card(
-    stock_data: dict[str, Any], surface_id: str | None = None, include_create: bool = True
+def render_asset_card(
+    asset_data: dict[str, Any], surface_id: str | None = None, include_create: bool = True
 ) -> list[dict[str, Any]]:
-    surface_id = surface_id or f"stock-card-{uuid4().hex}"
+    surface_id = surface_id or f"asset-card-{uuid4().hex}"
     components = [
         {
             "id": "root",
@@ -98,14 +98,14 @@ def render_stock_card(
         _text("volume", _ref("/volumeLabel"), "caption"),
     ]
     try:
-        price = float(stock_data["price"])
+        price = float(asset_data["price"])
     except (KeyError, TypeError, ValueError):
         return []
     if not math.isfinite(price) or price <= 0:
         return []
 
     try:
-        pct = float(stock_data["pct_chg"])
+        pct = float(asset_data["pct_chg"])
     except (KeyError, TypeError, ValueError):
         pct = None
     if pct is None or not math.isfinite(pct):
@@ -115,16 +115,19 @@ def render_stock_card(
         change_label = f"{'▲' if pct >= 0 else '▼'} {abs(pct):.2f}%"
         change_tone = "positive" if pct >= 0 else "negative"
     data = {
-        "ticker": stock_data.get("ticker", ""),
-        "name": stock_data.get("name", ""),
+        "ticker": asset_data.get("ticker", ""),
+        "name": asset_data.get("name", ""),
         "priceLabel": f"¥{price:.2f}",
         "changeLabel": change_label,
         "changeTone": change_tone,
-        "peLabel": f"PE {stock_data.get('pe', '-')}",
-        "pbLabel": f"PB {stock_data.get('pb', '-')}",
-        "volumeLabel": f"成交量 {stock_data.get('volume', '-')}",
+        "peLabel": f"PE {asset_data.get('pe', '-')}",
+        "pbLabel": f"PB {asset_data.get('pb', '-')}",
+        "volumeLabel": f"成交量 {asset_data.get('volume', '-')}",
     }
     return _surface(surface_id, components, data, include_create)
+
+
+render_stock_card = render_asset_card
 
 
 def render_agent_pipeline(
@@ -397,7 +400,7 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
     if tool_name == "get_realtime_quote":
         quote = dict(payload.get("quote") or {})
         quote["ticker"] = payload.get("ticker", quote.get("ticker", ""))
-        return render_stock_card(quote, surface_id)
+        return render_asset_card(quote, surface_id)
 
     if tool_name in {"search_web", "search_web_ddgs"}:
         items = []
@@ -415,9 +418,19 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
             )
         surface_id = surface_id or f"search-{uuid4().hex}"
         components = [
-            {"id": "root", "component": "Card", "children": ["title", "list"]},
-            _text("title", f"搜索结果（{len(items)} 条）", "h3"),
-            {"id": "list", "component": "List", "items": _ref("/items"), "itemTemplate": "searchItem"},
+            {
+                "id": "root",
+                "component": "Collapsible",
+                "title": f"搜索结果（{len(items)} 条）",
+                "defaultExpanded": len(items) <= 4,
+                "children": ["list"],
+            },
+            {
+                "id": "list",
+                "component": "List",
+                "items": _ref("/items"),
+                "itemTemplate": "searchItem",
+            },
             {
                 "id": "searchItem",
                 "component": "SearchResultItem",

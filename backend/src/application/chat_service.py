@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator
 
 from loguru import logger
 
-from agents.stock_agent import stock_agent
+from agents.asset_agent import asset_agent
 from application.chat_store import ChatStore
 from widgets.a2ui import render_activity, render_markdown, render_tool_result
 
@@ -247,17 +247,18 @@ class ChatTaskManager:
                 task_input,
                 render_activity("Agent 正在规划任务并选择数据工具", "running", orchestration_surface),
             )
-            request = stock_agent.prepare(
+            request = asset_agent.prepare(
                 message=task_input.message,
                 history=task_input.history,
                 strategy=task_input.strategy,
                 conversation_id=task_input.conversation_id,
+                task_id=task_input.task_id,
                 asset_type=task_input.asset_type,
             )
             pending_artifacts: list[dict[str, Any]] = []
             pending_references: list[dict[str, Any]] = []
             seen_tool_events: set[str] = set()
-            async for event in stock_agent.chat(request):
+            async for event in asset_agent.chat(request):
                 if event.get("type") == "tool":
                     event_key = f"{event.get('name', 'unknown')}:{event.get('result', '')}"
                     if event_key not in seen_tool_events:
@@ -294,11 +295,11 @@ class ChatTaskManager:
                 raise asyncio.CancelledError
             await self._broadcast(task_id, {"event": "done", "data": "{}"})
         except asyncio.CancelledError:
-            logger.info("[StockAgent] Chat task cancelled: {}", task_id)
+            logger.info("[AssetAgent] Chat task cancelled: {}", task_id)
             if await self.store.mark_cancelled(task_id):
                 await self._broadcast(task_id, {"event": "done", "data": "{}"})
         except Exception as exc:
-            logger.exception("[StockAgent] Chat task failed: {}", exc)
+            logger.exception("[AssetAgent] Chat task failed: {}", exc)
             await self._emit_text(task_input, f"请求失败：{exc}")
             await self.store.update_task(task_id, "failed", str(exc))
             await self._broadcast(task_id, {"event": "done", "data": "{}"})

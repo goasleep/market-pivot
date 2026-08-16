@@ -47,7 +47,7 @@ async def analyze(
     logger.info(f"[TechnicalAgent] Analyzing {ticker}, strategy={strategy_name or 'auto'}")
 
     if context is None:
-        from data.akshare_provider import async_get_stock_history
+        from data.stock_provider import async_get_stock_history
 
         df = await async_get_stock_history(ticker, start_date="", end_date="")
     else:
@@ -56,7 +56,7 @@ async def analyze(
         return AgentReport(agent_name="technical", reasoning="No data available")
 
     # Calculate technical indicators
-    indicators = _calc_indicators(df.tail(days))
+    indicators = calculate_technical_indicators(df.tail(days))
 
     # Build prompt
     recent_data = df.tail(20)[["date", "close", "volume", "pct_chg"]].to_dict(orient="records")
@@ -99,7 +99,7 @@ Signal: buy if technicals suggest upward momentum, sell if downward, hold if mix
         return AgentReport(agent_name="technical", reasoning=f"Analysis error: {e}")
 
 
-def _calc_indicators(df: pd.DataFrame) -> dict:
+def calculate_technical_indicators(df: pd.DataFrame) -> dict:
     """Calculate technical indicators from OHLCV data."""
     if df.empty:
         return {}
@@ -163,3 +163,7 @@ def _calc_indicators(df: pd.DataFrame) -> dict:
         "BOLL_mid": round(float(ma_boll.iloc[-1]), 2) if not ma_boll.empty else None,
         "avg_volume_20": float(volume.tail(20).mean()),
     }
+
+
+# Backward-compatible alias for existing callers and tests.
+_calc_indicators = calculate_technical_indicators

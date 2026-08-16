@@ -45,7 +45,7 @@ class A2UIActionRequest(BaseModel):
 @router.post("/send")
 async def chat_send(req: ChatRequest):
     """Create a durable Agent task and stream its events to this subscriber."""
-    logger.info(f"[StockAgent] Message: {req.message}")
+    logger.info(f"[AssetAgent] Message: {req.message}")
     conversation_id = req.conversation_id or f"conversation-{uuid4().hex}"
     task_id = req.task_id or f"task-{uuid4().hex}"
     history = [item.model_dump(exclude_none=True) for item in req.history]

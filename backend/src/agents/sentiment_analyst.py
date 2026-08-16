@@ -41,7 +41,7 @@ async def analyze(
         )
 
     if context is None:
-        from data.akshare_provider import async_get_stock_news
+        from data.stock_provider import async_get_stock_news
 
         news = await async_get_stock_news(ticker, limit=num_news)
     else:

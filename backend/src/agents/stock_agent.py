@@ -1,6 +1,6 @@
-"""Stock-focused conversational agent and task router.
+"""Compatibility implementation for the asset-focused conversational agent.
 
-The StockAgent keeps the chat surface focused on stock research tasks while
+The public ``AssetAgent`` alias handles stocks, ETFs, and LOFs while
 delegating analysis to the existing multi-agent LangGraph workflow.
 """
 
@@ -13,11 +13,11 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Sequence
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
 
-from agents.chat_tools import build_chat_tools
 from application.research import research_service
 from graph.agent_loop import stream_agent_loop
 from models.schemas import AssetType
 from observability import build_trace_config
+from tools.registry import build_artifact_tools, build_chat_tools
 
 _HTML_SOURCE_BLOCK = re.compile(
     r"```(?:html|xhtml)?\s*(?:<!doctype\s+html|<html\b).*?```",
@@ -39,7 +39,7 @@ def _compact_generated_report(text: str) -> str:
     return text
 
 
-class StockIntent(str, Enum):
+class AssetIntent(str, Enum):
     ANALYZE = "analyze"
     QUOTE = "quote"
     HISTORY = "history"
@@ -52,34 +52,35 @@ class StockIntent(str, Enum):
 
 
 @dataclass(frozen=True)
-class StockAgentRequest:
+class AssetAgentRequest:
     message: str
     history: list[dict[str, str]]
-    intent: StockIntent
+    intent: AssetIntent
     tickers: tuple[str, ...]
     asset_type: AssetType = AssetType.STOCK
     strategy: str | None = None
     conversation_id: str | None = None
+    task_id: str | None = None
 
     @property
     def ticker(self) -> str | None:
         return self.tickers[0] if self.tickers else None
 
 
-class StockAgent:
-    """Route conversational requests to stock data and analysis capabilities."""
+class AssetAgent:
+    """Route conversational requests to common asset research capabilities."""
 
     _ticker_pattern = re.compile(r"(?<!\d)(?:(?:sh|sz|bj)\s*)?(\d{6})(?!\d)", re.IGNORECASE)
 
     _keyword_groups = {
-        StockIntent.BACKTEST: ("回测", "回测一下", "策略测试", "历史测试", "backtest"),
-        StockIntent.COMPARE: ("对比", "比较", "compare", "vs", " versus "),
-        StockIntent.NEWS: ("新闻", "消息", "舆情", "资讯", "news"),
-        StockIntent.HISTORY: ("历史", "k线", "走势", "行情走势", "历史价格", "history", "chart"),
-        StockIntent.QUOTE: ("实时", "现价", "报价", "行情", "价格", "quote"),
-        StockIntent.STRATEGIES: ("策略", "选股", "交易规则", "strategies"),
-        StockIntent.PORTFOLIO: ("持仓", "组合", "仓位", "账户", "portfolio"),
-        StockIntent.ANALYZE: ("分析", "估值", "基本面", "技术面", "财报", "趋势", "买入", "卖出", "建议", "analy"),
+        AssetIntent.BACKTEST: ("回测", "回测一下", "策略测试", "历史测试", "backtest"),
+        AssetIntent.COMPARE: ("对比", "比较", "compare", "vs", " versus "),
+        AssetIntent.NEWS: ("新闻", "消息", "舆情", "资讯", "news"),
+        AssetIntent.HISTORY: ("历史", "k线", "走势", "行情走势", "历史价格", "history", "chart"),
+        AssetIntent.QUOTE: ("实时", "现价", "报价", "行情", "价格", "quote"),
+        AssetIntent.STRATEGIES: ("策略", "选股", "交易规则", "strategies"),
+        AssetIntent.PORTFOLIO: ("持仓", "组合", "仓位", "账户", "portfolio"),
+        AssetIntent.ANALYZE: ("分析", "估值", "基本面", "技术面", "财报", "趋势", "买入", "卖出", "建议", "analy"),
     }
 
     @classmethod
@@ -100,7 +101,7 @@ class StockAgent:
         strategy: str | None = None,
         conversation_id: str | None = None,
         asset_type: AssetType | str | None = None,
-    ) -> StockAgentRequest:
+    ) -> AssetAgentRequest:
         """Resolve intent and reuse the last ticker for conversational follow-ups."""
         history_items = list(history or [])
         current_tickers = self.extract_tickers(message)
@@ -108,7 +109,7 @@ class StockAgent:
         tickers = current_tickers or history_tickers[:1]
         intent = self._infer_intent(message, len(current_tickers))
         asset_type = AssetType(asset_type) if asset_type else self._infer_asset_type(message, history_items)
-        return StockAgentRequest(
+        return AssetAgentRequest(
             message=message,
             history=history_items,
             intent=intent,
@@ -118,21 +119,21 @@ class StockAgent:
             conversation_id=conversation_id,
         )
 
-    def _infer_intent(self, message: str, current_ticker_count: int) -> StockIntent:
+    def _infer_intent(self, message: str, current_ticker_count: int) -> AssetIntent:
         text = f" {message.lower()} "
         if not message.strip():
-            return StockIntent.HELP
-        if any(keyword in text for keyword in self._keyword_groups[StockIntent.BACKTEST]):
-            return StockIntent.BACKTEST
-        if current_ticker_count > 1 or any(keyword in text for keyword in self._keyword_groups[StockIntent.COMPARE]):
-            return StockIntent.COMPARE
+            return AssetIntent.HELP
+        if any(keyword in text for keyword in self._keyword_groups[AssetIntent.BACKTEST]):
+            return AssetIntent.BACKTEST
+        if current_ticker_count > 1 or any(keyword in text for keyword in self._keyword_groups[AssetIntent.COMPARE]):
+            return AssetIntent.COMPARE
         for intent in (
-            StockIntent.NEWS,
-            StockIntent.HISTORY,
-            StockIntent.QUOTE,
-            StockIntent.STRATEGIES,
-            StockIntent.PORTFOLIO,
-            StockIntent.ANALYZE,
+            AssetIntent.NEWS,
+            AssetIntent.HISTORY,
+            AssetIntent.QUOTE,
+            AssetIntent.STRATEGIES,
+            AssetIntent.PORTFOLIO,
+            AssetIntent.ANALYZE,
         ):
             if any(keyword in text for keyword in self._keyword_groups[intent]):
                 return intent
@@ -142,8 +143,8 @@ class StockAgent:
             or self.extract_tickers(message)
             or any(keyword in text for keyword in follow_up_keywords)
         ):
-            return StockIntent.ANALYZE
-        return StockIntent.HELP
+            return AssetIntent.ANALYZE
+        return AssetIntent.HELP
 
     @staticmethod
     def _infer_asset_type(message: str, history: Sequence[dict[str, str]]) -> AssetType:
@@ -159,15 +160,15 @@ class StockAgent:
         message: str,
         history: Sequence[dict[str, str]] | None = None,
         **kwargs: Any,
-    ) -> StockAgentRequest:
+    ) -> AssetAgentRequest:
         """Extract only safe context; intent is selected by the LLM, not keywords."""
         history_items = list(history or [])
         current_tickers = self.extract_tickers(message)
         history_tickers = self.extract_tickers(*(item.get("content", "") for item in reversed(history_items)))
-        return StockAgentRequest(
+        return AssetAgentRequest(
             message=message,
             history=history_items,
-            intent=StockIntent.ANALYZE,
+            intent=AssetIntent.ANALYZE,
             tickers=current_tickers or history_tickers[:1],
             asset_type=(
                 AssetType(kwargs["asset_type"])
@@ -176,11 +177,15 @@ class StockAgent:
             ),
             strategy=kwargs.get("strategy"),
             conversation_id=kwargs.get("conversation_id"),
+            task_id=kwargs.get("task_id"),
         )
 
     def _analysis_tool(
         self,
         progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        *,
+        conversation_id: str | None = None,
+        task_id: str | None = None,
     ) -> StructuredTool:
         async def run_analysis(
             ticker: str,
@@ -200,6 +205,8 @@ class StockAgent:
                 f"分析 {normalized_tickers[0]}",
                 strategy=strategy,
                 asset_type=normalized_asset_type.value,
+                conversation_id=conversation_id,
+                task_id=task_id,
             )
             if progress_callback is None:
                 _, result = await self.analyze(request, config=config)
@@ -219,6 +226,8 @@ class StockAgent:
                 decision,
                 market_context,
                 source="chat-tool-analysis",
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
             )
             payload = research_service.decision_payload(decision, market_context, artifacts=artifacts)
             return json.dumps(payload, ensure_ascii=False)
@@ -234,19 +243,40 @@ class StockAgent:
 
     async def chat(
         self,
-        request: StockAgentRequest,
+        request: AssetAgentRequest,
         *,
         progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Run the LangGraph LLM/tool loop and stream its trace to the UI."""
-        tools = build_chat_tools(self._analysis_tool(progress_callback))
+        tools = build_chat_tools(
+            self._analysis_tool(
+                progress_callback,
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+            ),
+            artifact_tools=build_artifact_tools(
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+            ),
+        )
         system = (
             "你是 A-Share Agent 的对话入口。你必须自行判断用户意图，并在需要事实数据时调用工具；"
             "禁止根据记忆编造行情、历史价格或新闻。行情、历史、新闻、对比和策略都必须通过工具获取。"
-            "需要全网最新资讯、公告或行业信息时调用 search_web，工具会并行查询已配置的 AnySearch、Serper 和 DDGS；"
-            "若需要明确使用 AnySearch，可调用 search_web_anysearch；若需要明确使用免费元搜索，可调用 search_web_ddgs；"
-            "搜索结果必须注明来源和链接。"
+            "当前价格、历史价格、成交量、净值、折溢价、技术指标和候选筛选属于结构化市场数据，"
+            "必须使用行情、历史或筛选工具，不能用网页摘要代替。"
+            "需要网页正文时调用 fetch_web_content；需要财务或基金基础数据时调用 "
+            "get_fundamentals 或 get_fund_nav_history；"
+            "需要技术指标、风险计算、交易计划或回测时调用对应的原子工具，不要凭记忆计算。"
+            "最新新闻、公告、行业事件、政策、国家队动向和基金催化属于资讯数据，统一调用 search_web；"
+            "search_web 会在内部选择可用搜索来源并合并去重，Agent 不需要选择具体来源；"
+            "搜索结果必须注明来源、数据日期和链接。股票、ETF、LOF 都可以使用网页搜索。"
             "如果用户要综合分析，调用 run_fund_or_stock_analysis，并且必须传入正确的 asset_type（stock、etf 或 lof）。"
+            "artifact 是可独立预览、下载或留档的生成产物；长文、HTML、Markdown、PDF、"
+            "JSON、CSV、图片和视频都属于 artifact。"
+            "当用户要求报告、保存、下载，或内容已经适合独立阅读时，自行调用 save_artifacts；可以一次保存多个不同文件。"
+            "保存文本时使用 content，保存 PDF、图片或视频时使用 content_base64；不要把完整 HTML 源码直接放进聊天回复。"
+            "已有产物可用 list_artifacts 查看，文本内容可用 read_artifact 读取，"
+            "结构化价格序列可用 create_chart_artifact 生成图表文件。"
             "每次调用工具前可以先给出一句简短的公开分析摘要，说明接下来要核对什么；不要输出详细内部思维链。"
             "完成工具调用后，用中文简洁回答，"
             "如果工具结果包含 artifacts，说明报告文件已经生成；禁止再次输出 HTML 或 Markdown 源码，只需给出简短结论。"
@@ -263,8 +293,8 @@ class StockAgent:
         final_response = ""
         artifacts_generated = False
         chat_config = build_trace_config(
-            "stock-agent-chat",
-            tags=["stock-agent", "chat", request.intent.value],
+            "asset-agent-chat",
+            tags=["asset-agent", "chat", request.intent.value],
             metadata={"intent": request.intent.value},
             session_id=request.conversation_id,
         )
@@ -273,10 +303,10 @@ class StockAgent:
                 if not isinstance(node_update, dict):
                     continue
                 for event in node_update.get("tool_events", []):
-                    if event.get("name") == "run_fund_or_stock_analysis":
+                    if event.get("name") in {"run_fund_or_stock_analysis", "save_artifacts"}:
                         try:
                             tool_payload = json.loads(str(event.get("result", "")))
-                            artifacts_generated = bool(tool_payload.get("artifacts"))
+                            artifacts_generated = artifacts_generated or bool(tool_payload.get("artifacts"))
                         except (TypeError, json.JSONDecodeError):
                             pass
                     yield {
@@ -296,7 +326,7 @@ class StockAgent:
 
     async def analyze(
         self,
-        request: StockAgentRequest,
+        request: AssetAgentRequest,
         *,
         config: RunnableConfig | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -318,7 +348,7 @@ class StockAgent:
 
     async def analyze_stream(
         self,
-        request: StockAgentRequest,
+        request: AssetAgentRequest,
         *,
         config: RunnableConfig | None = None,
         progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
@@ -348,14 +378,14 @@ class StockAgent:
 
     @staticmethod
     def _analysis_trace_config(
-        request: StockAgentRequest,
+        request: AssetAgentRequest,
         config: RunnableConfig | None,
     ) -> RunnableConfig:
         """Reuse the parent chat trace when analysis is invoked as a tool."""
         if config is None:
             return build_trace_config(
-                "stock-agent-analysis",
-                tags=["stock-agent", "chat", request.intent.value],
+                "asset-agent-analysis",
+                tags=["asset-agent", "chat", request.intent.value],
                 metadata={
                     "ticker": request.ticker or "",
                     "intent": request.intent.value,
@@ -366,8 +396,8 @@ class StockAgent:
             )
         return {
             **config,
-            "run_name": "stock-agent-analysis",
-            "tags": [*config.get("tags", []), "stock-agent", "analysis"],
+            "run_name": "asset-agent-analysis",
+            "tags": [*config.get("tags", []), "asset-agent", "analysis"],
             "metadata": {
                 **config.get("metadata", {}),
                 "ticker": request.ticker or "",
@@ -378,18 +408,23 @@ class StockAgent:
         }
 
 
-stock_agent = StockAgent()
+# Backward-compatible names for persisted callers and existing integrations.
+StockIntent = AssetIntent
+StockAgentRequest = AssetAgentRequest
+StockAgent = AssetAgent
+asset_agent = AssetAgent()
+stock_agent = asset_agent
 
 
 def capabilities_text() -> str:
     """Return the user-facing capability summary."""
     return (
-        "我是股票 Agent，专注于 A 股研究与交易辅助。你可以让我：\n\n"
-        "- 分析单只股票：`分析 000737`\n"
-        "- 查询实时行情：`查询 600519 行情`\n"
-        "- 查看历史走势：`查看 000858 K 线`\n"
-        "- 查看个股新闻与舆情：`看看 000001 新闻`\n"
+        "我是资产研究 Agent，专注于 A 股股票、ETF 和 LOF 的短中期研究与模拟交易辅助。你可以让我：\n\n"
+        "- 分析股票或基金：`分析 ETF 510300`\n"
+        "- 查询实时行情：`查询 510300 行情`\n"
+        "- 查看历史走势：`查看 510300 K 线`\n"
+        "- 查看基金净值与折溢价：`看看 510300 基金数据`\n"
         "- 查看可用策略：`有哪些选股策略？`\n"
         "- 继续追问上一只股票：例如 `为什么这样判断？`\n\n"
-        "回测和组合管理仍可在对应页面使用；我不会处理与股票无关的通用闲聊。"
+        "回测和组合管理仍可在对应页面使用；我不会把股票研究结论冒充基金建议。"
     )

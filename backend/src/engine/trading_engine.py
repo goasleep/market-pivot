@@ -9,6 +9,7 @@ Features:
 
 from loguru import logger
 
+from domain.decision_policy import OrderSizer
 from models.schemas import Decision, PortfolioState, Position, SimulationAccountConfig, TradeDecision, TradeRecord
 
 # A-share trading cost constants
@@ -26,33 +27,8 @@ def decision_shares(
     decision: TradeDecision,
     price: float,
 ) -> int:
-    """Calculate an Agent order quantity using the shared A-share rules.
-
-    Both historical backtests and the persistent simulation account call this
-    helper.  The actual engine still performs the final cash, lot, T+1 and
-    position-limit checks at fill time.
-    """
-
-    if price <= 0 or decision.decision == Decision.HOLD:
-        return 0
-    if decision.decision == Decision.BUY:
-        position_pct = min(max(decision.position_size or 0.2, 0.0), rules.max_single_position_pct)
-        existing_invested = sum(
-            position.shares * (position.current_price or position.avg_cost)
-            for position in portfolio.positions
-        )
-        total_value = max(portfolio.total_value, portfolio.cash)
-        max_invest = min(
-            portfolio.cash * position_pct,
-            max(total_value * rules.max_total_position_pct - existing_invested, 0),
-        )
-        return int(max_invest / price)
-    position = next((item for item in portfolio.positions if item.ticker == decision.ticker), None)
-    if not position:
-        return 0
-    if decision.stop_loss and price <= decision.stop_loss:
-        return position.available_shares
-    return position.available_shares // 2
+    """Compatibility wrapper around the canonical application order sizer."""
+    return OrderSizer.shares(portfolio, rules.effective_trading_rules(decision.asset_type), decision, price)
 
 
 class TradingEngine:
@@ -89,7 +65,15 @@ class TradingEngine:
     def current_date(self) -> str:
         return self._current_date
 
-    def buy(self, ticker: str, shares: int, price: float, trade_date: str = "") -> TradeRecord | None:
+    def buy(
+        self,
+        ticker: str,
+        shares: int,
+        price: float,
+        trade_date: str = "",
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+    ) -> TradeRecord | None:
         """Execute a buy order.
 
         A-share rules:
@@ -100,23 +84,24 @@ class TradingEngine:
         trade_date = trade_date or self._current_date
         if price <= 0:
             return None
-        min_lot = self.rules.min_lot
+        trading_rules = self.rules.effective_trading_rules(self.rules.asset_type)
+        min_lot = trading_rules.min_lot
         shares = (shares // min_lot) * min_lot  # round down to the configured lot size
         if shares < min_lot:
             logger.warning(f"Buy {ticker}: shares < {min_lot}, skipping")
             return None
 
-        execution_price = price * (1 + self.rules.slippage_bps / 10_000)
+        execution_price = price * (1 + trading_rules.slippage_bps / 10_000)
         amount = shares * execution_price
-        commission = max(amount * self.rules.buy_commission_rate, self.rules.minimum_commission)
-        transfer_fee = amount * self.rules.transfer_fee_rate
+        commission = max(amount * trading_rules.buy_commission_rate, trading_rules.minimum_commission)
+        transfer_fee = amount * trading_rules.transfer_fee_rate
         total_cost = amount + commission + transfer_fee
 
         if total_cost > self.portfolio.cash:
             # Adjust shares to fit budget
             max_affordable = int(
                 self.portfolio.cash
-                / (execution_price * (1 + self.rules.buy_commission_rate + self.rules.transfer_fee_rate))
+                / (execution_price * (1 + trading_rules.buy_commission_rate + trading_rules.transfer_fee_rate))
             )
             shares = (max_affordable // min_lot) * min_lot
             if shares < min_lot:
@@ -125,8 +110,8 @@ class TradingEngine:
                 )
                 return None
             amount = shares * execution_price
-            commission = max(amount * self.rules.buy_commission_rate, self.rules.minimum_commission)
-            transfer_fee = amount * self.rules.transfer_fee_rate
+            commission = max(amount * trading_rules.buy_commission_rate, trading_rules.minimum_commission)
+            transfer_fee = amount * trading_rules.transfer_fee_rate
             total_cost = amount + commission + transfer_fee
 
         # Update position — new shares are frozen (T+1: cannot sell today)
@@ -135,7 +120,12 @@ class TradingEngine:
             new_avg_cost = (existing.avg_cost * existing.shares + amount) / (existing.shares + shares)
             existing.avg_cost = new_avg_cost
             existing.shares += shares
-            existing.frozen_shares += shares
+            existing.stop_loss = stop_loss or existing.stop_loss
+            existing.take_profit = take_profit or existing.take_profit
+            if trading_rules.t_plus_one:
+                existing.frozen_shares += shares
+            else:
+                existing.available_shares += shares
         else:
             self.portfolio.positions.append(
                 Position(
@@ -143,8 +133,10 @@ class TradingEngine:
                     asset_type=self.rules.asset_type,
                     shares=shares,
                     avg_cost=execution_price,
-                    available_shares=0,
-                    frozen_shares=shares,
+                    available_shares=0 if trading_rules.t_plus_one else shares,
+                    frozen_shares=shares if trading_rules.t_plus_one else 0,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
                 )
             )
 
@@ -180,7 +172,8 @@ class TradingEngine:
         if price <= 0:
             return None
         pos = self._find_position(ticker)
-        min_lot = self.rules.min_lot
+        trading_rules = self.rules.effective_trading_rules(self.rules.asset_type)
+        min_lot = trading_rules.min_lot
         if not pos or pos.available_shares <= 0:
             logger.warning(
                 f"Sell {ticker}: no position or insufficient available shares "
@@ -198,11 +191,11 @@ class TradingEngine:
                 logger.warning(f"Sell {ticker}: shares < {min_lot} after rounding")
                 return None
 
-        execution_price = price * (1 - self.rules.slippage_bps / 10_000)
+        execution_price = price * (1 - trading_rules.slippage_bps / 10_000)
         amount = shares * execution_price
-        commission = max(amount * self.rules.sell_commission_rate, self.rules.minimum_commission)
-        stamp_tax = amount * self.rules.stamp_tax_rate
-        transfer_fee = amount * self.rules.transfer_fee_rate
+        commission = max(amount * trading_rules.sell_commission_rate, trading_rules.minimum_commission)
+        stamp_tax = amount * trading_rules.stamp_tax_rate
+        transfer_fee = amount * trading_rules.transfer_fee_rate
         net_proceeds = amount - commission - stamp_tax - transfer_fee
 
         # Update position — deduct from available shares
@@ -233,11 +226,17 @@ class TradingEngine:
         )
         return trade
 
-    def update_prices(self, price_map: dict[str, float]):
-        """Update current prices for all positions."""
-        for pos in self.portfolio.positions:
+    def update_prices(self, price_map: dict[str, float], *, trigger_exits: bool = True):
+        """Mark prices and execute stored stop-loss/take-profit levels."""
+        for pos in list(self.portfolio.positions):
             if pos.ticker in price_map:
-                pos.current_price = price_map[pos.ticker]
+                price = price_map[pos.ticker]
+                pos.current_price = price
+                if trigger_exits and self.rules.effective_trading_rules(pos.asset_type).auto_exit_levels:
+                    hit_stop = pos.stop_loss is not None and price <= pos.stop_loss
+                    hit_target = pos.take_profit is not None and price >= pos.take_profit
+                    if (hit_stop or hit_target) and pos.available_shares > 0:
+                        self.sell(pos.ticker, pos.available_shares, price, self._current_date)
 
     def get_portfolio_summary(self) -> dict:
         """Get portfolio summary as dict."""

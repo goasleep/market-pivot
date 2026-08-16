@@ -32,7 +32,7 @@ class WorkflowState(TypedDict, total=False):
     as_of_date: str | None
     market_context: MarketContext
     is_backtest: bool
-    stock_data: dict[str, Any]
+    asset_data: dict[str, Any]
     strategy_name: str  # optional strategy override
     technical_report: AgentReport
     fundamentals_report: AgentReport
@@ -64,7 +64,7 @@ async def fetch_market_data(state: WorkflowState) -> dict:
 
     return {
         "market_context": context,
-        "stock_data": context.realtime,
+        "asset_data": context.realtime,
         "current_price": price,
         "progress": [{"stage": "market_data", "message": f"Current price: {price}"}],
     }

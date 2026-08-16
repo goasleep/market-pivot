@@ -11,6 +11,13 @@ default_active: true
 default_router: true
 default_priority: 10
 market_regimes: ["trending_up"]
+asset_types: [stock, etf, lof]
+indicators: [return_pct, price_vs_ma_pct]
+entry_conditions:
+  - {indicator: return_pct, operator: gt, value: 0, window: 20, description: "20日收益为正"}
+  - {indicator: price_vs_ma_pct, operator: between, value: [-3, 8], window: 20, description: "价格未严重偏离MA20"}
+stop_loss_pct: 0.08
+take_profit_pct: 0.16
 instructions: |
   ## 策略：多头趋势分析
 

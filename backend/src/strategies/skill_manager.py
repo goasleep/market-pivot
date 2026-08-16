@@ -12,6 +12,10 @@ from typing import Any
 import yaml
 from loguru import logger
 
+from models.schemas import StrategySpec
+from strategies.compiler import strategy_from_mapping
+from strategies.registry import StrategyRegistry
+
 # ---------------------------------------------------------------------------
 # Data models (plain dataclasses, no Pydantic needed here)
 # ---------------------------------------------------------------------------
@@ -21,6 +25,7 @@ _STRATEGIES_DIR = Path(__file__).parent
 # Cache: name -> dict (raw YAML)
 _loaded: dict[str, dict[str, Any]] = {}
 _loaded_once = False
+_runtime_registry = StrategyRegistry(Path(__file__).resolve().parents[2] / "data" / "strategies.json")
 
 
 def _load_all() -> None:
@@ -73,6 +78,26 @@ def get_strategy(name: str) -> dict[str, Any] | None:
         if name in data.get("aliases", []):
             return data
     return None
+
+
+def get_strategy_spec(name: str, *, source: str | None = None) -> StrategySpec | None:
+    """Return the validated executable definition for a named strategy."""
+    runtime = _runtime_registry.get(name)
+    if runtime is not None:
+        return runtime
+    data = get_strategy(name)
+    if not data:
+        return None
+    try:
+        return strategy_from_mapping(data, source=source or "yaml")
+    except Exception as exc:
+        logger.warning("Strategy {} has no executable DSL: {}", name, exc)
+        return None
+
+
+def register_strategy_spec(spec: StrategySpec) -> StrategySpec:
+    """Persist an LLM/user-generated strategy for later backtests."""
+    return _runtime_registry.register(spec)
 
 
 def get_active_strategies(market_regime: str | None = None) -> list[dict[str, Any]]:

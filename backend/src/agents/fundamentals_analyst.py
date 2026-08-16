@@ -41,7 +41,7 @@ async def analyze(
         )
 
     if context is None:
-        from data.akshare_provider import async_get_financial_data, async_get_stock_realtime
+        from data.stock_provider import async_get_financial_data, async_get_stock_realtime
 
         fin, rt = await asyncio.gather(
             async_get_financial_data(ticker),

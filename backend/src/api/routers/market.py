@@ -3,7 +3,8 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from data.akshare_provider import async_get_fund_realtime, async_get_stock_realtime
+from data.fund_provider import async_get_fund_realtime
+from data.stock_provider import async_get_stock_realtime
 from models.schemas import AssetType
 
 router = APIRouter()

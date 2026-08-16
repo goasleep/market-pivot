@@ -57,6 +57,7 @@ Git history is not available in this checkout, so no project-specific convention
 
 ### Commit Requirements
 
+- Do not create or amend a commit unless the user explicitly asks you to commit.
 - Write a short, imperative commit subject in English, normally no longer than 72 characters, without a trailing period.
 - Keep one logical feature or fix per commit; do not include unrelated user changes, generated files, secrets, caches, or `__pycache__/` files.
 - Before committing, run the checks relevant to the changed areas. For backend changes, run `uv run ruff check src tests` and `uv run pytest`; for frontend changes, run `pnpm build:frontend` and `pnpm lint`.

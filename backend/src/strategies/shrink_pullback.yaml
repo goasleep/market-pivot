@@ -11,6 +11,13 @@ default_active: false
 default_router: true
 default_priority: 20
 market_regimes: ["trending_up", "sideways"]
+asset_types: [stock, etf, lof]
+indicators: [price_vs_ma_pct, volume_ratio]
+entry_conditions:
+  - {indicator: price_vs_ma_pct, operator: between, value: [-3, 3], window: 20, description: "回踩MA20附近"}
+  - {indicator: volume_ratio, operator: lt, value: 0.7, window: 20, description: "成交量低于20日均量70%"}
+stop_loss_pct: 0.05
+take_profit_pct: 0.12
 instructions: |
   ## 策略：缩量回踩低吸
 

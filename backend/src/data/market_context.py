@@ -7,18 +7,20 @@ from typing import Any
 
 import pandas as pd
 
-from data.akshare_provider import (
-    async_get_financial_data,
+from data.fund_provider import (
     async_get_fund_history,
     async_get_fund_nav_history,
     async_get_fund_realtime,
+)
+from data.serper_provider import async_search_web_parallel
+from data.stock_provider import (
+    async_get_financial_data,
     async_get_stock_history,
     async_get_stock_news,
     async_get_stock_realtime,
 )
-from data.serper_provider import async_search_web_parallel
 from data.web_content import async_enrich_web_results
-from models.schemas import AssetType, MarketContext
+from models.schemas import AssetType, FundSnapshot, MarketContext
 
 
 def _normalise_history(df: pd.DataFrame, as_of_date: str | None = None) -> list[dict[str, Any]]:
@@ -160,7 +162,11 @@ async def build_market_context(
             current_price=float(current_price if current_price is not None else realtime.get("price", 0.0)),
             realtime=realtime,
             history=records,
-            fund_data=_build_fund_data(records, realtime) if asset_type != AssetType.STOCK else {},
+            fund_data=(
+                FundSnapshot.model_validate(_build_fund_data(records, realtime))
+                if asset_type != AssetType.STOCK
+                else None
+            ),
             market_regime=_detect_regime(records),
             is_backtest=is_backtest,
             data_status={
@@ -205,7 +211,11 @@ async def build_market_context(
         financial=financial,
         news=news,
         web_results=web_results,
-        fund_data=_build_fund_data(records, realtime, nav_history) if asset_type != AssetType.STOCK else {},
+        fund_data=(
+            FundSnapshot.model_validate(_build_fund_data(records, realtime, nav_history))
+            if asset_type != AssetType.STOCK
+            else None
+        ),
         market_regime=_detect_regime(records),
         data_status={
             "history": bool(records),

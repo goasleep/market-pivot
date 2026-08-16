@@ -10,11 +10,33 @@ export interface AnalysisResult {
   stop_loss: number | null;
   take_profit: number | null;
   position_size: number | null;
+  plan?: TradePlan;
   reasoning: string;
   agent_reports: Record<string, string>;
   dashboard?: DashboardData | null;
   data_status?: Record<string, unknown>;
   artifacts?: Artifact[];
+}
+
+export interface PriceEvidence {
+  metric: string;
+  value?: unknown;
+  source: string;
+  as_of: string;
+  calculation: string;
+}
+
+export interface TradePlan {
+  entry_price: number | null;
+  stop_loss: number | null;
+  take_profit: number | null;
+  position_size: number | null;
+  position_strategy: string;
+  action_items: string[];
+  entry_explanation: string;
+  stop_loss_explanation: string;
+  take_profit_explanation: string;
+  price_evidence: PriceEvidence[];
 }
 
 export interface Artifact {
@@ -301,7 +323,7 @@ export interface DashboardData {
     entry_explanation: string;
     stop_loss_explanation: string;
     take_profit_explanation: string;
-    price_evidence: Array<Record<string, unknown>>;
+    price_evidence: PriceEvidence[];
   };
   strategy_plan: {
     name: string;
@@ -309,7 +331,20 @@ export interface DashboardData {
     entry_conditions: string[];
     exit_conditions: string[];
     indicators_used: string[];
-    data_basis: Array<Record<string, unknown>>;
+    data_basis: PriceEvidence[];
+    spec?: {
+      name: string;
+      version: string;
+      asset_types: AssetType[];
+      indicators: string[];
+      entry_conditions: Array<Record<string, unknown>>;
+      exit_conditions: Array<Record<string, unknown>>;
+      stop_loss_pct?: number | null;
+      take_profit_pct?: number | null;
+      position_size_pct: number;
+      rebalance_frequency: "daily" | "weekly" | "manual";
+      source: "yaml" | "llm" | "user";
+    } | null;
   };
   phase_decision: {
     pre_market: string;

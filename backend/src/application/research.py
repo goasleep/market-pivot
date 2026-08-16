@@ -242,9 +242,16 @@ class ResearchService:
             "stop_loss": decision.stop_loss,
             "take_profit": decision.take_profit,
             "position_size": decision.position_size,
+            "plan": decision.plan.model_dump(mode="json"),
             "reasoning": decision.reasoning if show_reasoning else "",
             "agent_reports": decision.agent_reports if show_reasoning else {},
             "dashboard": decision.dashboard.model_dump() if decision.dashboard else None,
+            "instrument": market_context.instrument.model_dump(mode="json") if market_context else None,
+            "fund_data": (
+                market_context.fund_data.model_dump(mode="json")
+                if market_context and market_context.fund_data
+                else None
+            ),
             "data_status": market_context.data_status if market_context else {},
             "artifacts": artifacts or [],
         }

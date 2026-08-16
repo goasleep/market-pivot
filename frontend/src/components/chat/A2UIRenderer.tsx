@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -245,6 +246,60 @@ function SurfaceRenderer({
   );
 }
 
+function CollapsibleRenderer({
+  component,
+  surface,
+  scope,
+  onModelChange,
+  onAction,
+}: {
+  component: A2UIComponent;
+  surface: SurfaceState;
+  scope: unknown;
+  onModelChange: (path: string, value: unknown) => void;
+  onAction?: (action: A2UIAction) => void;
+}) {
+  const defaultExpanded = component.defaultExpanded !== false;
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const children = (component.children || [])
+    .map((id) => surface.components.get(id))
+    .filter((item): item is A2UIComponent => Boolean(item));
+
+  useEffect(() => {
+    setExpanded(defaultExpanded);
+  }, [surface.id, component.id, defaultExpanded]);
+
+  return (
+    <section className="overflow-hidden rounded-xl border bg-card shadow-sm">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/30"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="text-base font-semibold">{String(component.title || "查看详情")}</span>
+        <ChevronDown className={cn("h-5 w-5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-180")} />
+      </button>
+      {expanded && (
+        <div className="border-t px-4 py-4">
+          <div className="space-y-3">
+            {children.map((child) => (
+              <RenderComponent
+                key={child.id}
+                component={child}
+                surface={surface}
+                scope={scope}
+                onModelChange={onModelChange}
+                onAction={onAction}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function RenderComponent({
   component,
   surface,
@@ -301,6 +356,16 @@ function RenderComponent({
       return <div className="flex flex-col gap-2">{renderChildren()}</div>;
     case "Card":
       return <div className="rounded-xl border bg-card p-4 shadow-sm"><div className="space-y-3">{renderChildren()}</div></div>;
+    case "Collapsible":
+      return (
+        <CollapsibleRenderer
+          component={component}
+          surface={surface}
+          scope={scope}
+          onModelChange={onModelChange}
+          onAction={onAction}
+        />
+      );
     case "Section":
       return (
         <section className="rounded-lg border border-border/70 bg-background/40 p-3">

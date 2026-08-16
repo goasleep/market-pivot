@@ -3,10 +3,11 @@ import json
 
 import pytest
 
-from agents import chat_tools
 from agents.sentiment_analyst import analyze as analyze_sentiment
 from agents.stock_agent import StockAgent, _compact_generated_report
 from application.research import research_service
+from artifacts.service import ArtifactService
+from artifacts.storage import LocalArtifactStorage
 from data import serper_provider
 from data.web_content import extract_article_content
 from engine.simulation_account import SimulationAccountService
@@ -17,20 +18,23 @@ from graph.agent_loop import (
     tool_timeout_seconds,
 )
 from models.schemas import AssetType, Decision, MarketContext, TradeDecision
+from tools import artifacts as artifact_tools
+from tools import assets, data, research, simulation
+from tools.registry import build_chat_tools
 from widgets.a2ui import render_activity
 
 
 def test_chat_tools_expose_paper_portfolio_and_orders(monkeypatch, tmp_path):
     accounts = SimulationAccountService(tmp_path / "simulation.db")
-    monkeypatch.setattr(chat_tools, "simulation_accounts", accounts)
+    monkeypatch.setattr(simulation, "simulation_accounts", accounts)
 
-    portfolio = asyncio.run(chat_tools.get_simulation_portfolio.ainvoke({"account_id": "default"}))
+    portfolio = asyncio.run(simulation.get_simulation_portfolio.ainvoke({"account_id": "default"}))
     portfolio_payload = json.loads(portfolio)
     assert portfolio_payload["paper_trading"] is True
     assert portfolio_payload["portfolio"]["account_id"] == "default"
 
     order = asyncio.run(
-        chat_tools.submit_simulation_order.ainvoke(
+        simulation.submit_simulation_order.ainvoke(
             {
                 "ticker": "510300",
                 "side": "buy",
@@ -44,7 +48,7 @@ def test_chat_tools_expose_paper_portfolio_and_orders(monkeypatch, tmp_path):
     assert order_payload["paper_trading"] is True
     assert order_payload["order"]["status"] == "pending"
 
-    orders = asyncio.run(chat_tools.get_simulation_orders.ainvoke({"account_id": "default"}))
+    orders = asyncio.run(simulation.get_simulation_orders.ainvoke({"account_id": "default"}))
     assert len(json.loads(orders)["orders"]) == 1
 
 
@@ -59,6 +63,103 @@ def test_analysis_tool_requires_and_validates_asset_type():
         asyncio.run(tool.ainvoke({"ticker": "510300", "asset_type": "invalid"}))
 
 
+def test_chat_agent_exposes_only_provider_agnostic_web_search():
+    names = {tool.name for tool in build_chat_tools(assets.get_realtime_quote)}
+    assert "search_web" in names
+    assert "search_web_anysearch" not in names
+    assert "search_web_ddgs" not in names
+    assert "get_latest_news" not in names
+
+
+def test_chat_agent_exposes_artifact_tool_and_persists_multiple_files(monkeypatch, tmp_path):
+    service = ArtifactService(
+        db_path=tmp_path / "artifacts.db",
+        storage=LocalArtifactStorage(tmp_path / "objects"),
+    )
+    monkeypatch.setattr(artifact_tools, "artifact_service", service)
+
+    names = {tool.name for tool in build_chat_tools(assets.get_realtime_quote)}
+    assert "save_artifacts" in names
+
+    result = asyncio.run(
+        artifact_tools.save_artifacts.ainvoke(
+            {
+                "artifacts": [
+                    {"name": "摘要", "format": "md", "content": "# 摘要"},
+                    {"name": "数据", "format": "csv", "content": "name,value\nA,1"},
+                ]
+            }
+        )
+    )
+    payload = json.loads(result)
+    assert payload["ok"] is True
+    assert len(payload["artifacts"]) == 2
+
+
+def test_chat_agent_exposes_atomic_research_tools():
+    names = {tool.name for tool in build_chat_tools(assets.get_realtime_quote)}
+    assert {
+        "fetch_web_content",
+        "get_fund_nav_history",
+        "get_fundamentals",
+        "compute_technical_indicators",
+        "calculate_risk_metrics",
+        "build_trade_plan",
+        "run_backtest",
+        "save_artifacts",
+    }.issubset(names)
+
+
+def test_risk_and_trade_plan_tools_return_traceable_calculations():
+    risk = json.loads(
+        asyncio.run(
+            research.calculate_risk_metrics.ainvoke(
+                {
+                    "current_price": 10,
+                    "stop_loss_pct": 0.1,
+                    "take_profit_pct": 0.2,
+                    "available_capital": 100_000,
+                }
+            )
+        )
+    )
+    assert risk["data_type"] == "risk_metrics"
+    assert risk["metrics"]["stop_loss"] == 9.0
+    assert risk["metrics"]["take_profit"] == 12.0
+
+    plan = json.loads(
+        asyncio.run(
+            research.build_trade_plan.ainvoke(
+                {"ticker": "510300", "current_price": 4, "asset_type": "etf"}
+            )
+        )
+    )
+    assert plan["data_type"] == "trade_plan"
+    assert len(plan["plan"]["price_evidence"]) == 3
+
+
+def test_legacy_latest_news_combines_akshare_and_web_for_stocks(monkeypatch):
+    async def fake_akshare_news(ticker, *, limit=10):
+        return [{"title": "AkShare 新闻", "source": "AkShare", "date": "2026-08-16"}]
+
+    async def fake_web_search(query, *, num_results=8, tbs=None):
+        return {
+            "results": [{"title": "网页公告", "source": "DDGS", "link": "https://example.com"}],
+            "providers": ["DDGS"],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(data, "async_get_stock_news", fake_akshare_news)
+    monkeypatch.setattr(data, "async_search_web_parallel", fake_web_search)
+    payload = json.loads(
+        asyncio.run(data.get_latest_news.ainvoke({"ticker": "600519", "asset_type": "stock"}))
+    )
+
+    assert payload["akshare_news"][0]["source"] == "AkShare"
+    assert payload["web_news"][0]["source"] == "DDGS"
+    assert len(payload["news"]) == 2
+
+
 def test_search_web_tool_returns_source_aware_results(monkeypatch):
     captured = {}
 
@@ -70,14 +171,15 @@ def test_search_web_tool_returns_source_aware_results(monkeypatch):
             "results": [{"title": "公告", "link": "https://example.com", "snippet": "摘要"}],
         }
 
-    monkeypatch.setattr(chat_tools, "async_search_web_parallel", fake_search)
+    monkeypatch.setattr(data, "async_search_web_parallel", fake_search)
     result = asyncio.run(
-        chat_tools.search_web.ainvoke(
+        data.search_web.ainvoke(
             {"query": "510300 最新公告", "num_results": 5, "freshness": "qdr:w"}
         )
     )
 
     assert json.loads(result)["results"][0]["link"] == "https://example.com"
+    assert json.loads(result)["data_type"] == "news"
     assert captured == {"query": "510300 最新公告", "num_results": 5, "tbs": "qdr:w"}
 
 
@@ -92,8 +194,8 @@ def test_anysearch_tool_returns_normalised_results(monkeypatch):
             "results": [{"title": "公告", "link": "https://example.com", "snippet": "摘要"}],
         }
 
-    monkeypatch.setattr(chat_tools, "async_search_web_anysearch", fake_search)
-    result = asyncio.run(chat_tools.search_web_anysearch.ainvoke({"query": "510300 最新公告", "num_results": 5}))
+    monkeypatch.setattr(data, "async_search_web_anysearch", fake_search)
+    result = asyncio.run(data.search_web_anysearch.ainvoke({"query": "510300 最新公告", "num_results": 5}))
 
     assert json.loads(result)["results"][0]["link"] == "https://example.com"
     assert captured == {"query": "510300 最新公告", "num_results": 5}
@@ -106,9 +208,9 @@ def test_ddgs_search_tool_maps_freshness(monkeypatch):
         captured.update({"query": query, "num_results": num_results, "timelimit": timelimit})
         return {"available": True, "source": "DDGS metasearch", "results": []}
 
-    monkeypatch.setattr(chat_tools, "async_search_web_ddgs", fake_search)
+    monkeypatch.setattr(data, "async_search_web_ddgs", fake_search)
     result = asyncio.run(
-        chat_tools.search_web_ddgs.ainvoke(
+        data.search_web_ddgs.ainvoke(
             {"query": "510300 公告", "num_results": 3, "freshness": "qdr:m"}
         )
     )
@@ -127,9 +229,9 @@ def test_compare_quotes_uses_one_market_snapshot(monkeypatch):
             {"ticker": "000001", "name": "平安银行", "price": 10},
         ]
 
-    monkeypatch.setattr(chat_tools, "async_get_asset_spot", fake_snapshot)
+    monkeypatch.setattr(assets, "async_get_asset_spot", fake_snapshot)
     result = asyncio.run(
-        chat_tools.compare_quotes.ainvoke(
+        assets.compare_quotes.ainvoke(
             {"tickers": ["sh600519", "000001"], "asset_type": "stock"}
         )
     )

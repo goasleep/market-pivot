@@ -376,15 +376,15 @@ def render_agent_pipeline(stages: list[dict[str, str]], current_stage: str = "")
     """
 
 
-def render_stock_card(stock_data: dict) -> str:
-    """Render a compact stock info card."""
-    ticker = stock_data.get("ticker", "")
-    name = stock_data.get("name", "")
-    price = stock_data.get("price", 0)
-    pct = stock_data.get("pct_chg", 0)
-    volume = stock_data.get("volume", 0)
-    pe = stock_data.get("pe", 0)
-    pb = stock_data.get("pb", 0)
+def render_asset_card(asset_data: dict) -> str:
+    """Render a compact stock, ETF, or LOF quote card."""
+    ticker = asset_data.get("ticker", "")
+    name = asset_data.get("name", "")
+    price = asset_data.get("price", 0)
+    pct = asset_data.get("pct_chg", 0)
+    volume = asset_data.get("volume", 0)
+    pe = asset_data.get("pe", 0)
+    pb = asset_data.get("pb", 0)
 
     color = "#22c55e" if pct >= 0 else "#ef4444"
     arrow = "\u25b2" if pct >= 0 else "\u25bc"
@@ -422,6 +422,9 @@ def render_stock_card(stock_data: dict) -> str:
       </div>
     </div>
     """
+
+
+render_stock_card = render_asset_card
 
 
 def render_strategy_selector(strategies: list[dict]) -> str:

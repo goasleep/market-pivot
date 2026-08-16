@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 
 class Decision(str, Enum):
@@ -18,6 +18,30 @@ class AssetType(str, Enum):
     STOCK = "stock"
     ETF = "etf"
     LOF = "lof"
+
+
+class Instrument(BaseModel):
+    """Common identity shared by stocks, ETFs, and LOFs."""
+
+    ticker: str
+    asset_type: AssetType
+    name: str = ""
+    exchange: str = ""
+    currency: str = "CNY"
+
+
+class PriceBar(BaseModel):
+    """Normalized daily bar shared by all supported instruments."""
+
+    date: str
+    open: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    close: float = 0.0
+    volume: float = 0.0
+    amount: float = 0.0
+    pct_chg: float = 0.0
+    turnover: float = 0.0
 
 
 class StockData(BaseModel):
@@ -113,18 +137,60 @@ class Intelligence(BaseModel):
     earnings_outlook: str = ""  # 盈利展望
 
 
-class BattlePlan(BaseModel):
-    """Actionable battle plan block."""
+class PriceEvidence(BaseModel):
+    """One traceable fact used to justify a price level or strategy rule."""
 
-    entry_price: float | None = None  # 狙击点 / 买入价
-    stop_loss: float | None = None
-    take_profit: float | None = None  # 止盈目标
+    metric: str
+    value: Any = None
+    source: str = ""
+    as_of: str = ""
+    calculation: str = ""
+
+
+class TradePlan(BaseModel):
+    """Canonical, executable plan shared by analysis, simulation, and UI."""
+
+    entry_price: float | None = Field(default=None, gt=0)
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profit: float | None = Field(default=None, gt=0)
+    position_size: float | None = Field(default=None, ge=0.0, le=1.0)
     position_strategy: str = ""  # e.g. "分批建仓", "一次到位", "空仓观望"
     action_items: list[str] = Field(default_factory=list)  # 行动清单
     entry_explanation: str = ""
     stop_loss_explanation: str = ""
     take_profit_explanation: str = ""
-    price_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    price_evidence: list[PriceEvidence] = Field(default_factory=list)
+
+
+class StrategyCondition(BaseModel):
+    """Small deterministic condition vocabulary executable by the backtester."""
+
+    indicator: str
+    operator: Literal["gt", "gte", "lt", "lte", "eq", "between"]
+    value: float | list[float]
+    window: int | None = Field(default=None, ge=1)
+    description: str = ""
+
+
+class StrategySpec(BaseModel):
+    """Versioned strategy definition produced by YAML or an LLM."""
+
+    name: str
+    version: str = "1.0.0"
+    description: str = ""
+    asset_types: list[AssetType] = Field(default_factory=lambda: [AssetType.ETF, AssetType.LOF])
+    indicators: list[str] = Field(default_factory=list)
+    entry_conditions: list[StrategyCondition] = Field(default_factory=list)
+    exit_conditions: list[StrategyCondition] = Field(default_factory=list)
+    stop_loss_pct: float | None = Field(default=None, ge=0, le=1)
+    take_profit_pct: float | None = Field(default=None, ge=0)
+    position_size_pct: float = Field(default=0.2, ge=0, le=1)
+    rebalance_frequency: Literal["daily", "weekly", "manual"] = "daily"
+    source: Literal["yaml", "llm", "user"] = "yaml"
+
+
+class BattlePlan(TradePlan):
+    """Backward-compatible dashboard view of the canonical trade plan."""
 
 
 class StrategyPlan(BaseModel):
@@ -135,7 +201,8 @@ class StrategyPlan(BaseModel):
     entry_conditions: list[str] = Field(default_factory=list)
     exit_conditions: list[str] = Field(default_factory=list)
     indicators_used: list[str] = Field(default_factory=list)
-    data_basis: list[dict[str, Any]] = Field(default_factory=list)
+    data_basis: list[PriceEvidence] = Field(default_factory=list)
+    spec: StrategySpec | None = None
 
 
 class PhaseDecision(BaseModel):
@@ -174,14 +241,68 @@ class TradeDecision(BaseModel):
     asset_type: AssetType = AssetType.STOCK
     decision: Decision = Decision.HOLD
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
-    entry_price: float | None = None
-    target_price: float | None = None
-    stop_loss: float | None = None
-    take_profit: float | None = None
-    position_size: float | None = Field(default=None, ge=0.0, le=1.0)  # 0-1 ratio of portfolio
+    plan: TradePlan = Field(default_factory=TradePlan)
     reasoning: str = ""
     agent_reports: dict[str, str] = Field(default_factory=dict)
     dashboard: DecisionDashboard | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_plan(cls, value):
+        """Accept the old flat decision shape while storing one canonical plan."""
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        plan = payload.get("plan")
+        dashboard = payload.get("dashboard")
+        dashboard_plan = dashboard.get("battle_plan") if isinstance(dashboard, dict) else None
+        if not plan:
+            plan = dashboard_plan or {}
+        plan = dict(plan)
+        for field_name in ("entry_price", "stop_loss", "take_profit", "position_strategy", "action_items",
+                           "entry_explanation", "stop_loss_explanation", "take_profit_explanation", "price_evidence"):
+            if field_name in payload and payload[field_name] is not None and field_name not in plan:
+                plan[field_name] = payload[field_name]
+        if "position_size" in payload and payload["position_size"] is not None and "position_size" not in plan:
+            plan["position_size"] = payload["position_size"]
+        if payload.get("target_price") is not None and "take_profit" not in plan:
+            plan["take_profit"] = payload["target_price"]
+        payload["plan"] = plan
+        return payload
+
+    @model_validator(mode="after")
+    def _sync_dashboard_plan(self):
+        """Keep the rich dashboard representation derived from ``plan``."""
+        if self.dashboard is not None:
+            existing = self.dashboard.battle_plan.model_dump()
+            existing.update(self.plan.model_dump(exclude_none=False))
+            self.dashboard.battle_plan = BattlePlan.model_validate(existing)
+        return self
+
+    @computed_field
+    @property
+    def entry_price(self) -> float | None:
+        return self.plan.entry_price
+
+    @computed_field
+    @property
+    def target_price(self) -> float | None:
+        return self.plan.take_profit
+
+    @computed_field
+    @property
+    def stop_loss(self) -> float | None:
+        return self.plan.stop_loss
+
+    @computed_field
+    @property
+    def take_profit(self) -> float | None:
+        return self.plan.take_profit
+
+    @computed_field
+    @property
+    def position_size(self) -> float | None:
+        return self.plan.position_size
 
 
 class MarketContext(BaseModel):
@@ -194,17 +315,42 @@ class MarketContext(BaseModel):
 
     ticker: str
     asset_type: AssetType = AssetType.STOCK
+    instrument: Instrument | None = None
     as_of_date: str | None = None
     current_price: float = 0.0
-    realtime: dict = Field(default_factory=dict)
-    history: list[dict] = Field(default_factory=list)
-    financial: dict = Field(default_factory=dict)
-    news: list[dict] = Field(default_factory=list)
-    web_results: list[dict] = Field(default_factory=list)
-    fund_data: dict[str, Any] = Field(default_factory=dict)
+    realtime: dict[str, Any] = Field(default_factory=dict)
+    history: list[dict[str, Any]] = Field(default_factory=list)
+    financial: dict[str, Any] = Field(default_factory=dict)
+    news: list[dict[str, Any]] = Field(default_factory=list)
+    web_results: list[dict[str, Any]] = Field(default_factory=list)
+    fund_data: "FundSnapshot | None" = None
     market_regime: str = "unknown"
     is_backtest: bool = False
     data_status: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _ensure_instrument(self):
+        if self.instrument is None:
+            self.instrument = Instrument(
+                ticker=self.ticker,
+                asset_type=self.asset_type,
+                name=str(self.realtime.get("name", "")),
+            )
+        return self
+
+
+class FundSnapshot(BaseModel):
+    """Typed ETF/LOF snapshot normalized from AkShare."""
+
+    source: str = ""
+    as_of: str = ""
+    realtime_fields: dict[str, Any] = Field(default_factory=dict)
+    derived_metrics: dict[str, float | int | str | None] = Field(default_factory=dict)
+    nav_history: list[dict[str, Any]] = Field(default_factory=list)
+
+
+MarketContext.model_rebuild()
+AssetResearchContext = MarketContext
 
 
 class TradeRecord(BaseModel):
@@ -236,6 +382,8 @@ class Position(BaseModel):
     current_price: float = 0.0
     available_shares: int = 0  # sellable now (bought before today)
     frozen_shares: int = 0  # bought today, cannot sell until next day
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profit: float | None = Field(default=None, gt=0)
 
     def model_post_init(self, __context) -> None:
         """Ensure available_shares defaults to shares for backward compat."""
@@ -336,6 +484,35 @@ class LiveOrderIntent(BaseModel):
     fill_policy: Literal["next_open", "same_close", "manual"] = "next_open"
 
 
+class AssetTradingRules(BaseModel):
+    """Trading constraints that vary by asset type."""
+
+    asset_type: AssetType
+    min_lot: int = Field(default=100, ge=1)
+    t_plus_one: bool = True
+    slippage_bps: float = Field(default=5.0, ge=0)
+    buy_commission_rate: float = Field(default=0.0003, ge=0)
+    sell_commission_rate: float = Field(default=0.0003, ge=0)
+    minimum_commission: float = Field(default=5.0, ge=0)
+    stamp_tax_rate: float = Field(default=0.001, ge=0)
+    transfer_fee_rate: float = Field(default=0.00002, ge=0)
+    auto_exit_levels: bool = True
+    max_single_position_pct: float = Field(default=0.2, ge=0, le=1)
+    max_total_position_pct: float = Field(default=0.95, ge=0, le=1)
+
+    @classmethod
+    def defaults_for(cls, asset_type: AssetType) -> "AssetTradingRules":
+        """Return conservative defaults for the supported A-share asset types."""
+        if asset_type in {AssetType.ETF, AssetType.LOF}:
+            return cls(
+                asset_type=asset_type,
+                stamp_tax_rate=0.0,
+                transfer_fee_rate=0.0,
+                t_plus_one=True,
+            )
+        return cls(asset_type=asset_type)
+
+
 class LiveOrderResult(BaseModel):
     """Normalized result returned by a live broker adapter."""
 
@@ -370,6 +547,42 @@ class SimulationAccountConfig(BaseModel):
     universe: list[str] = Field(default_factory=list)
     external: ExternalSimulationConfig = Field(default_factory=ExternalSimulationConfig)
     live: LiveTradingConfig = Field(default_factory=LiveTradingConfig)
+    trading_rules: AssetTradingRules | None = None
+
+    @model_validator(mode="after")
+    def _set_trading_rules(self):
+        if self.trading_rules is None or self.trading_rules.asset_type != self.asset_type:
+            self.trading_rules = AssetTradingRules(
+                asset_type=self.asset_type,
+                min_lot=self.min_lot,
+                slippage_bps=self.slippage_bps,
+                buy_commission_rate=self.buy_commission_rate,
+                sell_commission_rate=self.sell_commission_rate,
+                minimum_commission=self.minimum_commission,
+                stamp_tax_rate=self.stamp_tax_rate,
+                transfer_fee_rate=self.transfer_fee_rate,
+            )
+            if self.asset_type in {AssetType.ETF, AssetType.LOF}:
+                self.trading_rules.stamp_tax_rate = 0.0
+                self.trading_rules.transfer_fee_rate = 0.0
+        return self
+
+    def effective_trading_rules(self, asset_type: AssetType | str | None = None) -> AssetTradingRules:
+        """Return rules for the requested asset while preserving legacy fields."""
+        requested = AssetType(asset_type or self.asset_type)
+        if requested == self.asset_type and self.trading_rules is not None:
+            return self.trading_rules
+        return AssetTradingRules.defaults_for(requested).model_copy(
+            update={
+                "slippage_bps": self.slippage_bps,
+                "buy_commission_rate": self.buy_commission_rate,
+                "sell_commission_rate": self.sell_commission_rate,
+                "minimum_commission": self.minimum_commission,
+                "min_lot": self.min_lot,
+                "max_single_position_pct": self.max_single_position_pct,
+                "max_total_position_pct": self.max_total_position_pct,
+            }
+        )
 
 
 class SimulationAccount(BaseModel):
@@ -401,6 +614,8 @@ class SimulationOrder(BaseModel):
     source: Literal["manual", "agent", "backtest", "system"] = "manual"
     run_id: str | None = None
     fill_policy: Literal["next_open", "same_close", "manual"] = "next_open"
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profit: float | None = Field(default=None, gt=0)
 
 
 class SimulationSnapshot(BaseModel):

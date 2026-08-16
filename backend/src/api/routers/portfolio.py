@@ -6,10 +6,13 @@ from datetime import date
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from data.akshare_provider import async_get_fund_realtime, async_get_stock_realtime
+from data.fund_provider import async_get_fund_realtime
+from data.stock_provider import async_get_stock_realtime
+from domain.decision_policy import DecisionValidator
 from engine.broker_adapters import broker_status, live_broker_status
 from engine.simulation_account import simulation_accounts
 from engine.simulation_events import simulation_events
+from engine.trading_engine import decision_shares
 from models.schemas import (
     AssetType,
     Decision,
@@ -436,18 +439,10 @@ async def execute_decision(account_id: str, decision: TradeDecision, price: floa
         fill_price = float(quote.get("price", 0) or 0)
     if fill_price <= 0:
         raise ValueError("无法取得可执行价格")
-    position = next((item for item in account.portfolio.positions if item.ticker == decision.ticker), None)
-    if decision.decision == Decision.BUY:
-        pct = min(max(decision.position_size or 0.2, 0), account.config.max_single_position_pct)
-        shares = int(account.portfolio.cash * pct / fill_price)
-    elif position:
-        shares = (
-            position.available_shares
-            if decision.stop_loss and fill_price <= decision.stop_loss
-            else position.available_shares // 2
-        )
-    else:
-        shares = 0
+    issues = DecisionValidator.validate(decision, current_price=fill_price)
+    if decision.decision == Decision.BUY and issues:
+        raise ValueError("决策未通过风险校验: " + "；".join(issue.message for issue in issues))
+    shares = decision_shares(account.portfolio, account.config, decision, fill_price)
     if decision.decision == Decision.HOLD or shares <= 0:
         return await _account_payload(account_id)
     order = await asyncio.to_thread(
@@ -460,6 +455,8 @@ async def execute_decision(account_id: str, decision: TradeDecision, price: floa
         None,
         date.today().isoformat(),
         asset_type=decision.asset_type,
+        stop_loss=decision.stop_loss,
+        take_profit=decision.take_profit,
     )
     await asyncio.to_thread(simulation_accounts.fill_order, order.order_id, fill_price, date.today().isoformat())
     payload = await _account_payload(account_id)

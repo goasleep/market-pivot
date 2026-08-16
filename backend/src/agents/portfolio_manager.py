@@ -9,6 +9,7 @@ import json
 from loguru import logger
 
 from agents.prompt_context import INVESTOR_CONTEXT
+from domain.decision_policy import DecisionValidator
 from llm import LLMService, get_llm_service
 from models.schemas import (
     AgentReport,
@@ -24,9 +25,11 @@ from models.schemas import (
     SignalAttribution,
     SignalType,
     StrategyPlan,
+    StrategySpec,
     TradeDecision,
+    TradePlan,
 )
-from strategies.skill_manager import get_strategy_instructions
+from strategies.skill_manager import get_strategy_instructions, get_strategy_spec, register_strategy_spec
 
 SYSTEM_PROMPT = """You are a professional A-share portfolio manager.
 You make the final trading decision based on all analyst reports.
@@ -86,7 +89,20 @@ The JSON must contain both a simplified decision and a detailed dashboard:
       "indicators_used": ["MA20", "ATR14"],
       "data_basis": [
         {"metric": "close", "value": 0, "source": "market_context/realtime", "as_of": "YYYY-MM-DD", "calculation": ""}
-      ]
+      ],
+      "spec": {
+        "name": "strategy_name",
+        "version": "1.0.0",
+        "asset_types": ["etf", "lof"],
+        "indicators": ["return_pct", "price_vs_ma_pct"],
+        "entry_conditions": [{"indicator": "return_pct", "operator": "gt", "value": 0, "window": 20}],
+        "exit_conditions": [],
+        "stop_loss_pct": 0.08,
+        "take_profit_pct": 0.16,
+        "position_size_pct": 0.2,
+        "rebalance_frequency": "daily",
+        "source": "llm"
+      }
     },
     "phase_decision": {
       "pre_market": "盘前观察条件",
@@ -121,6 +137,13 @@ def _parse_dashboard(raw: dict) -> DecisionDashboard:
         signal = SignalType(cc.get("signal", "watch"))
     except ValueError:
         signal = SignalType.WATCH
+
+    spec = None
+    if isinstance(strategy.get("spec"), dict):
+        try:
+            spec = StrategySpec.model_validate(strategy["spec"])
+        except Exception as exc:
+            logger.warning("Invalid LLM strategy spec: {}", exc)
 
     return DecisionDashboard(
         core_conclusion=CoreConclusion(
@@ -159,6 +182,7 @@ def _parse_dashboard(raw: dict) -> DecisionDashboard:
             exit_conditions=strategy.get("exit_conditions", []),
             indicators_used=strategy.get("indicators_used", []),
             data_basis=strategy.get("data_basis", []),
+            spec=spec,
         ),
         phase_decision=PhaseDecision(
             pre_market=ph.get("pre_market", ""),
@@ -190,7 +214,7 @@ def _market_facts(
         "market_regime": market_context.market_regime,
         "data_status": market_context.data_status,
         "realtime": market_context.realtime,
-        "fund_data": market_context.fund_data,
+        "fund_data": market_context.fund_data.model_dump(mode="json") if market_context.fund_data else None,
         "financial": market_context.financial,
         "recent_history": market_context.history[-30:],
         "technical_indicators": technical.key_data if technical else {},
@@ -217,10 +241,9 @@ def _buy_plan_has_evidence(dashboard: DecisionDashboard) -> bool:
     return bool(
         evidence
         and all(
-            isinstance(item, dict)
-            and item.get("metric")
-            and item.get("source")
-            and item.get("as_of")
+            item.metric
+            and item.source
+            and item.as_of
             for item in evidence
         )
     )
@@ -315,10 +338,19 @@ Make your final decision as JSON.
             strategy_name=strategy_name,
             market_regime=market_regime,
         )
+        selected_spec = get_strategy_spec(strategy_name) if strategy_name else None
+        spec_text = (
+            json.dumps(selected_spec.model_dump(mode="json"), ensure_ascii=False)
+            if selected_spec
+            else "none"
+        )
+        prompt += f"\n\nExecutable strategy specification:\n{spec_text}\n"
         full_system = SYSTEM_PROMPT + strategy_text
         llm_service = llm or get_llm_service()
         result = await llm_service.chat_json(prompt, system=full_system)
         dashboard = _parse_dashboard(result)
+        if dashboard.strategy_plan.spec is not None:
+            register_strategy_spec(dashboard.strategy_plan.spec)
         requested_decision = Decision(result.get("decision", "hold"))
         decision = requested_decision
         reasoning = result.get("reasoning", "")
@@ -336,17 +368,10 @@ Make your final decision as JSON.
         if position_size is not None and risk_report:
             risk_limit = float(risk_report.key_data.get("max_position_pct", 1.0))
             position_size = min(max(float(position_size), 0.0), max(risk_limit, 0.0))
-        return TradeDecision(
-            ticker=ticker,
-            asset_type=asset_type,
-            decision=decision,
-            confidence=float(result.get("confidence", 0.5)),
+        plan = TradePlan(
             entry_price=result.get("entry_price")
             if result.get("entry_price") is not None
             else dashboard.battle_plan.entry_price,
-            target_price=result.get("target_price")
-            if result.get("target_price") is not None
-            else dashboard.battle_plan.take_profit,
             stop_loss=result.get("stop_loss")
             if result.get("stop_loss") is not None
             else dashboard.battle_plan.stop_loss,
@@ -354,10 +379,34 @@ Make your final decision as JSON.
             if result.get("take_profit") is not None
             else dashboard.battle_plan.take_profit,
             position_size=position_size,
+            position_strategy=dashboard.battle_plan.position_strategy,
+            action_items=dashboard.battle_plan.action_items,
+            entry_explanation=dashboard.battle_plan.entry_explanation,
+            stop_loss_explanation=dashboard.battle_plan.stop_loss_explanation,
+            take_profit_explanation=dashboard.battle_plan.take_profit_explanation,
+            price_evidence=dashboard.battle_plan.price_evidence,
+        )
+        decision_payload = TradeDecision(
+            ticker=ticker,
+            asset_type=asset_type,
+            decision=decision,
+            confidence=float(result.get("confidence", 0.5)),
+            plan=plan,
             reasoning=reasoning,
             agent_reports={name: r.reasoning for name, r in agent_reports.items()},
             dashboard=dashboard,
         )
+        issues = DecisionValidator.validate(decision_payload, current_price=current_price)
+        if decision_payload.decision == Decision.BUY and issues:
+            messages = "；".join(issue.message for issue in issues)
+            logger.warning("[PortfolioManager] Decision validation failed for {}: {}", ticker, messages)
+            decision_payload = decision_payload.model_copy(
+                update={
+                    "decision": Decision.HOLD,
+                    "reasoning": f"{decision_payload.reasoning}\n\n系统校验：{messages}".strip(),
+                }
+            )
+        return decision_payload
     except Exception as e:
         logger.error(f"[PortfolioManager] LLM error: {e}")
         return TradeDecision(

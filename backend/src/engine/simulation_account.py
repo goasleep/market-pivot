@@ -315,6 +315,8 @@ class SimulationAccountService:
         run_id: str | None = None,
         fill_policy: str | None = None,
         asset_type: AssetType | str | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
     ) -> SimulationOrder:
         account = self.get_account(account_id)
         if account.status != "active":
@@ -346,6 +348,8 @@ class SimulationAccountService:
             source=source,
             run_id=run_id,
             fill_policy=effective_fill_policy,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
         )
         with self._lock, self._connect() as connection:
             timestamp = _now()
@@ -405,7 +409,14 @@ class SimulationAccountService:
             engine.set_date(fill_date)
             engine.update_prices({order.ticker: execution_price})
             if order.side == Decision.BUY:
-                trade = engine.buy(order.ticker, order.shares, execution_price, fill_date)
+                trade = engine.buy(
+                    order.ticker,
+                    order.shares,
+                    execution_price,
+                    fill_date,
+                    stop_loss=order.stop_loss,
+                    take_profit=order.take_profit,
+                )
             else:
                 trade = engine.sell(order.ticker, order.shares, execution_price, fill_date)
 

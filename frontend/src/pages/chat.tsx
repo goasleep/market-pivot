@@ -178,6 +178,17 @@ function conversationSearchText(conversation: Conversation) {
     .toLocaleLowerCase();
 }
 
+function latestConversationReferences(conversation?: Conversation): ChatReference[] {
+  if (!conversation) return [];
+  for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+    const references = (conversation.messages[index].references || []).filter(
+      (reference) => reference.url,
+    );
+    if (references.length > 0) return references;
+  }
+  return [];
+}
+
 function loadStore(): ChatStore {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -283,7 +294,9 @@ export function ChatPage() {
   );
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sourcesOpen, setSourcesOpen] = useState(false);
-  const [selectedReferences, setSelectedReferences] = useState<ChatReference[]>([]);
+  const [referencesByConversation, setReferencesByConversation] = useState<
+    Record<string, ChatReference[]>
+  >({});
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -307,6 +320,11 @@ export function ChatPage() {
       (message) => message.role === "assistant" && message.loading && message.taskId,
     ),
   );
+
+  const selectedReferences = activeConversation
+    ? referencesByConversation[activeConversation.conversationId] ||
+      latestConversationReferences(activeConversation)
+    : [];
 
   const visibleConversations = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -377,6 +395,11 @@ export function ChatPage() {
     if (scrollRef.current)
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [activeConversation?.messages]);
+
+  useEffect(() => {
+    if (!sourcesOpen || selectedReferences.length > 0) return;
+    setSourcesOpen(false);
+  }, [activeConversation?.conversationId, selectedReferences.length, sourcesOpen]);
 
   const updateConversation = useCallback(
     (conversationId: string, update: (item: Conversation) => Conversation) => {
@@ -1050,9 +1073,13 @@ export function ChatPage() {
   );
 
   const openReferences = useCallback((references: ChatReference[]) => {
-    setSelectedReferences(references);
+    if (!activeConversation) return;
+    setReferencesByConversation((current) => ({
+      ...current,
+      [activeConversation.conversationId]: references,
+    }));
     setSourcesOpen(true);
-  }, []);
+  }, [activeConversation]);
 
   const messages = activeConversation?.messages || [];
 

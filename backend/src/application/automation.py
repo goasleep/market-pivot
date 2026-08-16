@@ -12,7 +12,7 @@ from loguru import logger
 from application.automation_store import automation_store
 from application.research import research_service
 from config import settings
-from data.akshare_provider import async_get_stock_history, async_get_stock_realtime
+from data.stock_provider import async_get_stock_history, async_get_stock_realtime
 from data.trading_calendar import is_trading_day
 from engine.broker_adapters import LiveBrokerUnavailableError, get_live_broker
 from engine.simulation_account import simulation_accounts
@@ -301,6 +301,9 @@ class AutomationService:
             "agent",
             run_id,
             config.fill_time,
+            asset_type=decision.asset_type,
+            stop_loss=decision.stop_loss,
+            take_profit=decision.take_profit,
         )
         if config.fill_time == "same_close":
             order = await asyncio.to_thread(simulation_accounts.fill_order, order.order_id, price, trade_date)

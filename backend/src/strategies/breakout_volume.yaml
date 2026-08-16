@@ -11,6 +11,13 @@ default_active: false
 default_router: true
 default_priority: 15
 market_regimes: ["trending_up", "sideways"]
+asset_types: [stock, etf, lof]
+indicators: [return_pct, volume_ratio]
+entry_conditions:
+  - {indicator: return_pct, operator: gt, value: 3, window: 1, description: "单日涨幅超过3%"}
+  - {indicator: volume_ratio, operator: gt, value: 1.5, window: 20, description: "成交量超过20日均量1.5倍"}
+stop_loss_pct: 0.06
+take_profit_pct: 0.15
 instructions: |
   ## 策略：放量突破
 

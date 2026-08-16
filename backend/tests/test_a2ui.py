@@ -36,10 +36,37 @@ def test_search_tool_result_exposes_clickable_links_and_visible_urls():
     )
 
     components = messages[1]["updateComponents"]["components"]
+    result_list = next(component for component in components if component["id"] == "list")
+    root = next(component for component in components if component["id"] == "root")
     item = next(component for component in components if component["id"] == "searchItem")
     data = messages[2]["updateDataModel"]["value"]
+    assert root["component"] == "Collapsible"
+    assert root["title"] == "搜索结果（1 条）"
+    assert root["defaultExpanded"] is True
+    assert result_list["component"] == "List"
     assert item["component"] == "SearchResultItem"
     assert data["items"][0]["link"] == "https://example.com/article"
+
+
+def test_search_tool_result_fully_collapses_large_result_sets():
+    messages = render_tool_result(
+        "search_web",
+        json.dumps(
+            {
+                "results": [
+                    {"title": f"结果 {index}", "link": f"https://example.com/{index}"}
+                    for index in range(5)
+                ]
+            }
+        ),
+    )
+
+    root = next(
+        component
+        for component in messages[1]["updateComponents"]["components"]
+        if component["id"] == "root"
+    )
+    assert root["defaultExpanded"] is False
 
 
 def test_progressive_pipeline_update_does_not_recreate_surface():
@@ -51,3 +78,25 @@ def test_progressive_pipeline_update_does_not_recreate_surface():
 
     assert "createSurface" not in messages[0]
     assert messages[0]["updateComponents"]["surfaceId"] == "pipeline-1"
+
+
+def test_historical_prices_render_as_inline_trend_chart_and_table():
+    messages = render_tool_result(
+        "get_historical_prices",
+        json.dumps(
+            {
+                "ticker": "510300",
+                "asset_type": "etf",
+                "history": [
+                    {"date": "2026-08-12", "close": 4.0, "pct_chg": 0.5, "volume": 100},
+                    {"date": "2026-08-13", "close": 4.2, "pct_chg": 5.0, "volume": 120},
+                ],
+            }
+        ),
+    )
+
+    components = messages[1]["updateComponents"]["components"]
+    chart = next(component for component in components if component["id"] == "chart")
+    data = messages[2]["updateDataModel"]["value"]
+    assert chart["component"] == "Sparkline"
+    assert data["prices"] == [4.0, 4.2]

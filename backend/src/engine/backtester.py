@@ -19,10 +19,20 @@ import pandas as pd
 from loguru import logger
 
 from application.research import research_service
-from data.akshare_provider import async_get_fund_history, async_get_stock_history
+from data.fund_provider import async_get_fund_history
 from data.market_context import build_market_context
+from data.stock_provider import async_get_stock_history
 from engine.trading_engine import TimeAwareTradingEngine, decision_shares
-from models.schemas import AssetType, Decision, SimulationAccountConfig
+from models.schemas import (
+    AssetType,
+    Decision,
+    PriceEvidence,
+    SimulationAccountConfig,
+    StrategySpec,
+    TradeDecision,
+    TradePlan,
+)
+from strategies.compiler import evaluate_strategy, strategy_from_mapping
 
 # Kept as a module alias for existing test doubles and callers that patch the
 # workflow. Production invocation is routed through ResearchService below.
@@ -41,6 +51,7 @@ async def run_backtest(
     num_news: int = 5,
     progress_callback=None,
     asset_type: AssetType | str = AssetType.STOCK,
+    strategy_spec: dict | None = None,
 ) -> dict:
     """Run backtest over historical data.
 
@@ -58,6 +69,11 @@ async def run_backtest(
         Dict with backtest results
     """
     asset_type = AssetType(asset_type)
+    executable_spec = (
+        strategy_from_mapping(strategy_spec, source="llm")
+        if strategy_spec
+        else None
+    )
     logger.info(f"Backtest {asset_type.value}:{ticker} {start_date} -> {end_date}")
 
     if decision_interval < 1:
@@ -91,7 +107,7 @@ async def run_backtest(
     # 2. Initialize engine
     engine = TimeAwareTradingEngine(
         initial_capital=initial_capital,
-        rules=SimulationAccountConfig(initial_cash=initial_capital),
+        rules=SimulationAccountConfig(initial_cash=initial_capital, asset_type=asset_type),
     )
     engine.set_available_dates(trading_dates)
 
@@ -143,23 +159,33 @@ async def run_backtest(
                     "market_context": context,
                     "progress": [],
                 }
-                result = await research_service.run_state(
-                    state,
-                    trace_config=research_service.build_trace_config(
-                        ticker,
-                        asset_type,
-                        run_name="backtest-agent-analysis",
-                        tags=["backtest", "agent"],
-                        metadata={
-                            "ticker": ticker,
-                            "asset_type": asset_type.value,
-                            "as_of_date": current_date,
-                            "strategy": strategy_name or "auto",
-                        },
-                    ),
-                    workflow_override=workflow,
-                )
-                decision = result.get("final_decision")
+                if executable_spec:
+                    decision = _decision_from_strategy(
+                        executable_spec,
+                        df.iloc[: i + 1],
+                        asset_type=asset_type,
+                        ticker=ticker,
+                        current_price=current_price,
+                        has_position=bool(engine._find_position(ticker)),
+                    )
+                else:
+                    result = await research_service.run_state(
+                        state,
+                        trace_config=research_service.build_trace_config(
+                            ticker,
+                            asset_type,
+                            run_name="backtest-agent-analysis",
+                            tags=["backtest", "agent"],
+                            metadata={
+                                "ticker": ticker,
+                                "asset_type": asset_type.value,
+                                "as_of_date": current_date,
+                                "strategy": strategy_name or "auto",
+                            },
+                        ),
+                        workflow_override=workflow,
+                    )
+                    decision = result.get("final_decision")
 
                 if decision and decision.decision != Decision.HOLD:
                     if fill_time == "same_close":
@@ -213,6 +239,7 @@ async def run_pool_backtest(
     strategy_name: str | None = None,
     progress_callback=None,
     asset_type: AssetType | str = AssetType.STOCK,
+    strategy_spec: dict | None = None,
 ) -> dict:
     """Run the same Agent and execution semantics across a stock pool.
 
@@ -223,6 +250,7 @@ async def run_pool_backtest(
     """
 
     asset_type = AssetType(asset_type)
+    executable_spec = strategy_from_mapping(strategy_spec, source="llm") if strategy_spec else None
     if not tickers:
         raise ValueError("tickers 不能为空")
     if decision_interval < 1:
@@ -263,7 +291,7 @@ async def run_pool_backtest(
     trading_dates = sorted({day for frame in valid.values() for day in frame["date"].tolist()})
     engine = TimeAwareTradingEngine(
         initial_capital=initial_capital,
-        rules=SimulationAccountConfig(initial_cash=initial_capital),
+        rules=SimulationAccountConfig(initial_cash=initial_capital, asset_type=asset_type),
     )
     engine.set_available_dates(trading_dates)
     pending: dict[str, object] = {}
@@ -313,23 +341,33 @@ async def run_pool_backtest(
                         "market_context": context,
                         "progress": [],
                     }
-                    result = await research_service.run_state(
-                        state,
-                        trace_config=research_service.build_trace_config(
-                            symbol,
-                            asset_type,
-                            run_name="backtest-agent-analysis",
-                            tags=["backtest", "agent", "pool"],
-                            metadata={
-                                "ticker": symbol,
-                                "asset_type": asset_type.value,
-                                "as_of_date": current_date,
-                                "strategy": strategy_name or "auto",
-                            },
-                        ),
-                        workflow_override=workflow,
-                    )
-                    decision = result.get("final_decision")
+                    if executable_spec:
+                        decision = _decision_from_strategy(
+                            executable_spec,
+                            history_until_day,
+                            asset_type=asset_type,
+                            ticker=symbol,
+                            current_price=current_price,
+                            has_position=bool(engine._find_position(symbol)),
+                        )
+                    else:
+                        result = await research_service.run_state(
+                            state,
+                            trace_config=research_service.build_trace_config(
+                                symbol,
+                                asset_type,
+                                run_name="backtest-agent-analysis",
+                                tags=["backtest", "agent", "pool"],
+                                metadata={
+                                    "ticker": symbol,
+                                    "asset_type": asset_type.value,
+                                    "as_of_date": current_date,
+                                    "strategy": strategy_name or "auto",
+                                },
+                            ),
+                            workflow_override=workflow,
+                        )
+                        decision = result.get("final_decision")
                     if decision and decision.decision != Decision.HOLD:
                         if fill_time == "same_close":
                             _execute_decision(engine, decision, symbol, current_price, current_date)
@@ -369,9 +407,66 @@ def _execute_decision(engine, decision, ticker: str, price: float, date: str):
     if shares <= 0:
         return
     if decision.decision == Decision.BUY:
-        engine.buy(ticker, shares, price, date)
+        engine.buy(
+            ticker,
+            shares,
+            price,
+            date,
+            stop_loss=decision.stop_loss,
+            take_profit=decision.take_profit,
+        )
     elif decision.decision == Decision.SELL:
         engine.sell(ticker, shares, price, date)
+
+
+def _decision_from_strategy(
+    spec: StrategySpec,
+    history: pd.DataFrame,
+    *,
+    asset_type: AssetType,
+    ticker: str,
+    current_price: float,
+    has_position: bool,
+) -> TradeDecision:
+    """Turn a validated LLM/user strategy spec into a deterministic decision."""
+    evaluation = evaluate_strategy(spec, history, asset_type=asset_type)
+    if has_position and evaluation.get("exit_matched"):
+        return TradeDecision(
+            ticker=ticker,
+            asset_type=asset_type,
+            decision=Decision.SELL,
+            reasoning=f"策略 {spec.name} 的退出条件全部满足。",
+        )
+    if has_position or not evaluation.get("matched"):
+        return TradeDecision(ticker=ticker, asset_type=asset_type, decision=Decision.HOLD)
+    stop = current_price * (1 - (spec.stop_loss_pct or 0.08))
+    target = current_price * (1 + (spec.take_profit_pct or 0.16))
+    as_of = str(history.iloc[-1].get("date", "")) if not history.empty else ""
+    evidence = [
+        PriceEvidence(
+            metric="close",
+            value=current_price,
+            source="strategy/backtest_history",
+            as_of=as_of,
+            calculation="当前收盘价作为结构化策略入场基准",
+        )
+    ]
+    return TradeDecision(
+        ticker=ticker,
+        asset_type=asset_type,
+        decision=Decision.BUY,
+        reasoning=f"策略 {spec.name} 的入场条件全部满足。",
+        plan=TradePlan(
+            entry_price=current_price,
+            stop_loss=stop,
+            take_profit=target,
+            position_size=spec.position_size_pct,
+            entry_explanation="使用回测当日收盘价作为入场基准。",
+            stop_loss_explanation=f"按入场价下方 {spec.stop_loss_pct or 0.08:.1%} 设置止损。",
+            take_profit_explanation=f"按入场价上方 {spec.take_profit_pct or 0.16:.1%} 设置止盈。",
+            price_evidence=evidence,
+        ),
+    )
 
 
 def _calc_metrics(equity_curve: list[dict], trades: list, initial_capital: float) -> dict:
