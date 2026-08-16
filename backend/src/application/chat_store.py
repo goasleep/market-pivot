@@ -71,6 +71,10 @@ class ChatStore:
         await Tortoise.init(
             db_url=self.db_url,
             modules={"models": ["data.chat_models"]},
+            # FastAPI runs lifespan and request handlers in different asyncio
+            # tasks; the fallback keeps the initialized connection visible to
+            # both tasks while preserving Tortoise's normal context behavior.
+            _enable_global_fallback=True,
         )
         await Tortoise.generate_schemas(safe=True)
         await self._ensure_legacy_tables()
@@ -548,9 +552,13 @@ class ChatStore:
             needle = query.strip()
             if self._sqlite_fts5_enabled and len(needle) >= 3:
                 connection = Tortoise.get_connection("default")
+                # Search input is user text, not an FTS expression. Quoting it
+                # keeps punctuation such as hyphens from being interpreted as
+                # column or operator syntax by SQLite FTS5.
+                fts_query = '"' + needle.replace('"', '""') + '"'
                 rows = await connection.execute_query_dict(
                     "SELECT DISTINCT conversation_id FROM chat_message_search_fts WHERE content MATCH ?",
-                    [needle],
+                    [fts_query],
                 )
                 content_ids = [row["conversation_id"] for row in rows]
             else:

@@ -115,7 +115,7 @@ async def test_chat_store_searches_message_content(store):
     await store.prepare_task(
         conversation_id="conversation-1",
         task_id="task-1",
-        message="分析 ETF 510300 的短期趋势",
+        message="分析 ETF 510300 的短期趋势，测试标记 SHORT-2026",
         history=[],
     )
     await store.update_task("task-1", "completed")
@@ -127,6 +127,8 @@ async def test_chat_store_searches_message_content(store):
     )
     await store.update_task("task-2", "completed")
     results = await store.list_conversations(query="短期趋势")
+    assert [item["conversation_id"] for item in results] == ["conversation-1"]
+    results = await store.list_conversations(query="SHORT-2026")
     assert [item["conversation_id"] for item in results] == ["conversation-1"]
 
 
