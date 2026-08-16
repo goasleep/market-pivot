@@ -5,8 +5,10 @@ export interface AnalysisResult {
   asset_type: AssetType;
   decision: "buy" | "sell" | "hold";
   confidence: number;
+  entry_price: number | null;
   target_price: number | null;
   stop_loss: number | null;
+  take_profit: number | null;
   position_size: number | null;
   reasoning: string;
   agent_reports: Record<string, string>;
@@ -296,6 +298,18 @@ export interface DashboardData {
     take_profit: number | null;
     position_strategy: string;
     action_items: string[];
+    entry_explanation: string;
+    stop_loss_explanation: string;
+    take_profit_explanation: string;
+    price_evidence: Array<Record<string, unknown>>;
+  };
+  strategy_plan: {
+    name: string;
+    thesis: string;
+    entry_conditions: string[];
+    exit_conditions: string[];
+    indicators_used: string[];
+    data_basis: Array<Record<string, unknown>>;
   };
   phase_decision: {
     pre_market: string;

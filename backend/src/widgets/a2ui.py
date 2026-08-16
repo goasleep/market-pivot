@@ -258,6 +258,14 @@ def render_decision_dashboard(
         _text("postMarket", _ref("/postMarket"), "body"),
     ]
     confidence = float(cc.get("confidence", 0) or 0)
+    actions = list(bp.get("action_items", []) or [])
+    for label, key in (
+        ("入场依据", "entry_explanation"),
+        ("止损依据", "stop_loss_explanation"),
+        ("止盈依据", "take_profit_explanation"),
+    ):
+        if bp.get(key):
+            actions.append(f"{label}：{bp[key]}")
     data = {
         "signalLabel": {
             "strong_buy": "强烈买入",
@@ -280,7 +288,7 @@ def render_decision_dashboard(
         "stop": f"止损价：{bp.get('stop_loss', '暂无')}",
         "target": f"止盈价：{bp.get('take_profit', '暂无')}",
         "position": f"仓位策略：{bp.get('position_strategy', '暂无')}",
-        "actions": bp.get("action_items", []) or ["暂无具体行动项"],
+        "actions": actions or ["暂无具体行动项"],
         "news": intel.get("latest_news", [])[:5] or ["暂无新闻"],
         "alerts": intel.get("risk_alerts", [])[:5] or ["暂无风险警报"],
         "catalysts": intel.get("positive_catalysts", [])[:5] or ["暂无积极催化"],

@@ -150,6 +150,7 @@ async def run_portfolio_manager(state: WorkflowState) -> dict:
         investor_context=state.get("investor_context", {}),
         strategy_name=state.get("strategy_name"),
         market_regime=(state.get("market_context").market_regime if state.get("market_context") else None),
+        market_context=state.get("market_context"),
     )
     return {
         "final_decision": decision,

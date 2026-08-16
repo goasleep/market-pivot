@@ -121,6 +121,21 @@ class BattlePlan(BaseModel):
     take_profit: float | None = None  # 止盈目标
     position_strategy: str = ""  # e.g. "分批建仓", "一次到位", "空仓观望"
     action_items: list[str] = Field(default_factory=list)  # 行动清单
+    entry_explanation: str = ""
+    stop_loss_explanation: str = ""
+    take_profit_explanation: str = ""
+    price_evidence: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class StrategyPlan(BaseModel):
+    """The strategy selected or synthesized for this decision."""
+
+    name: str = ""
+    thesis: str = ""
+    entry_conditions: list[str] = Field(default_factory=list)
+    exit_conditions: list[str] = Field(default_factory=list)
+    indicators_used: list[str] = Field(default_factory=list)
+    data_basis: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PhaseDecision(BaseModel):
@@ -147,6 +162,7 @@ class DecisionDashboard(BaseModel):
     data_perspective: DataPerspective = Field(default_factory=DataPerspective)
     intelligence: Intelligence = Field(default_factory=Intelligence)
     battle_plan: BattlePlan = Field(default_factory=BattlePlan)
+    strategy_plan: StrategyPlan = Field(default_factory=StrategyPlan)
     phase_decision: PhaseDecision = Field(default_factory=PhaseDecision)
     signal_attribution: SignalAttribution = Field(default_factory=SignalAttribution)
 
@@ -158,8 +174,10 @@ class TradeDecision(BaseModel):
     asset_type: AssetType = AssetType.STOCK
     decision: Decision = Decision.HOLD
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    entry_price: float | None = None
     target_price: float | None = None
     stop_loss: float | None = None
+    take_profit: float | None = None
     position_size: float | None = Field(default=None, ge=0.0, le=1.0)  # 0-1 ratio of portfolio
     reasoning: str = ""
     agent_reports: dict[str, str] = Field(default_factory=dict)
@@ -183,6 +201,7 @@ class MarketContext(BaseModel):
     financial: dict = Field(default_factory=dict)
     news: list[dict] = Field(default_factory=list)
     web_results: list[dict] = Field(default_factory=list)
+    fund_data: dict[str, Any] = Field(default_factory=dict)
     market_regime: str = "unknown"
     is_backtest: bool = False
     data_status: dict[str, Any] = Field(default_factory=dict)

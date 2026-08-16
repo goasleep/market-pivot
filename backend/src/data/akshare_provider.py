@@ -166,6 +166,7 @@ _breakers: dict[str, CircuitBreaker] = {
     "financial": CircuitBreaker("akshare_financial", failure_threshold=5, recovery_timeout=180),
     "news": CircuitBreaker("akshare_news", failure_threshold=5, recovery_timeout=60),
     "stock_list": CircuitBreaker("akshare_stock_list", failure_threshold=5, recovery_timeout=300),
+    "fund_nav": CircuitBreaker("akshare_fund_nav", failure_threshold=5, recovery_timeout=180),
 }
 
 # TTL constants (seconds)
@@ -665,6 +666,81 @@ def get_fund_history(
         return pd.DataFrame()
 
 
+def get_fund_nav_history(
+    ticker: str,
+    asset_type: str = "etf",
+    start_date: str = "",
+    end_date: str = "",
+) -> pd.DataFrame:
+    """Get historical NAV data for an exchange-traded fund via AkShare.
+
+    ETF NAV uses ``fund_etf_fund_info_em``.  LOF codes are commonly available
+    through the public-fund ``fund_open_fund_info_em`` endpoint, so the
+    adapter normalizes both responses into the same small schema.
+    """
+    ticker = _format_ticker(ticker)
+    if asset_type not in {"etf", "lof"}:
+        raise ValueError("asset_type must be etf or lof")
+    start_date = (start_date or "20000101").replace("-", "")
+    end_date = (end_date or datetime.now().strftime("%Y%m%d")).replace("-", "")
+    cache_key = f"fund_nav:{asset_type}:{ticker}:{start_date}:{end_date}"
+    cached = _cache.get(cache_key, ttl=TTL_DAILY)
+    if cached is not None:
+        return pd.DataFrame(cached)
+    fail_key = f"fail:{cache_key}"
+    if _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
+        return pd.DataFrame()
+
+    breaker = _breakers["fund_nav"]
+
+    def _fetch():
+        import akshare as ak
+
+        if asset_type == "etf":
+            return ak.fund_etf_fund_info_em(
+                fund=ticker,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        return ak.fund_open_fund_info_em(
+            symbol=ticker,
+            indicator="单位净值走势",
+        )
+
+    try:
+        df = _retry_with_backoff(_fetch, breaker, f"{asset_type}_nav:{ticker}")
+        if df.empty:
+            return pd.DataFrame()
+        col_map = {
+            "净值日期": "date",
+            "日期": "date",
+            "单位净值": "unit_nav",
+            "累计净值": "cumulative_nav",
+            "日增长率": "pct_chg",
+        }
+        df = df.rename(columns=col_map)
+        if "date" not in df.columns:
+            return pd.DataFrame()
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        df = df[df["date"].notna()]
+        if start_date:
+            df = df[df["date"] >= f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"]
+        if end_date:
+            df = df[df["date"] <= f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"]
+        keep = [name for name in ("date", "unit_nav", "cumulative_nav", "pct_chg") if name in df.columns]
+        result = df[keep].copy()
+        for name in keep:
+            if name != "date":
+                result[name] = pd.to_numeric(result[name], errors="coerce")
+        result = result.sort_values("date").reset_index(drop=True)
+        _cache.set(cache_key, result.to_dict(orient="records"))
+        return result
+    except Exception as e:
+        logger.error(f"Failed to fetch {asset_type} NAV for {ticker}: {e}")
+        _cache.set(fail_key, {"error": str(e)})
+        return pd.DataFrame()
+
+
 def get_asset_spot(asset_type: str = "stock", limit: int = 1000) -> list[dict]:
     """Get a cached realtime universe snapshot for screening.
 
@@ -765,6 +841,10 @@ async def async_get_fund_realtime(*args, **kwargs) -> dict:
 
 async def async_get_fund_history(*args, **kwargs) -> pd.DataFrame:
     return await asyncio.to_thread(get_fund_history, *args, **kwargs)
+
+
+async def async_get_fund_nav_history(*args, **kwargs) -> pd.DataFrame:
+    return await asyncio.to_thread(get_fund_nav_history, *args, **kwargs)
 
 
 async def async_get_asset_spot(*args, **kwargs) -> list[dict]:

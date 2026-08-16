@@ -30,8 +30,10 @@ class AnalysisResult(BaseModel):
     asset_type: AssetType = AssetType.STOCK
     decision: str  # buy / sell / hold
     confidence: float
+    entry_price: float | None = None
     target_price: float | None = None
     stop_loss: float | None = None
+    take_profit: float | None = None
     position_size: float | None = None
     reasoning: str
     agent_reports: dict[str, str] = Field(default_factory=dict)

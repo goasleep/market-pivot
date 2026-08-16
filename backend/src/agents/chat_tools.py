@@ -21,6 +21,7 @@ from data.ddgs_provider import async_search_web_ddgs
 from data.serper_provider import async_search_web_parallel
 from engine.simulation_account import simulation_accounts
 from models.schemas import AssetType, Decision
+from screening.fund_screener import FundScreener
 from strategies.skill_manager import list_strategies
 
 
@@ -118,16 +119,38 @@ async def screen_assets(
     min_amount: float | None = None,
     min_turnover: float | None = None,
     keyword: str | None = None,
-    sort_by: str = "amount",
+    sort_by: str = "screen_score",
     limit: int = 20,
 ) -> str:
     """按实时涨跌幅、成交额、换手率和名称筛选股票/ETF/LOF候选标的。
 
     金额单位为元，涨跌幅和换手率单位为百分比。结果是实时初筛，
+    ETF/LOF 结果会附带 Polars 透明筛选分数；分数不是买入信号，
     需要交易决策时还应继续调用历史数据和综合分析工具。
     """
     kind = AssetType(asset_type)
     records = await async_get_asset_spot(kind.value, limit=5000)
+    if kind in {AssetType.ETF, AssetType.LOF}:
+        screened = FundScreener().screen_snapshot(
+            records,
+            asset_type=kind.value,
+            min_pct_chg=min_pct_chg,
+            max_pct_chg=max_pct_chg,
+            min_amount=min_amount,
+            min_turnover=min_turnover,
+            keyword=keyword,
+            sort_by=sort_by,
+            limit=limit,
+        )
+        return _dump(
+            {
+                "asset_type": kind.value,
+                "screen_type": "polars_fund_snapshot",
+                "count": len(screened),
+                "results": screened,
+            }
+        )
+
     query = (keyword or "").strip().lower()
     if query:
         records = [item for item in records if query in str(item.get("name", "")).lower()]

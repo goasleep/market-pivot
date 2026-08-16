@@ -4,6 +4,8 @@ Final decision maker: synthesizes all agent reports into a concrete trade decisi
 Outputs a structured DecisionDashboard with 6 blocks.
 """
 
+import json
+
 from loguru import logger
 
 from agents.prompt_context import INVESTOR_CONTEXT
@@ -17,9 +19,11 @@ from models.schemas import (
     Decision,
     DecisionDashboard,
     Intelligence,
+    MarketContext,
     PhaseDecision,
     SignalAttribution,
     SignalType,
+    StrategyPlan,
     TradeDecision,
 )
 from strategies.skill_manager import get_strategy_instructions
@@ -35,8 +39,10 @@ The JSON must contain both a simplified decision and a detailed dashboard:
 {
   "decision": "buy" | "sell" | "hold",
   "confidence": 0.0-1.0,
+  "entry_price": number | null,
   "target_price": number | null,
   "stop_loss": number | null,
+  "take_profit": number | null,
   "position_size": 0.0-1.0,
   "reasoning": "决策综述，200-400字",
 
@@ -64,7 +70,23 @@ The JSON must contain both a simplified decision and a detailed dashboard:
       "stop_loss": number | null,
       "take_profit": number | null,
       "position_strategy": "仓位策略，如：分批建仓、一次到位、空仓观望",
-      "action_items": ["行动项1", "行动项2"]
+      "action_items": ["行动项1", "行动项2"],
+      "entry_explanation": "入场价为什么是这个数字；必须引用输入数据和计算过程",
+      "stop_loss_explanation": "止损价为什么是这个数字；必须引用输入数据和计算过程",
+      "take_profit_explanation": "止盈价为什么是这个数字；必须引用输入数据和计算过程",
+      "price_evidence": [
+        {"metric": "MA20", "value": 0, "source": "market_context/history", "as_of": "YYYY-MM-DD", "calculation": ""}
+      ]
+    },
+    "strategy_plan": {
+      "name": "本次采用或临时构建的策略名称",
+      "thesis": "策略假设",
+      "entry_conditions": ["入场条件"],
+      "exit_conditions": ["退出条件"],
+      "indicators_used": ["MA20", "ATR14"],
+      "data_basis": [
+        {"metric": "close", "value": 0, "source": "market_context/realtime", "as_of": "YYYY-MM-DD", "calculation": ""}
+      ]
     },
     "phase_decision": {
       "pre_market": "盘前观察条件",
@@ -92,6 +114,7 @@ def _parse_dashboard(raw: dict) -> DecisionDashboard:
     bp = db.get("battle_plan", {})
     ph = db.get("phase_decision", {})
     sa = db.get("signal_attribution", {})
+    strategy = db.get("strategy_plan", {})
 
     # Parse signal type with fallback
     try:
@@ -124,6 +147,18 @@ def _parse_dashboard(raw: dict) -> DecisionDashboard:
             take_profit=bp.get("take_profit"),
             position_strategy=bp.get("position_strategy", ""),
             action_items=bp.get("action_items", []),
+            entry_explanation=bp.get("entry_explanation", ""),
+            stop_loss_explanation=bp.get("stop_loss_explanation", ""),
+            take_profit_explanation=bp.get("take_profit_explanation", ""),
+            price_evidence=bp.get("price_evidence", []),
+        ),
+        strategy_plan=StrategyPlan(
+            name=strategy.get("name", ""),
+            thesis=strategy.get("thesis", ""),
+            entry_conditions=strategy.get("entry_conditions", []),
+            exit_conditions=strategy.get("exit_conditions", []),
+            indicators_used=strategy.get("indicators_used", []),
+            data_basis=strategy.get("data_basis", []),
         ),
         phase_decision=PhaseDecision(
             pre_market=ph.get("pre_market", ""),
@@ -139,6 +174,58 @@ def _parse_dashboard(raw: dict) -> DecisionDashboard:
     )
 
 
+def _market_facts(
+    market_context: MarketContext | None,
+    agent_reports: dict[str, AgentReport],
+) -> str:
+    """Expose compact, traceable facts to the final LLM decision."""
+    if market_context is None:
+        return "market_context unavailable"
+    technical = agent_reports.get("technical")
+    payload = {
+        "ticker": market_context.ticker,
+        "asset_type": market_context.asset_type.value,
+        "as_of_date": market_context.as_of_date,
+        "current_price": market_context.current_price,
+        "market_regime": market_context.market_regime,
+        "data_status": market_context.data_status,
+        "realtime": market_context.realtime,
+        "fund_data": market_context.fund_data,
+        "financial": market_context.financial,
+        "recent_history": market_context.history[-30:],
+        "technical_indicators": technical.key_data if technical else {},
+    }
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _buy_plan_has_evidence(dashboard: DecisionDashboard) -> bool:
+    """Require a complete, ordered and traceable price plan for a buy."""
+    battle = dashboard.battle_plan
+    levels = (battle.entry_price, battle.stop_loss, battle.take_profit)
+    explanations = (
+        battle.entry_explanation,
+        battle.stop_loss_explanation,
+        battle.take_profit_explanation,
+    )
+    evidence = battle.price_evidence
+    if not all(level is not None and level > 0 for level in levels):
+        return False
+    if not all(explanation.strip() for explanation in explanations):
+        return False
+    if not battle.stop_loss < battle.entry_price < battle.take_profit:
+        return False
+    return bool(
+        evidence
+        and all(
+            isinstance(item, dict)
+            and item.get("metric")
+            and item.get("source")
+            and item.get("as_of")
+            for item in evidence
+        )
+    )
+
+
 async def decide(
     ticker: str,
     agent_reports: dict[str, AgentReport],
@@ -151,6 +238,7 @@ async def decide(
     conversation_history: list[dict[str, str]] | None = None,
     investor_context: dict | None = None,
     llm: LLMService | None = None,
+    market_context: MarketContext | None = None,
 ) -> TradeDecision:
     """Make final trading decision with structured dashboard.
 
@@ -189,6 +277,7 @@ async def decide(
         if item.get("content")
     )
     investor_text = "\n".join(f"{key}: {value}" for key, value in (investor_context or {}).items())
+    market_facts = _market_facts(market_context, agent_reports)
     prompt = f"""Make the final trading decision for the {asset_label} {ticker}.
 
 Current price: {current_price}
@@ -202,12 +291,20 @@ Recent conversation context:
 All analyst reports:
 {analysis}
 
+Traceable market facts (do not invent values outside this block):
+{market_facts}
+
 Your decision must consider:
 1. Weight of evidence across all agents
 2. Risk-adjusted return potential
 3. Position sizing (respect risk manager's limits)
 4. Entry/exit levels (target price, stop loss)
 5. Overall portfolio impact
+
+The strategy and price levels may be your judgment, but every non-null price
+must be justified by explicit facts above.  Explain the source date, the
+indicator or support/resistance used, and the calculation or comparison that
+led to the number.  If the data is insufficient, return null and explain why.
 
 Make your final decision as JSON.
 """
@@ -222,6 +319,19 @@ Make your final decision as JSON.
         llm_service = llm or get_llm_service()
         result = await llm_service.chat_json(prompt, system=full_system)
         dashboard = _parse_dashboard(result)
+        requested_decision = Decision(result.get("decision", "hold"))
+        decision = requested_decision
+        reasoning = result.get("reasoning", "")
+        if requested_decision == Decision.BUY and not _buy_plan_has_evidence(dashboard):
+            logger.warning(
+                "[PortfolioManager] Buy plan for {} lacked complete price evidence; downgraded to hold",
+                ticker,
+            )
+            decision = Decision.HOLD
+            reasoning = (
+                f"{reasoning}\n\n系统校验：原始买入建议未提供完整且有日期依据的入场、止损、止盈方案，"
+                "因此本次降级为观望。"
+            ).strip()
         position_size = result.get("position_size")
         if position_size is not None and risk_report:
             risk_limit = float(risk_report.key_data.get("max_position_pct", 1.0))
@@ -229,12 +339,22 @@ Make your final decision as JSON.
         return TradeDecision(
             ticker=ticker,
             asset_type=asset_type,
-            decision=Decision(result.get("decision", "hold")),
+            decision=decision,
             confidence=float(result.get("confidence", 0.5)),
-            target_price=result.get("target_price"),
-            stop_loss=result.get("stop_loss"),
+            entry_price=result.get("entry_price")
+            if result.get("entry_price") is not None
+            else dashboard.battle_plan.entry_price,
+            target_price=result.get("target_price")
+            if result.get("target_price") is not None
+            else dashboard.battle_plan.take_profit,
+            stop_loss=result.get("stop_loss")
+            if result.get("stop_loss") is not None
+            else dashboard.battle_plan.stop_loss,
+            take_profit=result.get("take_profit")
+            if result.get("take_profit") is not None
+            else dashboard.battle_plan.take_profit,
             position_size=position_size,
-            reasoning=result.get("reasoning", ""),
+            reasoning=reasoning,
             agent_reports={name: r.reasoning for name, r in agent_reports.items()},
             dashboard=dashboard,
         )

@@ -186,10 +186,16 @@ export function AnalysisPage() {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
               <div>
                 <Label className="text-xs text-muted-foreground">置信度</Label>
                 <p className="text-lg font-semibold">{(result.confidence * 100).toFixed(1)}%</p>
+              </div>
+              <div>
+                <Label className="text-xs text-muted-foreground">建议入场价</Label>
+                <p className="text-lg font-semibold">
+                  {result.entry_price ? `¥${result.entry_price}` : "—"}
+                </p>
               </div>
               <div>
                 <Label className="text-xs text-muted-foreground">目标价</Label>
@@ -201,6 +207,12 @@ export function AnalysisPage() {
                 <Label className="text-xs text-muted-foreground">止损价</Label>
                 <p className="text-lg font-semibold">
                   {result.stop_loss ? `¥${result.stop_loss}` : "—"}
+                </p>
+              </div>
+              <div>
+                <Label className="text-xs text-muted-foreground">止盈价</Label>
+                <p className="text-lg font-semibold">
+                  {result.take_profit ? `¥${result.take_profit}` : "—"}
                 </p>
               </div>
               <div>
@@ -231,6 +243,8 @@ export function AnalysisPage() {
               <div className="grid gap-3 text-sm md:grid-cols-2">
                 <div className="rounded-md border p-3"><Label className="text-xs text-muted-foreground">趋势与量价</Label><p>{result.dashboard.data_perspective.trend_status || "—"} · {result.dashboard.data_perspective.volume_analysis || "—"}</p></div>
                 <div className="rounded-md border p-3"><Label className="text-xs text-muted-foreground">执行计划</Label><p>{result.dashboard.battle_plan.position_strategy || "—"}</p><p className="text-xs text-muted-foreground">{result.dashboard.battle_plan.action_items.join("；")}</p></div>
+                <div className="rounded-md border p-3 md:col-span-2"><Label className="text-xs text-muted-foreground">价格依据</Label><p>入场：{result.dashboard.battle_plan.entry_explanation || "—"}</p><p>止损：{result.dashboard.battle_plan.stop_loss_explanation || "—"}</p><p>止盈：{result.dashboard.battle_plan.take_profit_explanation || "—"}</p></div>
+                <div className="rounded-md border p-3 md:col-span-2"><Label className="text-xs text-muted-foreground">本次策略</Label><p>{result.dashboard.strategy_plan.name || "—"} · {result.dashboard.strategy_plan.thesis || "—"}</p><p className="text-xs text-muted-foreground">入场条件：{result.dashboard.strategy_plan.entry_conditions.join("；") || "—"}</p><p className="text-xs text-muted-foreground">退出条件：{result.dashboard.strategy_plan.exit_conditions.join("；") || "—"}</p></div>
                 <div className="rounded-md border p-3 md:col-span-2"><Label className="text-xs text-muted-foreground">阶段计划</Label><p>{result.dashboard.phase_decision.pre_market || "—"} {result.dashboard.phase_decision.intraday || "—"} {result.dashboard.phase_decision.post_market || "—"}</p></div>
               </div>
             )}
