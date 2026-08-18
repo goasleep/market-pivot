@@ -183,6 +183,8 @@ class AssetAgent:
         if request.intent_confirmed:
             return request, None
         matches = self._matched_intents(request.message)
+        if request.allow_mutating_tools and not matches:
+            return request.with_intent(AssetIntent.ANALYZE), None
         if len(matches) == 1:
             return request.with_intent(matches[0]), None
         if len(matches) == 0 and not request.tickers:
@@ -480,6 +482,18 @@ class AssetAgent:
             allow_mutating_tools=request.allow_mutating_tools,
         )
         approved = option_id == "approve"
+        if not approved:
+            yield {
+                "type": "tool",
+                "name": str((payload.get("pending_tool_call") or {}).get("tool_name", "unknown")),
+                "status": "failed",
+                "result": json.dumps(
+                    {"ok": False, "error": {"code": "user_denied", "message": "用户拒绝执行该工具"}},
+                    ensure_ascii=False,
+                ),
+            }
+            yield {"type": "text", "text": "已取消该工具操作，未执行任何订单或外部副作用。"}
+            return
         async for update in resume_agent_loop(
             payload.get("checkpoint_messages") or [],
             tools,

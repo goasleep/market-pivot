@@ -599,6 +599,21 @@ class ChatStore:
         ).update(status="answered", selected_option=option_id, responded_at=_now())
         if not updated:
             raise ValueError("该交互请求已经处理")
+        task = await ChatTask.filter(task_id=row.task_id).first()
+        if task:
+            message = await ChatMessage.filter(message_id=task.message_id).first()
+            if message:
+                parts = json.loads(message.parts_json)
+                for part in parts:
+                    if part.get("type") != "interaction":
+                        continue
+                    content = part.get("content")
+                    if isinstance(content, dict) and content.get("interaction_id") == interaction_id:
+                        content["status"] = "answered"
+                        content["selected_option"] = option_id
+                message.parts_json = _json(parts)
+                message.updated_at = _now()
+                await message.save(update_fields=["parts_json", "updated_at"])
         result = await self.get_interaction(interaction_id)
         if result is None:
             raise KeyError("交互请求不存在")

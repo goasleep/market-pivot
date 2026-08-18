@@ -275,6 +275,14 @@ class ChatTaskManager:
         seen_tool_events: set[str] = set()
         async for event in events:
             if event.get("type") == "interaction_required":
+                for artifact in pending_artifacts:
+                    await self._emit_artifact(task_input, artifact)
+                if pending_references:
+                    await self.store.set_references(task_input.assistant_message_id, pending_references)
+                    await self._broadcast(
+                        task_input.task_id,
+                        {"event": "references", "data": _json({"references": pending_references})},
+                    )
                 await self._emit_interaction(task_input, event)
                 return True
             if event.get("type") == "tool":

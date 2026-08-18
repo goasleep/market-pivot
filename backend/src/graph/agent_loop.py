@@ -7,7 +7,14 @@ import json
 import operator
 from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import AIMessage, ToolMessage, messages_from_dict, messages_to_dict
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    messages_from_dict,
+    messages_to_dict,
+)
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, StateGraph
@@ -53,6 +60,26 @@ def _content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     return str(content or "")
+
+
+def _message_objects(messages: list[Any]) -> list[Any]:
+    """Normalize the app's role dictionaries before checkpoint serialization."""
+    normalized: list[Any] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            normalized.append(message)
+            continue
+        role = message.get("role", "user")
+        content = message.get("content", "")
+        if role == "system":
+            normalized.append(SystemMessage(content=content))
+        elif role == "assistant":
+            normalized.append(AIMessage(content=content, tool_calls=message.get("tool_calls", [])))
+        elif role == "tool":
+            normalized.append(ToolMessage(content=content, tool_call_id=message.get("tool_call_id", "")))
+        else:
+            normalized.append(HumanMessage(content=content))
+    return normalized
 
 
 async def decide_next_action(state: AgentLoopState) -> dict[str, Any]:
@@ -118,7 +145,7 @@ async def execute_tool_calls(
                     "tool_call_id": call_id,
                     "args": args,
                 },
-                "checkpoint_messages": messages_to_dict(state["messages"]),
+                "checkpoint_messages": messages_to_dict(_message_objects(state["messages"])),
             }
 
     tool_messages: list[ToolMessage] = []
