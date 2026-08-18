@@ -22,14 +22,14 @@ LLM_TIMEOUT_SECONDS = 90
 
 def tool_timeout_seconds(name: str) -> int:
     """Return the execution budget for a tool invocation."""
-    if name == "run_fund_or_stock_analysis":
+    if name in {"run_fund_or_stock_analysis", "run_backtest", "design_and_run_backtest"}:
         return LONG_RUNNING_TOOL_TIMEOUT_SECONDS
     return TOOL_TIMEOUT_SECONDS
 
 
 def tool_attempts(name: str) -> int:
     """Return retry count without duplicating expensive or mutating work."""
-    if name == "run_fund_or_stock_analysis":
+    if name in {"run_fund_or_stock_analysis", "run_backtest", "design_and_run_backtest"}:
         return 1
     return 1 if name.startswith(("submit_", "cancel_", "create_", "fill_")) else 2
 

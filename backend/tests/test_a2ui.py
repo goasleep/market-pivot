@@ -98,5 +98,10 @@ def test_historical_prices_render_as_inline_trend_chart_and_table():
     components = messages[1]["updateComponents"]["components"]
     chart = next(component for component in components if component["id"] == "chart")
     data = messages[2]["updateDataModel"]["value"]
-    assert chart["component"] == "Sparkline"
+    assert chart["component"] == "LineChart"
+    assert chart["points"] == {"path": "/points"}
     assert data["prices"] == [4.0, 4.2]
+    assert data["points"] == [
+        {"label": "2026-08-12", "value": 4.0},
+        {"label": "2026-08-13", "value": 4.2},
+    ]

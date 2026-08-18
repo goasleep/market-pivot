@@ -111,6 +111,7 @@ function hasRunningTask(conversation: Conversation): boolean {
 
 const SUGGESTIONS = [
   { label: "分析 ETF 510300", text: "分析 ETF 510300，适合我的短中期交易吗？" },
+  { label: "回测 ETF 510300", text: "回测 ETF 510300 最近三年表现，优先控制最大回撤" },
   { label: "查询实时行情", text: "查询 600519 的实时行情" },
   { label: "对比两个基金", text: "对比 ETF 510300 和 ETF 159915 的近期走势" },
   { label: "Agent 能做什么？", text: "你能帮我做哪些事情？" },

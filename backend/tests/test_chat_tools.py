@@ -21,7 +21,7 @@ from models.schemas import AssetType, Decision, MarketContext, TradeDecision
 from tools import artifacts as artifact_tools
 from tools import assets, data, research, simulation
 from tools.registry import build_chat_tools
-from widgets.a2ui import render_activity
+from widgets.a2ui import render_activity, render_tool_result
 
 
 def test_chat_tools_expose_paper_portfolio_and_orders(monkeypatch, tmp_path):
@@ -399,6 +399,9 @@ def test_analysis_tool_passes_asset_type_to_workflow(monkeypatch):
 def test_analysis_tool_has_dedicated_long_running_budget():
     assert tool_timeout_seconds("run_fund_or_stock_analysis") == LONG_RUNNING_TOOL_TIMEOUT_SECONDS
     assert tool_attempts("run_fund_or_stock_analysis") == 1
+    assert tool_timeout_seconds("run_backtest") == LONG_RUNNING_TOOL_TIMEOUT_SECONDS
+    assert tool_timeout_seconds("design_and_run_backtest") == LONG_RUNNING_TOOL_TIMEOUT_SECONDS
+    assert tool_attempts("run_backtest") == 1
     assert tool_timeout_seconds("get_latest_news") == TOOL_TIMEOUT_SECONDS
     assert tool_attempts("get_latest_news") == 2
 
@@ -412,6 +415,99 @@ def test_render_activity_exposes_error_reason():
         "status": "failed",
         "error": "tool_timeout: 超过 300 秒",
     }
+
+
+def test_chat_renders_analysis_result_as_inline_a2ui():
+    messages = render_tool_result(
+        "run_fund_or_stock_analysis",
+        json.dumps(
+            {
+                "ticker": "510300",
+                "asset_type": "etf",
+                "decision": "buy",
+                "confidence": 0.72,
+                "plan": {
+                    "entry_price": 3.8,
+                    "stop_loss": 3.5,
+                    "take_profit": 4.2,
+                    "position_size": 0.2,
+                },
+                "reasoning": "趋势改善，但仍需控制仓位。",
+                "dashboard": {
+                    "core_conclusion": {
+                        "signal": "buy",
+                        "confidence": 0.72,
+                        "one_line_summary": "趋势改善",
+                        "position_advice": "分批建仓",
+                    },
+                    "battle_plan": {},
+                },
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    assert messages is not None
+    components = [
+        message["updateComponents"]["components"]
+        for message in messages
+        if "updateComponents" in message
+    ]
+    component_names = {component["component"] for group in components for component in group}
+    assert "Badge" in component_names
+    assert "Section" in component_names
+    assert any(
+        message.get("updateDataModel", {}).get("value", {}).get("decisionLabel") == "买入"
+        for message in messages
+    )
+
+
+def test_chat_renders_backtest_result_with_curve_and_trades():
+    messages = render_tool_result(
+        "run_backtest",
+        json.dumps(
+            {
+                "data_type": "backtest",
+                "result": {
+                    "ticker": "510300",
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-01-03",
+                    "initial_capital": 100000,
+                    "final_value": 101500,
+                    "total_return": 0.015,
+                    "max_drawdown": 0.02,
+                    "sharpe_ratio": 1.1,
+                    "win_rate": 0.6,
+                    "total_trades": 2,
+                    "equity_curve": [
+                        {"date": "2024-01-01", "value": 100000},
+                        {"date": "2024-01-03", "value": 101500},
+                    ],
+                    "trades": [
+                        {
+                            "date": "2024-01-02",
+                            "action": "buy",
+                            "ticker": "510300",
+                            "shares": 100,
+                            "price": 3.8,
+                            "amount": 380,
+                        }
+                    ],
+                },
+            }
+        ),
+    )
+
+    assert messages is not None
+    components = [
+        component
+        for message in messages
+        if "updateComponents" in message
+        for component in message["updateComponents"]["components"]
+    ]
+    assert {component["component"] for component in components} >= {"LineChart", "DataTable", "Collapsible"}
+    model = next(message["updateDataModel"]["value"] for message in messages if "updateDataModel" in message)
+    assert model["points"][-1] == {"label": "2024-01-03", "value": 101500.0}
 
 
 def test_generated_html_source_is_compacted_when_a_file_artifact_exists():

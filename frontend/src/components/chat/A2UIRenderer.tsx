@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import * as echarts from "echarts";
+import type { EChartsOption } from "echarts";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -300,6 +302,83 @@ function CollapsibleRenderer({
   );
 }
 
+function EChart({
+  option,
+  height = 280,
+  ariaLabel,
+}: {
+  option: EChartsOption;
+  height?: number;
+  ariaLabel: string;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return undefined;
+    const chart = echarts.init(container, undefined, { renderer: "canvas" });
+    chart.setOption(option);
+    const resize = () => chart.resize();
+    window.addEventListener("resize", resize);
+    return () => {
+      window.removeEventListener("resize", resize);
+      chart.dispose();
+    };
+  }, [option]);
+
+  return <div ref={containerRef} className="w-full" style={{ height }} role="img" aria-label={ariaLabel} />;
+}
+
+function LineChart({ points }: { points: unknown }) {
+  const validPoints = (Array.isArray(points) ? points : [])
+    .map((point) => {
+      if (!point || typeof point !== "object") return null;
+      const record = point as Record<string, unknown>;
+      const value = Number(record.value);
+      if (!Number.isFinite(value)) return null;
+      return { label: String(record.label || ""), value };
+    })
+    .filter((point): point is { label: string; value: number } => point !== null);
+
+  if (validPoints.length < 2) {
+    return <p className="text-xs text-muted-foreground">暂无足够的走势数据</p>;
+  }
+
+  const values = validPoints.map((point) => point.value);
+  const option = useMemo<EChartsOption>(() => ({
+    animation: false,
+    tooltip: { trigger: "axis" },
+    grid: { left: 52, right: 20, top: 18, bottom: 42 },
+    xAxis: {
+      type: "category",
+      boundaryGap: false,
+      data: validPoints.map((point) => point.label),
+      axisLabel: { hideOverlap: true },
+    },
+    yAxis: { type: "value", scale: true },
+    series: [{
+      type: "line",
+      data: values,
+      smooth: true,
+      showSymbol: false,
+      lineStyle: { width: 3, color: "#2563eb" },
+      itemStyle: { color: "#2563eb" },
+      areaStyle: { color: "#2563eb", opacity: 0.12 },
+    }],
+  }), [validPoints, values]);
+
+  return (
+    <div className="rounded-lg border border-border/70 bg-background/50 p-2">
+      <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
+        <span>{validPoints[0].label || "起始日"}</span>
+        <span>最新 {validPoints[validPoints.length - 1].value.toFixed(2)}</span>
+        <span>{validPoints[validPoints.length - 1].label || "最新日"}</span>
+      </div>
+      <EChart option={option} height={260} ariaLabel="历史收盘价走势" />
+    </div>
+  );
+}
+
 function RenderComponent({
   component,
   surface,
@@ -429,10 +508,16 @@ function RenderComponent({
     case "Sparkline": {
       const values = (resolve(component.values) as number[]) || [];
       if (values.length < 2) return <p className="text-xs text-muted-foreground">暂无走势数据</p>;
-      const min = Math.min(...values); const max = Math.max(...values); const range = max - min || 1;
-      const points = values.map((value, index) => `${(index / (values.length - 1)) * 300},${80 - ((value - min) / range) * 70}`).join(" ");
-      return <svg viewBox="0 0 300 80" className="h-20 w-full"><polyline points={points} fill="none" stroke="hsl(var(--primary))" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+      return <EChart option={{
+        animation: false,
+        grid: { left: 4, right: 4, top: 4, bottom: 4 },
+        xAxis: { type: "category", show: false, data: values.map((_, index) => index) },
+        yAxis: { type: "value", show: false, scale: true },
+        series: [{ type: "line", data: values, smooth: true, showSymbol: false, lineStyle: { width: 2, color: "#2563eb" }, areaStyle: { color: "#2563eb", opacity: 0.1 } }],
+      }} height={80} ariaLabel="近期走势" />;
     }
+    case "LineChart":
+      return <LineChart points={resolve(component.points)} />;
     case "Activity": {
       const status = displayValue(resolve(component.status));
       const error = displayValue(resolve(component.error));

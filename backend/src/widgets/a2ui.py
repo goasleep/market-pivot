@@ -390,6 +390,196 @@ def render_activity(
     )
 
 
+def _number_label(value: Any, *, suffix: str = "") -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return f"{value}{suffix}"
+    if number.is_integer():
+        return f"{int(number):,}{suffix}"
+    return f"{number:,.4f}{suffix}"
+
+
+def _percent_label(value: Any) -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        return f"{float(value) * 100:+.2f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def render_analysis_result(
+    payload: dict[str, Any],
+    surface_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Render the structured analysis result returned by the Agent tool."""
+    surface_id = surface_id or f"analysis-result-{uuid4().hex}"
+    ticker = payload.get("ticker", "")
+    asset_type = str(payload.get("asset_type", "stock")).upper()
+    decision = str(payload.get("decision", "hold"))
+    decision_label = {"buy": "买入", "sell": "卖出", "hold": "持有"}.get(decision, decision)
+    plan = payload.get("plan") or {}
+    position_size = plan.get("position_size", payload.get("position_size"))
+    take_profit = plan.get("take_profit", payload.get("take_profit", payload.get("target_price")))
+    dashboard = payload.get("dashboard") or {}
+    core = dashboard.get("core_conclusion") or {}
+    summary = core.get("one_line_summary") or payload.get("reasoning") or "暂无结论"
+    components: list[dict[str, Any]] = [
+        {
+            "id": "root",
+            "component": "Card",
+            "children": ["header", "summary", "metrics", "notice"],
+        },
+        {
+            "id": "header",
+            "component": "Row",
+            "children": ["title", "decision"],
+        },
+        _text("title", f"Agent Analysis · {ticker} · {asset_type}", "h3"),
+        {"id": "decision", "component": "Badge", "text": _ref("/decisionLabel"), "tone": _ref("/decisionTone")},
+        _text("summary", _ref("/summary"), "body"),
+        {
+            "id": "metrics",
+            "component": "Row",
+            "children": ["confidence", "entry", "stop", "target", "position"],
+        },
+        _text("confidence", _ref("/confidence"), "metric"),
+        _text("entry", _ref("/entry"), "caption"),
+        _text("stop", _ref("/stop"), "caption", tone="negative"),
+        _text("target", _ref("/target"), "caption", tone="positive"),
+        _text("position", _ref("/position"), "caption"),
+        _text("notice", "研究结果仅用于短中期研究和纸面交易，不代表真实交易或收益承诺。", "caption"),
+    ]
+    messages = _surface(
+        surface_id,
+        components,
+        {
+            "decisionLabel": decision_label,
+            "decisionTone": decision,
+            "summary": summary,
+            "confidence": f"置信度 {float(payload.get('confidence', 0) or 0):.0%}",
+            "entry": f"入场：{_number_label(plan.get('entry_price', payload.get('entry_price')))}",
+            "stop": f"止损：{_number_label(plan.get('stop_loss', payload.get('stop_loss')))}",
+            "target": f"止盈：{_number_label(take_profit)}",
+            "position": f"仓位：{_percent_label(position_size)}",
+        },
+    )
+    if dashboard:
+        messages.extend(render_decision_dashboard(dashboard, f"{surface_id}-dashboard"))
+    return messages
+
+
+def render_backtest_result(
+    payload: dict[str, Any],
+    surface_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Render a backtest or Agent-designed experiment as an inline report."""
+    surface_id = surface_id or f"backtest-result-{uuid4().hex}"
+    result = payload.get("result") or {}
+    is_experiment = payload.get("data_type") == "backtest_experiment"
+    title = "Agent 回测实验" if is_experiment else "历史回测结果"
+    ticker = result.get("ticker") or payload.get("ticker") or "股票池"
+    equity_curve = result.get("equity_curve") or []
+    points = [
+        {"label": str(item.get("date", "")), "value": float(item.get("value", 0) or 0)}
+        for item in equity_curve
+        if isinstance(item, dict) and item.get("date") is not None
+    ]
+    trades = result.get("trades") or []
+    rows = [
+        {
+            "date": trade.get("date", ""),
+            "action": "买入" if trade.get("action") == "buy" else "卖出",
+            "ticker": trade.get("ticker", ""),
+            "shares": trade.get("shares", 0),
+            "price": trade.get("price", 0),
+            "amount": trade.get("amount", 0),
+        }
+        for trade in trades[-20:]
+        if isinstance(trade, dict)
+    ]
+    children = ["title", "meta", "summary"]
+    components: list[dict[str, Any]] = [
+        {"id": "root", "component": "Card", "children": children},
+        _text("title", f"{title} · {ticker}", "h3"),
+        _text(
+            "meta",
+            (
+                f"{result.get('start_date', '—')} 至 {result.get('end_date', '—')} · "
+                f"初始资金 ¥{_number_label(result.get('initial_capital'))}"
+            ),
+            "caption",
+        ),
+        {
+            "id": "summary",
+            "component": "Row",
+            "children": ["final", "return", "drawdown", "sharpe", "winrate", "trades"],
+        },
+        _text("final", f"最终市值 ¥{_number_label(result.get('final_value'))}", "caption"),
+        _text("return", f"收益 {_percent_label(result.get('total_return'))}", "caption"),
+        _text("drawdown", f"最大回撤 {_percent_label(result.get('max_drawdown'))}", "caption", tone="negative"),
+        _text("sharpe", f"Sharpe {_number_label(result.get('sharpe_ratio'))}", "caption"),
+        _text("winrate", f"胜率 {_percent_label(result.get('win_rate'))}", "caption"),
+        _text("trades", f"交易 {result.get('total_trades', len(trades))} 次", "caption"),
+    ]
+    if is_experiment:
+        spec = payload.get("strategy_spec") or {}
+        children.insert(2, "strategy")
+        components.insert(
+            3,
+            _text(
+                "strategy",
+                f"策略：{spec.get('name', 'Agent 策略')} · {spec.get('description', '')}",
+                "body",
+            ),
+        )
+    if points:
+        children.append("chart")
+        components.append(
+            {
+                "id": "chart",
+                "component": "LineChart",
+                "points": _ref("/points"),
+                "ariaLabel": "回测资金曲线",
+            }
+        )
+    if rows:
+        children.append("trades")
+        components.extend(
+            [
+                {
+                    "id": "trades",
+                    "component": "Collapsible",
+                    "title": "最近交易记录",
+                    "defaultExpanded": False,
+                    "children": ["tradeTable"],
+                },
+                {
+                    "id": "tradeTable",
+                    "component": "DataTable",
+                    "columns": [
+                        {"key": "date", "label": "日期"},
+                        {"key": "action", "label": "方向"},
+                        {"key": "ticker", "label": "代码"},
+                        {"key": "shares", "label": "数量"},
+                        {"key": "price", "label": "价格"},
+                        {"key": "amount", "label": "金额"},
+                    ],
+                    "rows": _ref("/trades"),
+                },
+            ]
+        )
+    if result.get("error"):
+        children.append("error")
+        components.append(_text("error", f"回测错误：{result['error']}", "body", tone="negative"))
+    children.append("notice")
+    components.append(_text("notice", "回测基于历史数据，仅用于策略研究，不代表未来表现。", "caption"))
+    return _surface(surface_id, components, {"points": points, "trades": rows})
+
+
 def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None = None) -> list[dict[str, Any]] | None:
     """Turn known tool payloads into native A2UI result surfaces."""
     try:
@@ -401,6 +591,12 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
         quote = dict(payload.get("quote") or {})
         quote["ticker"] = payload.get("ticker", quote.get("ticker", ""))
         return render_asset_card(quote, surface_id)
+
+    if tool_name == "run_fund_or_stock_analysis":
+        return render_analysis_result(payload, surface_id)
+
+    if tool_name in {"run_backtest", "design_and_run_backtest"}:
+        return render_backtest_result(payload, surface_id)
 
     if tool_name in {"search_web", "search_web_ddgs"}:
         items = []
@@ -479,12 +675,33 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
 
     if tool_name == "get_historical_prices":
         records = payload.get("history", [])
-        closes = [float(item.get("close", 0) or 0) for item in records if item.get("close") is not None]
+        points = []
+        for item in records if isinstance(records, list) else []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                close = float(item.get("close"))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(close) or close <= 0:
+                continue
+            points.append(
+                {
+                    "label": str(item.get("date") or item.get("trade_date") or ""),
+                    "value": close,
+                }
+            )
+        closes = [point["value"] for point in points]
         surface_id = surface_id or f"history-{uuid4().hex}"
         components = [
             {"id": "root", "component": "Card", "children": ["title", "chart", "table"]},
             _text("title", f"{payload.get('ticker', '')} 历史走势", "h3"),
-            {"id": "chart", "component": "Sparkline", "values": _ref("/prices")},
+            {
+                "id": "chart",
+                "component": "LineChart",
+                "points": _ref("/points"),
+                "ariaLabel": "历史收盘价走势",
+            },
             {
                 "id": "table",
                 "component": "DataTable",
@@ -497,7 +714,7 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
                 "rows": _ref("/rows"),
             },
         ]
-        return _surface(surface_id, components, {"prices": closes, "rows": records[-12:]})
+        return _surface(surface_id, components, {"prices": closes, "points": points, "rows": records[-12:]})
 
     if tool_name == "get_latest_news":
         surface_id = surface_id or f"news-{uuid4().hex}"
@@ -638,6 +855,7 @@ CATALOG = {
         "StrategyItem": {},
         "StatusItem": {},
         "Sparkline": {},
+        "LineChart": {},
         "Button": {},
         "TextField": {},
         "ChoicePicker": {},

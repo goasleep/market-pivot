@@ -4,7 +4,8 @@ import sqlite3
 import pytest
 import pytest_asyncio
 
-from application.chat_service import ChatStore
+from application import chat_service
+from application.chat_service import ChatStore, ChatTaskInput, ChatTaskManager
 
 
 @pytest_asyncio.fixture
@@ -91,6 +92,87 @@ async def test_chat_task_creation_is_idempotent_and_events_resume_from_cursor(st
             message="冲突请求",
             history=[],
         )
+
+
+@pytest.mark.asyncio
+async def test_chat_conversation_streams_history_chart_surface(store, monkeypatch):
+    _, assistant_id = await store.prepare_task(
+        conversation_id="conversation-chart",
+        task_id="task-chart",
+        message="展示 ETF 510300 的历史走势",
+        history=[],
+    )
+
+    class FakeAssetAgent:
+        def prepare(self, **kwargs):
+            return kwargs
+
+        async def chat(self, request):
+            del request
+            yield {
+                "type": "tool",
+                "name": "get_historical_prices",
+                "status": "completed",
+                "result": json.dumps(
+                    {
+                        "ticker": "510300",
+                        "asset_type": "etf",
+                        "history": [
+                            {"date": "2026-08-12", "close": 4.0, "volume": 100},
+                            {"date": "2026-08-13", "close": 4.2, "volume": 120},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+            yield {"type": "text", "text": "近期走势温和向上。"}
+
+    monkeypatch.setattr(chat_service, "asset_agent", FakeAssetAgent())
+    manager = ChatTaskManager(store)
+    await manager.start(
+        ChatTaskInput(
+            task_id="task-chart",
+            conversation_id="conversation-chart",
+            message="展示 ETF 510300 的历史走势",
+            history=[],
+            strategy=None,
+            asset_type="etf",
+            assistant_message_id=assistant_id,
+        )
+    )
+
+    events = [event async for event in manager.subscribe("task-chart")]
+    a2ui_messages = [
+        json.loads(event["data"])["a2ui"]
+        for event in events
+        if event["event"] == "a2ui"
+    ]
+    chart_components = [
+        component
+        for message in a2ui_messages
+        for component in message.get("updateComponents", {}).get("components", [])
+        if component.get("component") == "LineChart"
+    ]
+
+    assert chart_components
+    assert events[-1]["event"] == "done"
+    conversation = await store.get_conversation("conversation-chart")
+    assert conversation is not None
+    assistant_parts = conversation["messages"][-1]["parts"]
+    stored_a2ui_messages = [
+        message
+        for part in assistant_parts
+        if part["type"] == "a2ui"
+        for message in (part["content"] if isinstance(part["content"], list) else [part["content"]])
+    ]
+    assert any(
+        message.get("updateComponents", {}).get("components")
+        and any(
+            component.get("component") == "LineChart"
+            for component in message["updateComponents"]["components"]
+        )
+        for message in stored_a2ui_messages
+    )
 
 
 @pytest.mark.asyncio
