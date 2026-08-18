@@ -39,6 +39,92 @@ async def test_chat_store_persists_partial_and_cancelled_turn(store):
 
 
 @pytest.mark.asyncio
+async def test_chat_store_persists_waiting_interaction_and_answers_once(store):
+    _, assistant_id = await store.prepare_task(
+        conversation_id="conversation-interaction",
+        task_id="task-interaction",
+        message="510300",
+        history=[],
+    )
+    interaction = await store.create_interaction(
+        "task-interaction",
+        "intent_clarification",
+        "你希望做什么？",
+        [{"id": "quote", "label": "查询行情"}],
+        {"request": {"message": "510300"}},
+    )
+    assert await store.append_part(
+        assistant_id,
+        {"type": "interaction", "content": interaction},
+        task_id="task-interaction",
+    )
+    await store.update_task("task-interaction", "waiting_user")
+    task = await store.get_task("task-interaction")
+    assert task is not None
+    assert task["status"] == "waiting_user"
+
+    answered = await store.answer_interaction(interaction["interaction_id"], "quote")
+    assert answered["status"] == "answered"
+    with pytest.raises(ValueError, match="已经处理"):
+        await store.answer_interaction(interaction["interaction_id"], "quote")
+
+
+@pytest.mark.asyncio
+async def test_chat_task_pauses_and_resumes_after_interaction(store, monkeypatch):
+    _, assistant_id = await store.prepare_task(
+        conversation_id="conversation-pause",
+        task_id="task-pause",
+        message="510300",
+        history=[],
+    )
+
+    class FakeAssetAgent:
+        def prepare(self, **kwargs):
+            return kwargs
+
+        async def chat(self, request):
+            del request
+            yield {
+                "type": "interaction_required",
+                "kind": "intent_clarification",
+                "question": "选择任务",
+                "options": [{"id": "quote", "label": "行情"}],
+                "resume": {"request": {"message": "510300"}},
+            }
+
+        async def resume_chat(self, interaction, option_id):
+            assert interaction["selected_option"] == "quote"
+            assert option_id == "quote"
+            yield {"type": "text", "text": "已完成行情查询。"}
+
+    monkeypatch.setattr(chat_service, "asset_agent", FakeAssetAgent())
+    manager = ChatTaskManager(store)
+    await manager.start(
+        ChatTaskInput(
+            task_id="task-pause",
+            conversation_id="conversation-pause",
+            message="510300",
+            history=[],
+            strategy=None,
+            asset_type="etf",
+            assistant_message_id=assistant_id,
+        )
+    )
+    paused_events = [event async for event in manager.subscribe("task-pause")]
+    interaction_events = [event for event in paused_events if event["event"] == "interaction_required"]
+    assert interaction_events
+    interaction = json.loads(interaction_events[-1]["data"])["interaction"]
+    assert (await store.get_task("task-pause"))["status"] == "waiting_user"
+
+    await manager.respond("task-pause", interaction["interaction_id"], "quote")
+    resumed_events = [event async for event in manager.subscribe("task-pause")]
+    assert any(event["event"] == "done" for event in resumed_events)
+    conversation = await store.get_conversation("conversation-pause")
+    assert conversation is not None
+    assert conversation["messages"][-1]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_chat_store_replaces_history_for_edit(store):
     await store.prepare_task(
         conversation_id="conversation-1",

@@ -2,7 +2,10 @@ import asyncio
 import json
 
 import pytest
+from langchain_core.messages import AIMessage
+from langchain_core.tools import StructuredTool
 
+import graph.agent_loop as agent_loop_module
 from agents.sentiment_analyst import analyze as analyze_sentiment
 from agents.stock_agent import StockAgent, _compact_generated_report
 from application.research import research_service
@@ -69,6 +72,69 @@ def test_chat_agent_exposes_only_provider_agnostic_web_search():
     assert "search_web_anysearch" not in names
     assert "search_web_ddgs" not in names
     assert "get_latest_news" not in names
+
+
+def test_chat_agent_hides_mutating_tools_without_explicit_execution_request():
+    readonly_names = {
+        tool.name
+        for tool in build_chat_tools(assets.get_realtime_quote, allow_mutating_tools=False)
+    }
+    assert "submit_simulation_order" not in readonly_names
+    assert "cancel_simulation_order" not in readonly_names
+
+    execution_names = {
+        tool.name
+        for tool in build_chat_tools(assets.get_realtime_quote, allow_mutating_tools=True)
+    }
+    assert "submit_simulation_order" in execution_names
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_pauses_before_confirmed_tool_execution(monkeypatch):
+    called = []
+
+    async def submit_order(ticker: str) -> str:
+        called.append(ticker)
+        return "submitted"
+
+    tool = StructuredTool.from_function(
+        coroutine=submit_order,
+        name="submit_simulation_order",
+        description="创建模拟订单",
+    )
+
+    class FakeLLM:
+        async def chat_with_tools(self, messages, tools, temperature=0.2):
+            del messages, tools, temperature
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "submit_simulation_order",
+                        "args": {"ticker": "510300"},
+                        "id": "call-confirm-1",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+
+    monkeypatch.setattr(agent_loop_module, "get_llm_service", lambda: FakeLLM())
+    updates = [
+        update
+        async for update in agent_loop_module.stream_agent_loop(
+            [{"role": "user", "content": "提交模拟订单"}],
+            [tool],
+            max_steps=2,
+        )
+    ]
+    pending = [
+        node_update.get("pending_tool_confirmation")
+        for update in updates
+        for node_update in update.values()
+        if isinstance(node_update, dict) and node_update.get("pending_tool_confirmation")
+    ]
+    assert pending[0]["tool_call_id"] == "call-confirm-1"
+    assert called == []
 
 
 def test_chat_agent_exposes_artifact_tool_and_persists_multiple_files(monkeypatch, tmp_path):
