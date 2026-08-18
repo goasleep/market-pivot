@@ -225,6 +225,11 @@ export function ChatMessage({
                     {interaction.kind === "tool_confirmation" && interaction.tool?.tool_name && (
                       <div className="mt-2 rounded-md bg-background/70 px-3 py-2 text-xs text-muted-foreground">
                         工具：{interaction.tool.tool_name}
+                        {interaction.tool.args && (
+                          <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[11px]">
+                            {JSON.stringify(interaction.tool.args, null, 2)}
+                          </pre>
+                        )}
                       </div>
                     )}
                     <div className="mt-3 flex flex-wrap gap-2">

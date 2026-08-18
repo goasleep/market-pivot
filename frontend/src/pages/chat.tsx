@@ -648,6 +648,16 @@ export function ChatPage() {
         editedIndex === null
           ? activeConversation.messages
           : activeConversation.messages.slice(0, editedIndex);
+      const supersededBaseMessages = baseMessages.map((message) => ({
+        ...message,
+        parts: message.parts.map((part) => {
+          if (part.type !== "interaction") return part;
+          const interaction = part.content as ChatInteraction;
+          return interaction.status === "pending"
+            ? { ...part, content: { ...interaction, status: "cancelled" as const } }
+            : part;
+        }),
+      }));
       const userMessage: ChatMessageData = {
         id: crypto.randomUUID(),
         role: "user",
@@ -680,7 +690,7 @@ export function ChatPage() {
           item.title === "新对话"
             ? titleFromMessages([userMessage])
             : item.title,
-        messages: [...baseMessages, userMessage, assistantMessage],
+        messages: [...supersededBaseMessages, userMessage, assistantMessage],
         updatedAt: new Date().toISOString(),
       }));
 
@@ -767,7 +777,7 @@ export function ChatPage() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               message: text.trim(),
-              history: baseMessages.map((message) => ({
+              history: supersededBaseMessages.map((message) => ({
                 role: message.role,
                 created_at: message.createdAt,
                 references: message.references || [],
