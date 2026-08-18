@@ -27,6 +27,7 @@ dependencies = [
     "langsmith>=0.1.0",
     "tortoise-orm>=1.1.7",
     "asyncpg>=0.30.0",
+    "deepagents==0.6.12",
 ]
 
 [tool.uv]

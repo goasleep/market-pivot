@@ -19,6 +19,12 @@ from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, StateGraph
 
+from agents.deep_agent_runtime import (
+    build_deep_agent,
+    deep_agent_checkpointer,
+    deep_agents_enabled,
+    stream_deep_agent,
+)
 from llm.service import get_llm_service
 from tools.policies import tool_requires_confirmation
 
@@ -268,7 +274,30 @@ async def run_agent_loop(
     max_steps: int = DEFAULT_MAX_STEPS,
     config: dict[str, Any] | None = None,
 ) -> AgentLoopState:
-    """Run a bounded LLM/tool loop and return its full trace state."""
+    """Run the configured Deep Agent chat subgraph and return trace state."""
+    if deep_agents_enabled() and hasattr(get_llm_service(), "get_model"):
+        result: AgentLoopState = {
+            "messages": messages,
+            "step": 0,
+            "max_steps": max_steps,
+            "tools": tools,
+            "tool_map": {tool.name: tool for tool in tools},
+            "tool_events": [],
+            "reasoning_events": [],
+        }
+        async for update in stream_deep_agent_loop(messages, tools, max_steps=max_steps, config=config):
+            node_update = update.get("deep_agent") or {}
+            result["tool_events"] = [*result.get("tool_events", []), *node_update.get("tool_events", [])]
+            result["reasoning_events"] = [
+                *result.get("reasoning_events", []),
+                *node_update.get("reasoning_events", []),
+            ]
+            if node_update.get("final_response"):
+                result["final_response"] = node_update["final_response"]
+            if node_update.get("pending_tool_confirmation"):
+                result["pending_tool_confirmation"] = node_update["pending_tool_confirmation"]
+        return result
+
     return await agent_loop.ainvoke(
         {
             "messages": messages,
@@ -290,7 +319,26 @@ async def stream_agent_loop(
     max_steps: int = DEFAULT_MAX_STEPS,
     config: dict[str, Any] | None = None,
 ):
-    """Stream node updates so chat clients can show each tool round."""
+    """Stream node updates, using Deep Agents when the runtime is configured."""
+    if deep_agents_enabled() and hasattr(get_llm_service(), "get_model"):
+        async for update in stream_deep_agent_loop(messages, tools, max_steps=max_steps, config=config):
+            yield update
+        return
+
+    # Offline tests and unconfigured development environments retain the
+    # original loop so the application can still exercise its event contract.
+    async for update in _stream_manual_agent_loop(messages, tools, max_steps=max_steps, config=config):
+        yield update
+
+
+async def _stream_manual_agent_loop(
+    messages: list[Any],
+    tools: list[StructuredTool],
+    *,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    config: dict[str, Any] | None = None,
+):
+    """Compatibility loop used by offline tests and no-key local development."""
     async for update in agent_loop.astream(
         {
             "messages": messages,
@@ -304,6 +352,88 @@ async def stream_agent_loop(
         config=config,
         stream_mode="updates",
         ):
+        yield update
+
+
+def _deep_agent_config(config: dict[str, Any] | None, messages: list[Any]) -> dict[str, Any]:
+    result = dict(config or {})
+    configurable = dict(result.get("configurable") or {})
+    configurable.setdefault("thread_id", f"deep-agent-{id(messages)}")
+    result["configurable"] = configurable
+    return result
+
+
+def _build_chat_deep_agent(tools: list[StructuredTool], messages: list[Any]):
+    system_prompt = next(
+        (
+            str(message.get("content", ""))
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "system"
+        ),
+        "你是一个受控的 A 股短中期研究与模拟交易助手。",
+    )
+    interrupt_on = {
+        tool.name: True
+        for tool in tools
+        if tool_requires_confirmation(tool.name)
+    }
+    return build_deep_agent(
+        tools=tools,
+        system_prompt=(
+            f"{system_prompt}\n"
+            "复杂任务先使用 write_todos 规划；工具结果必须作为事实依据。"
+            "不要输出详细内部思维链，只输出简短进度和最终结论。"
+        ),
+        interrupt_on=interrupt_on or None,
+        checkpointer=deep_agent_checkpointer if interrupt_on else None,
+        name="asset-agent-chat",
+    )
+
+
+async def _stream_deep_agent_state(
+    messages: list[Any],
+    tools: list[StructuredTool],
+    *,
+    config: dict[str, Any] | None = None,
+    resume: dict[str, Any] | None = None,
+):
+    agent = _build_chat_deep_agent(tools, messages)
+    run_config = _deep_agent_config(config, messages)
+    state: dict[str, Any] = {
+        "tool_events": [],
+        "reasoning_events": [],
+        "final_response": "",
+    }
+    async for event in stream_deep_agent(
+        agent,
+        [message for message in messages if not (isinstance(message, dict) and message.get("role") == "system")],
+        config=run_config,
+        resume=resume,
+    ):
+        event_type = event.get("type")
+        if event_type == "tool":
+            state["tool_events"] = [event]
+        elif event_type == "reasoning":
+            state["reasoning_events"] = [{"step": 0, "text": str(event.get("text", ""))}]
+        elif event_type == "text":
+            state["final_response"] = str(event.get("text", ""))
+        elif event_type == "interaction_required":
+            pending = dict(event.get("pending_tool_call") or {})
+            state["pending_tool_confirmation"] = pending
+            state["checkpoint_messages"] = messages
+        yield {"deep_agent": dict(state)}
+
+
+async def stream_deep_agent_loop(
+    messages: list[Any],
+    tools: list[StructuredTool],
+    *,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    config: dict[str, Any] | None = None,
+):
+    """Run the Deep Agent chat subgraph and preserve the old event shape."""
+    del max_steps  # Deep Agents own planning; tool policies remain the bound.
+    async for update in _stream_deep_agent_state(messages, tools, config=config):
         yield update
 
 
@@ -324,6 +454,30 @@ async def resume_agent_loop(
     conversation state. A rejection becomes a durable tool observation and
     never invokes the underlying tool.
     """
+    if pending_tool_call.get("deep_agent"):
+        thread_id = str(pending_tool_call.get("thread_id", ""))
+        run_config = dict(config or {})
+        run_config["configurable"] = {
+            **dict(run_config.get("configurable") or {}),
+            "thread_id": thread_id,
+        }
+        decision = {
+            "decisions": [
+                {
+                    "type": "approve" if approved else "reject",
+                    **({} if approved else {"message": "用户拒绝执行该模拟交易操作。"}),
+                }
+            ]
+        }
+        async for update in _stream_deep_agent_state(
+            [],
+            tools,
+            config=run_config,
+            resume=decision,
+        ):
+            yield update
+        return
+
     messages = messages_from_dict(checkpoint_messages)
     name = str(pending_tool_call.get("tool_name", ""))
     call_id = str(pending_tool_call.get("tool_call_id", ""))

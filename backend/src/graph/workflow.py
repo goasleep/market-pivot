@@ -14,8 +14,10 @@ from langgraph.graph import END, StateGraph
 from loguru import logger
 
 from agents.debate_room import debate
+from agents.deep_agent_runtime import deep_agents_enabled
 from agents.fundamentals_analyst import analyze as fund_analyze
 from agents.portfolio_manager import decide as pm_decide
+from agents.research_deep_agent import synthesize_reports
 from agents.risk_manager import assess as risk_assess
 from agents.sentiment_analyst import analyze as sent_analyze
 from agents.technical_analyst import analyze as tech_analyze
@@ -109,12 +111,21 @@ async def merge_analysts(state: WorkflowState) -> dict:
         "sentiment": state["sentiment_report"],
     }
 
-    # Run debate
-    debate_report = await debate(
-        state["ticker"],
-        reports,
-        asset_type=state.get("asset_type", AssetType.STOCK.value),
-    )
+    if deep_agents_enabled() and debate.__module__ == "agents.debate_room":
+        debate_report = await synthesize_reports(
+            state["ticker"],
+            reports,
+            asset_type=state.get("asset_type", AssetType.STOCK.value),
+        )
+    else:
+        # Offline tests and explicitly unconfigured installations retain the
+        # existing deterministic seam; configured runs use the Deep Agent
+        # synthesis subgraph above.
+        debate_report = await debate(
+            state["ticker"],
+            reports,
+            asset_type=state.get("asset_type", AssetType.STOCK.value),
+        )
 
     return {
         "analyst_reports": reports,
