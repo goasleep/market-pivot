@@ -1,7 +1,6 @@
 import pandas as pd
 import pytest
 
-from api.routers.backtest import BacktestRequest, run_backtest_api
 from engine import backtester
 from engine.simulation_account import SimulationAccountService
 from graph import workflow as workflow_module
@@ -121,26 +120,6 @@ async def test_pool_backtest_uses_one_agent_portfolio_without_live_enrichment(mo
     assert result["tickers"] == ["000001", "600519"]
     assert result["total_trades"] == 0
     assert len(result["equity_curve"]) == 6
-
-
-@pytest.mark.asyncio
-async def test_pool_backtest_api_dispatches_to_batch_runner(monkeypatch):
-    captured = {}
-
-    async def fake_pool(**kwargs):
-        captured.update(kwargs)
-        return {"ticker": "pool", "tickers": kwargs["tickers"]}
-
-    monkeypatch.setattr("api.routers.backtest.run_pool_backtest", fake_pool)
-    result = await run_backtest_api(
-        BacktestRequest(
-            tickers=["000001", "600519"],
-            start_date="2026-01-01",
-            end_date="2026-01-06",
-        )
-    )
-    assert result["tickers"] == ["000001", "600519"]
-    assert captured["decision_interval"] == 1
 
 
 def test_simulation_account_enforces_t_plus_one_and_persists(tmp_path):

@@ -8,18 +8,15 @@ from pydantic import BaseModel, Field
 
 from data.fund_provider import async_get_fund_realtime
 from data.stock_provider import async_get_stock_realtime
-from domain.decision_policy import DecisionValidator
 from engine.broker_adapters import broker_status, live_broker_status
 from engine.simulation_account import simulation_accounts
 from engine.simulation_events import simulation_events
-from engine.trading_engine import decision_shares
 from models.schemas import (
     AssetType,
     Decision,
     ExternalSimulationConfig,
     LiveTradingConfig,
     SimulationAccountConfig,
-    TradeDecision,
 )
 
 router = APIRouter()
