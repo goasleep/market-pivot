@@ -13,19 +13,28 @@ Flow:
 
 import asyncio
 from collections import deque
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from loguru import logger
 
 from application.research import research_service
+from data.backtest_data import BacktestDataError, prepare_backtest_data
 from data.fund_provider import async_get_fund_history
 from data.market_context import build_market_context
 from data.stock_provider import async_get_stock_history
+from engine.portfolio_allocator import (
+    enforce_max_position_weight,
+    portfolio_snapshot,
+    rebalance_portfolio,
+    target_weights,
+)
 from engine.trading_engine import TimeAwareTradingEngine, decision_shares
 from models.schemas import (
     AssetType,
     Decision,
+    PortfolioSpec,
     PriceEvidence,
     SimulationAccountConfig,
     StrategySpec,
@@ -52,6 +61,7 @@ async def run_backtest(
     progress_callback=None,
     asset_type: AssetType | str = AssetType.STOCK,
     strategy_spec: dict | None = None,
+    capture_data: bool = False,
 ) -> dict:
     """Run backtest over historical data.
 
@@ -96,6 +106,19 @@ async def run_backtest(
         )
     if df.empty or len(df) < 5:
         return _empty_result(ticker, start_date, end_date, initial_capital)
+
+    try:
+        df, data_snapshot = prepare_backtest_data(
+            df,
+            ticker=ticker,
+            asset_type=asset_type.value,
+            start_date=start_date,
+            end_date=end_date,
+            adjustment="qfq" if asset_type == AssetType.STOCK else "provider_default",
+        )
+    except BacktestDataError as exc:
+        logger.warning("Backtest data rejected for {}: {}", ticker, exc)
+        return _empty_result(ticker, start_date, end_date, initial_capital, error=str(exc))
 
     # Filter to date range
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
@@ -210,9 +233,13 @@ async def run_backtest(
 
     metrics = _calc_metrics(equity_curve, engine.portfolio.trades, initial_capital)
 
-    return {
+    payload = {
         "ticker": ticker,
         "asset_type": asset_type.value,
+        "strategy_spec": executable_spec.model_dump(mode="json") if executable_spec else None,
+        "data_snapshot": data_snapshot,
+        "buy_hold_return": round(float(df.iloc[-1]["close"] / df.iloc[0]["close"] - 1), 6),
+        "execution": _execution_manifest(engine, fill_time),
         "start_date": start_date,
         "end_date": end_date,
         "initial_capital": initial_capital,
@@ -227,6 +254,9 @@ async def run_backtest(
         "equity_curve": equity_curve,
         "trades": [t.model_dump() for t in engine.portfolio.trades],
     }
+    if capture_data:
+        payload["_data_snapshot_rows"] = df.to_dict(orient="records")
+    return payload
 
 
 async def run_pool_backtest(
@@ -240,6 +270,8 @@ async def run_pool_backtest(
     progress_callback=None,
     asset_type: AssetType | str = AssetType.STOCK,
     strategy_spec: dict | None = None,
+    portfolio_spec: dict | PortfolioSpec | None = None,
+    capture_data: bool = False,
 ) -> dict:
     """Run the same Agent and execution semantics across a stock pool.
 
@@ -250,6 +282,13 @@ async def run_pool_backtest(
     """
 
     asset_type = AssetType(asset_type)
+    portfolio = (
+        portfolio_spec
+        if isinstance(portfolio_spec, PortfolioSpec)
+        else PortfolioSpec.model_validate(portfolio_spec)
+        if portfolio_spec is not None
+        else None
+    )
     executable_spec = strategy_from_mapping(strategy_spec, source="llm") if strategy_spec else None
     if not tickers:
         raise ValueError("tickers 不能为空")
@@ -279,12 +318,27 @@ async def run_pool_backtest(
         )
     )
     valid: dict[str, pd.DataFrame] = {}
+    data_snapshots = []
+    data_rejections: list[dict[str, str]] = []
     for symbol, frame in zip(symbols, frames):
         if frame.empty or len(frame) < 5:
+            data_rejections.append({"ticker": symbol, "reason": "历史数据为空或不足 5 行"})
             continue
-        item = frame.copy()
-        item["date"] = pd.to_datetime(item["date"]).dt.strftime("%Y-%m-%d")
-        valid[symbol] = item.sort_values("date").reset_index(drop=True)
+        try:
+            item, snapshot = prepare_backtest_data(
+                frame,
+                ticker=symbol,
+                asset_type=asset_type.value,
+                start_date=start_date,
+                end_date=end_date,
+                adjustment="qfq" if asset_type == AssetType.STOCK else "provider_default",
+            )
+        except BacktestDataError as exc:
+            logger.warning("Skipping invalid backtest data for {}: {}", symbol, exc)
+            data_rejections.append({"ticker": symbol, "reason": str(exc)})
+            continue
+        valid[symbol] = item
+        data_snapshots.append(snapshot)
     if not valid:
         return _empty_pool_result(symbols, start_date, end_date, initial_capital)
 
@@ -295,7 +349,10 @@ async def run_pool_backtest(
     )
     engine.set_available_dates(trading_dates)
     pending: dict[str, object] = {}
+    pending_target: tuple[dict[str, float], dict[str, TradeDecision]] | None = None
     equity_curve: list[dict] = []
+    portfolio_history: list[dict] = []
+    target_weights_history: list[dict] = []
 
     for day_count, current_date in enumerate(trading_dates):
         engine.advance_to_date(current_date)
@@ -305,14 +362,33 @@ async def run_pool_backtest(
             if not matches.empty:
                 rows_today[symbol] = matches.iloc[-1]
 
-        for symbol, decision in list(pending.items()):
-            row = rows_today.get(symbol)
-            if row is not None:
-                _execute_decision(engine, decision, symbol, float(row["open"]), current_date)
-                pending.pop(symbol, None)
+        if portfolio is not None and pending_target is not None:
+            pending_weights, pending_decisions = pending_target
+            rebalance_portfolio(
+                engine,
+                pending_weights,
+                {symbol: float(row["open"]) for symbol, row in rows_today.items()},
+                pending_decisions,
+                current_date,
+            )
+            pending_target = None
+        else:
+            for symbol, decision in list(pending.items()):
+                row = rows_today.get(symbol)
+                if row is not None:
+                    _execute_decision(engine, decision, symbol, float(row["open"]), current_date)
+                    pending.pop(symbol, None)
         engine.update_prices({symbol: float(row["close"]) for symbol, row in rows_today.items()})
 
         if day_count % decision_interval == 0:
+            day_decisions: dict[str, TradeDecision] = {
+                position.ticker: TradeDecision(
+                    ticker=position.ticker,
+                    asset_type=position.asset_type,
+                    decision=Decision.HOLD,
+                )
+                for position in engine.portfolio.positions
+            }
             for symbol, row in rows_today.items():
                 if progress_callback:
                     await progress_callback(
@@ -368,7 +444,10 @@ async def run_pool_backtest(
                             workflow_override=workflow,
                         )
                         decision = result.get("final_decision")
-                    if decision and decision.decision != Decision.HOLD:
+                    if decision is None:
+                        decision = TradeDecision(ticker=symbol, asset_type=asset_type, decision=Decision.HOLD)
+                    day_decisions[symbol] = decision
+                    if portfolio is None and decision.decision != Decision.HOLD:
                         if fill_time == "same_close":
                             _execute_decision(engine, decision, symbol, current_price, current_date)
                         else:
@@ -376,14 +455,41 @@ async def run_pool_backtest(
                 except Exception as exc:
                     logger.error(f"Agent error on {symbol} {current_date}: {exc}")
 
-        equity_curve.append({"date": current_date, "value": round(engine.portfolio.total_value, 2)})
+            if portfolio is not None and _should_rebalance(day_count, portfolio.rebalance_frequency):
+                weights = target_weights(day_decisions, engine, portfolio)
+                target_weights_history.append(
+                    {"date": current_date, "weights": weights, "cash_reserve": portfolio.cash_reserve}
+                )
+                close_prices = {symbol: float(row["close"]) for symbol, row in rows_today.items()}
+                if fill_time == "same_close":
+                    rebalance_portfolio(engine, weights, close_prices, day_decisions, current_date)
+                else:
+                    pending_target = (weights, day_decisions)
+
+        if portfolio is not None:
+            enforce_max_position_weight(
+                engine,
+                portfolio.max_position_weight,
+                {symbol: float(row["close"]) for symbol, row in rows_today.items()},
+                current_date,
+            )
+
+        snapshot = portfolio_snapshot(engine, current_date)
+        portfolio_history.append(snapshot)
+        equity_curve.append({"date": current_date, "value": snapshot["total_value"]})
 
     if progress_callback:
         await progress_callback("calculating", "Calculating pool performance metrics...")
     metrics = _calc_metrics(equity_curve, engine.portfolio.trades, initial_capital)
-    return {
+    payload = {
         "ticker": "pool",
+        "mode": "portfolio" if portfolio is not None else "pool",
         "asset_type": asset_type.value,
+        "strategy_spec": executable_spec.model_dump(mode="json") if executable_spec else None,
+        "portfolio_spec": portfolio.model_dump(mode="json") if portfolio else None,
+        "data_snapshots": data_snapshots,
+        "data_rejections": data_rejections,
+        "execution": _execution_manifest(engine, fill_time),
         "tickers": list(valid),
         "start_date": start_date,
         "end_date": end_date,
@@ -399,6 +505,15 @@ async def run_pool_backtest(
         "equity_curve": equity_curve,
         "trades": [trade.model_dump() for trade in engine.portfolio.trades],
     }
+    if portfolio is not None:
+        payload["portfolio_history"] = portfolio_history
+        payload["target_weights_history"] = target_weights_history
+        payload["symbol_metrics"] = _symbol_metrics(valid, engine)
+    if capture_data:
+        payload["_data_snapshot_rows"] = {
+            symbol: frame.to_dict(orient="records") for symbol, frame in valid.items()
+        }
+    return payload
 
 
 def _execute_decision(engine, decision, ticker: str, price: float, date: str):
@@ -417,6 +532,21 @@ def _execute_decision(engine, decision, ticker: str, price: float, date: str):
         )
     elif decision.decision == Decision.SELL:
         engine.sell(ticker, shares, price, date)
+
+
+def _execution_manifest(engine: TimeAwareTradingEngine, fill_time: str) -> dict[str, Any]:
+    rules = engine.rules.effective_trading_rules(engine.rules.asset_type)
+    return {
+        "fill_time": fill_time,
+        "slippage_bps": rules.slippage_bps,
+        "buy_commission_rate": rules.buy_commission_rate,
+        "sell_commission_rate": rules.sell_commission_rate,
+        "minimum_commission": rules.minimum_commission,
+        "stamp_tax_rate": rules.stamp_tax_rate,
+        "transfer_fee_rate": rules.transfer_fee_rate,
+        "min_lot": rules.min_lot,
+        "t_plus_one": rules.t_plus_one,
+    }
 
 
 def _decision_from_strategy(
@@ -557,7 +687,43 @@ def _calc_metrics(equity_curve: list[dict], trades: list, initial_capital: float
     }
 
 
-def _empty_result(ticker, start_date, end_date, initial_capital) -> dict:
+def _should_rebalance(day_count: int, frequency: str) -> bool:
+    """Use trading-day periods so missing market dates do not shift schedules."""
+    periods = {"daily": 1, "weekly": 5, "monthly": 21, "manual": 0}
+    period = periods.get(frequency, 5)
+    return period > 0 and day_count % period == 0
+
+
+def _symbol_metrics(frames: dict[str, pd.DataFrame], engine: TimeAwareTradingEngine) -> list[dict]:
+    """Summarise per-symbol attribution inputs for the portfolio report."""
+    trades = [trade.model_dump() for trade in engine.portfolio.trades]
+    positions = {position.ticker: position for position in engine.portfolio.positions}
+    metrics = []
+    for ticker, frame in frames.items():
+        first_close = float(frame.iloc[0]["close"])
+        last_close = float(frame.iloc[-1]["close"])
+        ticker_trades = [trade for trade in trades if trade["ticker"] == ticker]
+        position = positions.get(ticker)
+        metrics.append(
+            {
+                "ticker": ticker,
+                "buy_hold_return": round(last_close / first_close - 1, 6) if first_close else 0.0,
+                "trade_count": len(ticker_trades),
+                "buy_count": sum(1 for trade in ticker_trades if str(trade["action"]) in {"buy", "Decision.BUY"}),
+                "sell_count": sum(1 for trade in ticker_trades if str(trade["action"]) in {"sell", "Decision.SELL"}),
+                "final_shares": position.shares if position else 0,
+                "final_market_value": round(position.market_value, 2) if position else 0.0,
+                "final_weight": 0.0,
+            }
+        )
+    total_value = engine.portfolio.total_value
+    for item in metrics:
+        if total_value:
+            item["final_weight"] = round(item["final_market_value"] / total_value, 8)
+    return metrics
+
+
+def _empty_result(ticker, start_date, end_date, initial_capital, error: str | None = None) -> dict:
     return {
         "ticker": ticker,
         "start_date": start_date,
@@ -573,6 +739,7 @@ def _empty_result(ticker, start_date, end_date, initial_capital) -> dict:
         "total_trades": 0,
         "equity_curve": [],
         "trades": [],
+        "error": error,
     }
 
 

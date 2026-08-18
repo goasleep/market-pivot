@@ -19,6 +19,7 @@ from uuid import uuid4
 from loguru import logger
 
 from artifacts.storage import ArtifactStorage, LocalArtifactStorage, S3ArtifactStorage
+from charts.echarts import ECHARTS_CDN, line_option, render_chart_container, signal_attribution_option
 from config import settings
 from llm.service import get_llm_service
 from models.schemas import TradeDecision
@@ -145,7 +146,21 @@ def _history_points(market_context: Any | None, limit: int = 60) -> list[tuple[s
     return points[-limit:]
 
 
-def _render_price_trend_svg(points: list[tuple[str, float]]) -> str:
+def _render_price_trend_echarts(points: list[tuple[str, float]]) -> str:
+    if len(points) < 2:
+        return ""
+    return render_chart_container(
+        "price-trend-chart",
+        line_option(
+            "历史收盘价趋势",
+            [{"label": label, "value": value} for label, value in points],
+        ),
+        aria_label="历史收盘价趋势图",
+        height=300,
+    )
+
+
+def _legacy_render_price_trend_svg(points: list[tuple[str, float]]) -> str:
     """Render a compact, self-contained closing-price trend chart."""
     if len(points) < 2:
         return ""
@@ -194,6 +209,43 @@ def _render_price_trend_svg(points: list[tuple[str, float]]) -> str:
       <p class="price-trend-caption">区间最高 {maximum:.2f} · 区间最低 {minimum:.2f} · 共 {len(points)} 个交易日</p>
     </div>
     """
+
+
+def _render_signal_attribution_echarts(attribution: dict[str, Any]) -> str:
+    return render_chart_container(
+        "signal-attribution-chart",
+        signal_attribution_option(attribution),
+        aria_label="信号归因图",
+        height=260,
+    )
+
+
+def _legacy_render_signal_attribution_html(attribution: dict[str, Any]) -> str:
+    """Render the four decision signal dimensions as a self-contained bar chart."""
+    fields = (
+        ("技术面", "technical_score"),
+        ("情绪面", "sentiment_score"),
+        ("基本面", "fundamental_score"),
+        ("市场环境", "market_regime_score"),
+    )
+    rows: list[str] = []
+    for label, key in fields:
+        try:
+            value = max(-100.0, min(100.0, float(attribution.get(key, 0) or 0)))
+        except (TypeError, ValueError):
+            value = 0.0
+        tone = "signal-positive" if value >= 0 else "signal-negative"
+        rows.append(
+            f'<div class="signal-row"><span class="signal-name">{label}</span>'
+            f'<div class="signal-track"><span class="{tone}" style="width:{abs(value):.1f}%"></span></div>'
+            f'<strong>{value:+.0f}</strong></div>'
+        )
+    return (
+        '<div class="signal-attribution" role="img" aria-label="信号归因图">'
+        '<div class="signal-attribution-title">信号归因</div>'
+        + "".join(rows)
+        + "</div>"
+    )
 
 
 def _report_prompt_payload(decision: TradeDecision, market_context: Any | None) -> dict[str, Any]:
@@ -398,6 +450,7 @@ def render_analysis_markdown(
             f"- 舆情面：{_text(attribution.get('sentiment_score'), '0')}",
             f"- 基本面：{_text(attribution.get('fundamental_score'), '0')}",
             f"- 市场环境：{_text(attribution.get('market_regime_score'), '0')}",
+            *(["", "[[SIGNAL_ATTRIBUTION_CHART]]"] if attribution else []),
             "",
             "## 八、各 Agent 观点",
             "",
@@ -423,11 +476,14 @@ def render_analysis_html(
     generated_at: str,
     market_context: Any | None = None,
 ) -> str:
-    """Render a standalone HTML report without adding a runtime dependency."""
+    """Render a standalone HTML report with ECharts canvas visualizations."""
     escaped = html.escape(markdown)
     link_tokens: list[str] = []
     chart_token = "__REPORT_PRICE_TREND__"
-    chart_html = _render_price_trend_svg(_history_points(market_context))
+    chart_html = _render_price_trend_echarts(_history_points(market_context))
+    signal_chart_token = "__REPORT_SIGNAL_ATTRIBUTION__"
+    attribution = _dashboard_sections(decision)["attribution"]
+    signal_chart_html = _render_signal_attribution_echarts(attribution)
 
     def make_link(label: str, url: str) -> str:
         token = f"__REPORT_LINK_{len(link_tokens)}__"
@@ -456,6 +512,7 @@ def render_analysis_html(
         body,
     )
     body = body.replace("[[PRICE_TREND_CHART]]", chart_token)
+    body = body.replace("[[SIGNAL_ATTRIBUTION_CHART]]", signal_chart_token)
     body = re.sub(r"^### (.+)$", r"<h3>\1</h3>", body, flags=re.MULTILINE)
     body = re.sub(r"^## (.+)$", r"<h2>\1</h2>", body, flags=re.MULTILINE)
     body = re.sub(r"^# (.+)$", r"<h1>\1</h1>", body, flags=re.MULTILINE)
@@ -466,11 +523,11 @@ def render_analysis_html(
     paragraphs = []
     in_list = False
     for line in body.splitlines():
-        if line == chart_token:
+        if line in {chart_token, signal_chart_token}:
             if in_list:
                 paragraphs.append("</ul>")
                 in_list = False
-            paragraphs.append(chart_token)
+            paragraphs.append(line)
             continue
         if line.startswith("<li>"):
             if not in_list:
@@ -489,6 +546,10 @@ def render_analysis_html(
     for index, link in enumerate(link_tokens):
         rendered = rendered.replace(f"__REPORT_LINK_{index}__", link)
     rendered = rendered.replace(chart_token, chart_html or '<p class="chart-empty">暂无足够历史数据</p>')
+    rendered = rendered.replace(
+        signal_chart_token,
+        signal_chart_html if attribution else '<p class="chart-empty">暂无信号归因数据</p>',
+    )
     title = html.escape(f"{decision.ticker} 研究分析报告")
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -496,6 +557,7 @@ def render_analysis_html(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{title}</title>
+  <script src="{ECHARTS_CDN}"></script>
   <style>
     :root {{ color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
     body {{ margin: 0; background: #f5f7fb; color: #172033; line-height: 1.7; }}
@@ -506,16 +568,9 @@ def render_analysis_html(
     h3 {{ color: #315f9f; }}
     .meta {{ color: #64748b; font-size: 13px; margin: 2px 0; }}
     .report-link {{ color: #2563eb; text-decoration: underline; text-underline-offset: 2px; }}
-    .price-trend {{ margin: 16px 0 8px; padding: 16px; border: 1px solid #dce4f2;
-      border-radius: 14px; background: #f8fbff; }}
-    .price-trend-header {{ display: flex; justify-content: space-between; color: #1d4d91; font-size: 14px; }}
-    .price-trend-header span, .price-trend-caption, .chart-label {{ color: #64748b; font-size: 12px; }}
-    .price-trend svg {{ display: block; width: 100%; height: 260px; margin-top: 8px; overflow: visible; }}
-    .chart-grid {{ stroke: #dce4f2; stroke-width: 1; }}
-    .chart-area {{ fill: #3b82f6; opacity: 0.1; }}
-    .chart-line {{ fill: none; stroke: #2563eb; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }}
-    .chart-point {{ fill: #2563eb; stroke: white; stroke-width: 2; }}
-    .price-trend-caption, .chart-empty {{ margin: 0; }}
+    .echarts-chart {{ margin: 16px 0 8px; padding: 8px; border: 1px solid #dce4f2;
+      border-radius: 14px; background: #fbfcff; }}
+    .chart-empty {{ margin: 0; color: #64748b; font-size: 13px; }}
     li {{ margin: 4px 0; }}
     @media (max-width: 640px) {{ main {{ margin: 0; padding: 24px; }} }}
   </style>
@@ -728,6 +783,9 @@ class ArtifactService:
         source: str = "chat",
         conversation_id: str | None = None,
         task_id: str | None = None,
+        ticker: str | None = None,
+        asset_type: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Persist LLM-selected text, document, data, image, or video files.
 
@@ -787,23 +845,28 @@ class ArtifactService:
             if duplicate is not None:
                 created.append(duplicate)
                 continue
-            metadata = {
+            artifact_metadata = {
                 "description": str(item.get("description") or "").strip(),
                 "format": extension,
                 "generated_by": "chat_agent",
             }
+            extra_metadata = item.get("metadata")
+            if isinstance(extra_metadata, dict):
+                artifact_metadata.update(extra_metadata)
+            if metadata:
+                artifact_metadata.update(metadata)
             created.append(
                 self._create_bytes(
                     name=name,
                     content=raw,
                     mime_type=mime_type,
                     artifact_type=str(item.get("artifact_type") or self._artifact_type_for_mime(mime_type)),
-                    ticker=str(item["ticker"]) if item.get("ticker") else None,
-                    asset_type=str(item["asset_type"]) if item.get("asset_type") else None,
+                    ticker=str(item["ticker"]) if item.get("ticker") else ticker,
+                    asset_type=str(item["asset_type"]) if item.get("asset_type") else asset_type,
                     source=source,
                     conversation_id=conversation_id,
                     task_id=task_id,
-                    metadata=metadata,
+                    metadata=artifact_metadata,
                 )
             )
         return created

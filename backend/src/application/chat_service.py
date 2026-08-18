@@ -45,7 +45,9 @@ class ChatTaskManager:
         if record and record["status"] == "cancel_requested":
             await self.store.update_task(task_input.task_id, "cancelled")
             return
-        if record and record["status"] in {"completed", "failed", "cancelled", "interrupted"}:
+        if record and record["status"] in {
+            "completed", "failed", "cancelled", "interrupted", "waiting_user", "superseded"
+        }:
             return
         self._subscribers.setdefault(task_input.task_id, set())
         self._task_locks.setdefault(task_input.task_id, asyncio.Lock())
@@ -61,7 +63,11 @@ class ChatTaskManager:
         async with lock:
             replay = await self.store.list_events(task_id, after_sequence)
             record = await self.store.get_task(task_id)
-            terminal = bool(record and record["status"] in {"completed", "failed", "cancelled", "interrupted"})
+            terminal = bool(
+                record
+                and record["status"]
+                in {"completed", "failed", "cancelled", "interrupted", "waiting_user", "superseded"}
+            )
             self._subscribers.setdefault(task_id, set()).add(queue)
         try:
             for event in replay:
@@ -105,7 +111,7 @@ class ChatTaskManager:
         async with lock:
             record = await self.store.get_task(task_id)
             if event.get("event") != "done" and record and record["status"] in {
-                "cancel_requested", "cancelled", "completed", "failed", "interrupted"
+                "cancel_requested", "cancelled", "completed", "failed", "interrupted", "superseded"
             }:
                 return
             persisted = await self.store.append_event(task_id, event["event"], event["data"])
@@ -141,6 +147,28 @@ class ChatTaskManager:
         await self._broadcast(
             task_input.task_id,
             {"event": "artifact", "data": _json({"artifact": artifact})},
+        )
+
+    async def _emit_interaction(self, task_input: ChatTaskInput, event: dict[str, Any]) -> None:
+        interaction = await self.store.create_interaction(
+            task_id=task_input.task_id,
+            kind=str(event.get("kind", "intent_clarification")),
+            question=str(event.get("question", "请确认下一步操作")),
+            options=list(event.get("options") or []),
+            payload=dict(event.get("resume") or {}),
+        )
+        if event.get("tool"):
+            interaction["tool"] = event["tool"]
+        if not await self.store.append_part(
+            task_input.assistant_message_id,
+            {"type": "interaction", "content": interaction},
+            task_input.task_id,
+        ):
+            raise asyncio.CancelledError
+        await self.store.update_task(task_input.task_id, "waiting_user")
+        await self._broadcast(
+            task_input.task_id,
+            {"event": "interaction_required", "data": _json({"interaction": interaction})},
         )
 
     @staticmethod
@@ -236,6 +264,43 @@ class ChatTaskManager:
             target.append(reference)
             existing.add(key)
 
+    async def _consume_agent_events(
+        self,
+        task_input: ChatTaskInput,
+        events: AsyncIterator[dict[str, Any]],
+    ) -> bool:
+        """Consume one Agent stream; return True when it paused for a user."""
+        pending_artifacts: list[dict[str, Any]] = []
+        pending_references: list[dict[str, Any]] = []
+        seen_tool_events: set[str] = set()
+        async for event in events:
+            if event.get("type") == "interaction_required":
+                await self._emit_interaction(task_input, event)
+                return True
+            if event.get("type") == "tool":
+                event_key = f"{event.get('name', 'unknown')}:{event.get('result', '')}"
+                if event_key in seen_tool_events:
+                    continue
+                seen_tool_events.add(event_key)
+                artifacts, references = await self._emit_tool_event(task_input, event)
+                self._queue_unique_artifacts(pending_artifacts, artifacts)
+                self._queue_unique_references(pending_references, references)
+                continue
+            text = event.get("text", "")
+            if text:
+                prefix = "分析摘要：" if event.get("type") == "reasoning" else ""
+                await self._emit_text(task_input, f"{prefix}{text}")
+
+        for artifact in pending_artifacts:
+            await self._emit_artifact(task_input, artifact)
+        if pending_references:
+            await self.store.set_references(task_input.assistant_message_id, pending_references)
+            await self._broadcast(
+                task_input.task_id,
+                {"event": "references", "data": _json({"references": pending_references})},
+            )
+        return False
+
     async def _run(self, task_input: ChatTaskInput) -> None:
         task_id = task_input.task_id
         try:
@@ -255,22 +320,9 @@ class ChatTaskManager:
                 task_id=task_input.task_id,
                 asset_type=task_input.asset_type,
             )
-            pending_artifacts: list[dict[str, Any]] = []
-            pending_references: list[dict[str, Any]] = []
-            seen_tool_events: set[str] = set()
-            async for event in asset_agent.chat(request):
-                if event.get("type") == "tool":
-                    event_key = f"{event.get('name', 'unknown')}:{event.get('result', '')}"
-                    if event_key not in seen_tool_events:
-                        seen_tool_events.add(event_key)
-                        artifacts, references = await self._emit_tool_event(task_input, event)
-                        self._queue_unique_artifacts(pending_artifacts, artifacts)
-                        self._queue_unique_references(pending_references, references)
-                else:
-                    text = event.get("text", "")
-                    if text:
-                        prefix = "分析摘要：" if event.get("type") == "reasoning" else ""
-                        await self._emit_text(task_input, f"{prefix}{text}")
+            paused = await self._consume_agent_events(task_input, asset_agent.chat(request))
+            if paused:
+                return
             await self._emit_a2ui(
                 task_input,
                 render_activity(
@@ -280,14 +332,6 @@ class ChatTaskManager:
                     include_create=False,
                 ),
             )
-            for artifact in pending_artifacts:
-                await self._emit_artifact(task_input, artifact)
-            if pending_references:
-                await self.store.set_references(task_input.assistant_message_id, pending_references)
-                await self._broadcast(
-                    task_id,
-                    {"event": "references", "data": _json({"references": pending_references})},
-                )
             record = await self.store.get_task(task_id)
             if record is None or record["status"] == "cancel_requested":
                 raise asyncio.CancelledError
@@ -300,6 +344,69 @@ class ChatTaskManager:
                 await self._broadcast(task_id, {"event": "done", "data": "{}"})
         except Exception as exc:
             logger.exception("[AssetAgent] Chat task failed: {}", exc)
+            await self._emit_text(task_input, f"请求失败：{exc}")
+            await self.store.update_task(task_id, "failed", str(exc))
+            await self._broadcast(task_id, {"event": "done", "data": "{}"})
+        finally:
+            await self._broadcast(task_id, None)
+            self._tasks.pop(task_id, None)
+            self._subscribers.pop(task_id, None)
+            self._task_locks.pop(task_id, None)
+
+    async def respond(self, task_id: str, interaction_id: str, option_id: str) -> dict[str, Any]:
+        """Answer one pending interaction and resume the durable Agent task."""
+        record = await self.store.get_task(task_id)
+        if record is None:
+            raise KeyError("聊天任务不存在")
+        if record["status"] != "waiting_user":
+            raise ValueError("该聊天任务当前不在等待用户输入")
+        interaction = await self.store.get_interaction(interaction_id)
+        if interaction is None or interaction["task_id"] != task_id:
+            raise KeyError("交互请求不属于该聊天任务")
+        answered = await self.store.answer_interaction(interaction_id, option_id)
+        state = await self.store.get_task_state(task_id)
+        if state is None:
+            raise ValueError("聊天任务缺少恢复上下文")
+        await self.store.update_task(task_id, "running")
+        task_input = ChatTaskInput(
+            task_id=task_id,
+            conversation_id=str(state["conversation_id"]),
+            message=str(state["message"]),
+            history=list(state.get("history") or []),
+            strategy=state.get("strategy"),
+            asset_type=state.get("asset_type"),
+            assistant_message_id=str(state["assistant_message_id"]),
+        )
+        self._subscribers.setdefault(task_id, set())
+        self._task_locks.setdefault(task_id, asyncio.Lock())
+        self._tasks[task_id] = asyncio.create_task(
+            self._run_resume(task_input, answered),
+            name=f"chat-agent-resume-{task_id}",
+        )
+        return {"task_id": task_id, "status": "running", "interaction": answered}
+
+    async def _run_resume(self, task_input: ChatTaskInput, interaction: dict[str, Any]) -> None:
+        task_id = task_input.task_id
+        try:
+            await self._emit_text(task_input, "已收到你的选择，Agent 继续执行。")
+            paused = await self._consume_agent_events(
+                task_input,
+                asset_agent.resume_chat(interaction, str(interaction["selected_option"])),
+            )
+            if paused:
+                return
+            record = await self.store.get_task(task_id)
+            if record is None or record["status"] == "cancel_requested":
+                raise asyncio.CancelledError
+            if not await self.store.complete_task(task_id):
+                raise asyncio.CancelledError
+            await self._broadcast(task_id, {"event": "done", "data": "{}"})
+        except asyncio.CancelledError:
+            logger.info("[AssetAgent] Chat task resume cancelled: {}", task_id)
+            if await self.store.mark_cancelled(task_id):
+                await self._broadcast(task_id, {"event": "done", "data": "{}"})
+        except Exception as exc:
+            logger.exception("[AssetAgent] Chat task resume failed: {}", task_id)
             await self._emit_text(task_input, f"请求失败：{exc}")
             await self.store.update_task(task_id, "failed", str(exc))
             await self._broadcast(task_id, {"event": "done", "data": "{}"})

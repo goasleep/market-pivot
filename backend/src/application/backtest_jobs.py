@@ -52,8 +52,10 @@ class BacktestJobManager:
             await job.queue.put({"event": "progress", "data": event})
 
         try:
-            runner = run_pool_backtest if job.params.get("tickers") else run_backtest
-            job.result = await runner(**job.params, progress_callback=callback)
+            params = dict(job.params)
+            params.pop("mode", None)
+            runner = run_pool_backtest if params.get("tickers") or params.get("portfolio_spec") else run_backtest
+            job.result = await runner(**params, progress_callback=callback)
             job.status = "completed"
             await job.queue.put({"event": "complete", "data": job.result})
         except asyncio.CancelledError:

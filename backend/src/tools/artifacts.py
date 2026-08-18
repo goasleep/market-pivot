@@ -11,6 +11,7 @@ from langchain_core.tools import StructuredTool, tool
 from pydantic import BaseModel, Field
 
 from artifacts.service import artifact_service
+from charts.echarts import line_option, render_chart_container, render_chart_document
 
 
 def _dump(value: Any) -> str:
@@ -75,7 +76,17 @@ def build_artifact_tool(*, conversation_id: str | None = None, task_id: str | No
     )
 
 
-def _render_line_chart_svg(title: str, points: list[dict[str, Any]]) -> str:
+def _render_line_chart_html(title: str, points: list[dict[str, Any]]) -> str:
+    chart = render_chart_container(
+        "standalone-chart",
+        line_option(title, points),
+        aria_label=title or "走势",
+        height=420,
+    )
+    return render_chart_document(title or "走势", chart)
+
+
+def _legacy_render_line_chart_svg(title: str, points: list[dict[str, Any]]) -> str:
     values: list[tuple[str, float]] = []
     for point in points[:250]:
         try:
@@ -162,18 +173,19 @@ def _build_chart_artifact_tool(*, conversation_id: str | None, task_id: str | No
         ticker: str | None = None,
         asset_type: str | None = None,
     ) -> str:
-        svg = _render_line_chart_svg(title, points)
+        html_document = _render_line_chart_html(title, points)
+        output_name = name if name.lower().endswith((".html", ".htm")) else f"{name.rsplit('.', 1)[0]}.html"
         records = await asyncio.to_thread(
             artifact_service.create_user_artifacts,
             [
                 {
-                    "name": name,
-                    "format": "svg",
-                    "content": svg,
-                    "artifact_type": "image",
+                    "name": output_name,
+                    "format": "html",
+                    "content": html_document,
+                    "artifact_type": "document",
                     "ticker": ticker,
                     "asset_type": asset_type,
-                    "description": "由结构化数据生成的走势图片",
+                    "description": "由结构化数据生成的 ECharts 走势图表",
                 }
             ],
             source="chat-chart",
@@ -185,7 +197,10 @@ def _build_chart_artifact_tool(*, conversation_id: str | None, task_id: str | No
     return StructuredTool.from_function(
         coroutine=create_chart_artifact,
         name="create_chart_artifact",
-        description="把一组 label/value 数据生成 SVG 图片 artifact；适合需要独立下载的图表。",
+        description=(
+            "把一组 label/value 数据生成使用 ECharts canvas 渲染的 HTML 图表 artifact；"
+            "适合需要独立预览或下载的图表。"
+        ),
     )
 
 

@@ -1,8 +1,5 @@
 import type {
-  AnalysisResult,
-  BacktestResult,
   Portfolio,
-  SSEProgress,
   SimulationAccountConfig,
   SimulationOrder,
   SimulationBrokerStatus,
@@ -15,6 +12,10 @@ import type {
   SimulationSnapshot,
   AssetType,
   Artifact,
+  BacktestMode,
+  BacktestResult,
+  BacktestExperimentResult,
+  PortfolioSpec,
 } from "@/types";
 
 const BASE_URL = "/api";
@@ -27,57 +28,8 @@ export async function getArtifacts(limit = 100): Promise<Artifact[]> {
   return data.artifacts || [];
 }
 
-export async function runAnalysis(
-  ticker: string,
-  strategy?: string
-): Promise<AnalysisResult> {
-  const res = await fetch(`${BASE_URL}/analysis/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ticker, show_reasoning: true, strategy }),
-  });
-  if (!res.ok) throw new Error(`Analysis failed: ${res.statusText}`);
-  return res.json();
-}
-
-export function streamAnalysis(
-  ticker: string,
-  options: {
-    asset_type?: AssetType;
-    holding_period_days?: number;
-    available_capital?: number;
-    max_loss_pct?: number;
-    current_position_pct?: number;
-    entry_price?: number;
-  } = {},
-  onProgress: (data: SSEProgress) => void,
-  onComplete: (data: AnalysisResult) => void,
-  onError: (err: EventSource) => void
-): EventSource {
-  // SSE doesn't support POST, so we use a GET with query params for streaming
-  const params = new URLSearchParams({ ticker });
-  Object.entries(options).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) params.set(key, String(value));
-  });
-  const url = `${BASE_URL}/analysis/stream?${params.toString()}`;
-  const es = new EventSource(url);
-
-  es.addEventListener("progress", (e) => {
-    onProgress(JSON.parse(e.data));
-  });
-  es.addEventListener("complete", (e) => {
-    onComplete(JSON.parse(e.data));
-    es.close();
-  });
-  es.onerror = () => {
-    onError(es);
-    es.close();
-  };
-
-  return es;
-}
-
 export async function runBacktest(params: {
+  mode?: BacktestMode;
   ticker?: string;
   tickers?: string[];
   start_date: string;
@@ -86,24 +38,60 @@ export async function runBacktest(params: {
   decision_interval?: number;
   fill_time?: "next_open" | "same_close";
   strategy?: string;
+  strategy_spec?: Record<string, unknown>;
+  portfolio_spec?: PortfolioSpec;
   asset_type?: AssetType;
 }): Promise<BacktestResult> {
   const res = await fetch(`${BASE_URL}/backtest/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      ticker: params.ticker,
-      tickers: params.tickers,
-      start_date: params.start_date,
-      end_date: params.end_date,
+      ...params,
+      mode: params.mode ?? "auto",
       initial_capital: params.initial_capital ?? 1_000_000,
       decision_interval: params.decision_interval ?? 1,
       fill_time: params.fill_time ?? "next_open",
-      strategy: params.strategy,
       asset_type: params.asset_type ?? "stock",
     }),
   });
-  if (!res.ok) throw new Error(`Backtest failed: ${res.statusText}`);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Backtest failed: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function runBacktestExperiment(params: {
+  objective: string;
+  mode?: BacktestMode;
+  ticker?: string;
+  tickers?: string[];
+  start_date: string;
+  end_date: string;
+  initial_capital?: number;
+  decision_interval?: number;
+  fill_time?: "next_open" | "same_close";
+  strategy_name?: string;
+  strategy_spec?: Record<string, unknown>;
+  portfolio_spec?: PortfolioSpec;
+  asset_type?: AssetType;
+}): Promise<BacktestExperimentResult> {
+  const res = await fetch(`${BASE_URL}/backtest/experiments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...params,
+      mode: params.mode ?? "auto",
+      initial_capital: params.initial_capital ?? 1_000_000,
+      decision_interval: params.decision_interval ?? 1,
+      fill_time: params.fill_time ?? "next_open",
+      asset_type: params.asset_type ?? "stock",
+    }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Backtest experiment failed: ${res.statusText}`);
+  }
   return res.json();
 }
 
@@ -186,6 +174,17 @@ export async function validateSimulationBroker(accountId = "default"): Promise<S
     method: "POST",
   });
   if (!res.ok) throw new Error(`Failed to validate broker: ${res.statusText}`);
+  return res.json();
+}
+
+export async function syncSimulationBroker(accountId = "default"): Promise<Portfolio> {
+  const res = await fetch(`${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/broker/sync`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Failed to sync simulation broker: ${res.statusText}`);
+  }
   return res.json();
 }
 
@@ -324,22 +323,6 @@ export async function getAutomationDecisions(accountId = "default"): Promise<Age
     `/accounts/${encodeURIComponent(accountId)}/decisions`
   );
   return data.decisions;
-}
-
-export async function executeAnalysisInSimulation(
-  accountId: string,
-  decision: AnalysisResult
-): Promise<Portfolio> {
-  const res = await fetch(`${BASE_URL}/portfolio/accounts/${encodeURIComponent(accountId)}/execute-decision`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(decision),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || `Failed to execute simulation decision: ${res.statusText}`);
-  }
-  return res.json();
 }
 
 export function confirmAutomationDecision(

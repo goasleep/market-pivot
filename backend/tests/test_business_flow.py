@@ -75,6 +75,8 @@ async def test_backtest_builds_as_of_context_and_does_not_use_live_data(monkeypa
     )
 
     assert result["final_value"] == result["initial_capital"]
+    assert result["data_snapshot"]["sha256"]
+    assert result["data_snapshot"]["quality"]["status"] == "valid"
     assert contexts
     for context in contexts:
         assert context.is_backtest is True
@@ -93,7 +95,7 @@ async def test_pool_backtest_uses_one_agent_portfolio_without_live_enrichment(mo
                 "date": dates,
                 "open": [10 + offset] * 6,
                 "close": [10 + offset, 11 + offset, 11 + offset, 12 + offset, 12 + offset, 13 + offset],
-                "high": [11 + offset] * 6,
+                "high": [14 + offset] * 6,
                 "low": [9 + offset] * 6,
                 "volume": [100] * 6,
                 "pct_chg": [0] * 6,
@@ -120,6 +122,7 @@ async def test_pool_backtest_uses_one_agent_portfolio_without_live_enrichment(mo
     assert result["tickers"] == ["000001", "600519"]
     assert result["total_trades"] == 0
     assert len(result["equity_curve"]) == 6
+    assert len(result["data_snapshots"]) == 2
 
 
 def test_simulation_account_enforces_t_plus_one_and_persists(tmp_path):

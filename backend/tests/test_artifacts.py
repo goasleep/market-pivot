@@ -159,7 +159,38 @@ def test_report_embeds_history_trend_chart_when_history_is_available():
     )
 
     assert "历史收盘价趋势" in report
-    assert 'class="chart-line"' in report
+    assert "echarts.min.js" in report
+    assert 'renderer: "canvas"' in report
+    assert "<svg" not in report
     assert "2026-08-12" in report
     assert "2026-08-14" in report
     assert "[[PRICE_TREND_CHART]]" not in report
+
+
+def test_report_embeds_signal_attribution_chart_when_dashboard_is_available():
+    decision = TradeDecision(
+        ticker="510300",
+        decision=Decision.HOLD,
+        confidence=0.7,
+        reasoning="趋势观察",
+        dashboard={
+            "signal_attribution": {
+                "technical_score": 70,
+                "sentiment_score": -20,
+                "fundamental_score": 35,
+                "market_regime_score": 10,
+            }
+        },
+    )
+
+    report = render_analysis_html(
+        render_analysis_markdown(decision),
+        decision,
+        "2026-08-16T00:00:00+00:00",
+    )
+
+    assert "信号归因" in report
+    assert "signal-attribution-chart" in report
+    assert '"type":"bar"' in report
+    assert "<svg" not in report
+    assert "[[SIGNAL_ATTRIBUTION_CHART]]" not in report

@@ -6,51 +6,237 @@ from typing import Any
 
 import pandas as pd
 
-from models.schemas import AssetType, StrategyCondition, StrategySpec
+from models.schemas import AssetType, IndicatorSpec, StrategyCondition, StrategySpec
+
+SUPPORTED_INDICATORS = frozenset(
+    {
+        "close",
+        "return_pct",
+        "ma",
+        "ema",
+        "price_vs_ma_pct",
+        "volume_ratio",
+        "rsi",
+        "atr",
+        "volatility",
+    }
+)
+
+
+def available_indicators() -> list[dict[str, Any]]:
+    """Return the public indicator contract exposed to the strategy Agent."""
+    return [
+        {"name": "close", "source": "close", "requires": ["close"], "default_window": None},
+        {"name": "return_pct", "source": "close", "requires": ["close"], "default_window": 1},
+        {"name": "ma", "source": "close", "requires": ["close"], "default_window": 20},
+        {"name": "ema", "source": "close", "requires": ["close"], "default_window": 20},
+        {
+            "name": "price_vs_ma_pct",
+            "source": "close",
+            "requires": ["close"],
+            "default_window": 20,
+        },
+        {"name": "volume_ratio", "source": "volume", "requires": ["volume"], "default_window": 20},
+        {"name": "rsi", "source": "close", "requires": ["close"], "default_window": 14},
+        {"name": "atr", "source": "ohlcv", "requires": ["high", "low", "close"], "default_window": 14},
+        {
+            "name": "volatility",
+            "source": "close",
+            "requires": ["close"],
+            "default_window": 20,
+            "annualized": True,
+        },
+    ]
+
+
+def _normalize_ratio(value: Any) -> Any:
+    """Accept both fractional ratios and human-friendly percentage values."""
+    if value is None or isinstance(value, bool):
+        return value
+    try:
+        text = str(value).strip().lower().replace("percent", "").replace("百分比", "")
+        number = float(text.rstrip("%"))
+    except (TypeError, ValueError):
+        return value
+    if abs(number) > 1 and abs(number) <= 100:
+        return number / 100
+    return number
+
+
+def _normalize_indicator_specs(value: Any) -> list[dict[str, Any]]:
+    """Normalize common LLM indicator shapes into the executable list contract."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        if any(key in value for key in ("name", "indicator", "type", "metric")):
+            items: list[Any] = [value]
+        else:
+            items = [
+                {**(item if isinstance(item, dict) else {}), "name": key}
+                for key, item in value.items()
+            ]
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = [value]
+
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, str):
+            item = {"name": item}
+        elif not isinstance(item, dict):
+            item = {"name": str(item)}
+        else:
+            item = dict(item)
+        item.setdefault("name", item.get("indicator") or item.get("type") or item.get("metric") or "")
+        item.pop("indicator", None)
+        item.pop("type", None)
+        item.pop("metric", None)
+        if "window" not in item:
+            item["window"] = item.get("period") or item.get("length") or item.get("lookback")
+        if item.get("source") == "volume":
+            item["source"] = "ohlcv"
+        role_aliases = {
+            "trend": "filter",
+            "momentum": "confirmation",
+            "signal": "entry",
+            "entry_signal": "entry",
+            "exit_signal": "exit",
+            "volume": "filter",
+            "risk_management": "risk",
+            "stop_loss": "risk",
+        }
+        role = item.get("role")
+        if isinstance(role, str):
+            item["role"] = role_aliases.get(role.strip().lower(), role.strip().lower())
+        if not isinstance(item.get("params"), dict):
+            item["params"] = {}
+        normalized.append(item)
+    return normalized
+
+
+def _normalize_conditions(value: Any, *, default_operator: str) -> list[Any]:
+    """Normalize a single condition or a keyed condition mapping."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        if any(key in value for key in ("indicator", "name", "type", "metric", "operator", "value")):
+            items: list[Any] = [value]
+        else:
+            items = list(value.values())
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = [value]
+
+    normalized: list[Any] = []
+    for item in items:
+        if not isinstance(item, dict):
+            normalized.append(
+                {"indicator": "close", "operator": default_operator, "value": 0, "description": str(item)}
+            )
+            continue
+        item = dict(item)
+        item.setdefault("indicator", item.get("name") or item.get("type") or item.get("metric") or "close")
+        item.setdefault("operator", item.get("op") or default_operator)
+        item.setdefault("value", item.get("threshold") if item.get("threshold") is not None else item.get("target", 0))
+        if "window" not in item:
+            item["window"] = item.get("period") or item.get("length") or item.get("lookback")
+        item.pop("name", None)
+        item.pop("type", None)
+        item.pop("metric", None)
+        item.pop("op", None)
+        item.pop("threshold", None)
+        item.pop("target", None)
+        normalized.append(item)
+    return normalized
 
 
 def strategy_from_mapping(data: dict[str, Any], *, source: str | None = None) -> StrategySpec:
-    """Convert YAML/LLM mappings into a validated strategy definition."""
+    """Convert YAML/LLM mappings into a validated strategy definition.
+
+    The Agent contract is strict, but this boundary also accepts a few
+    unambiguous LLM variants (percentage values and keyed indicator maps) so a
+    harmless formatting difference cannot prevent an otherwise safe strategy
+    from reaching the deterministic validator.
+    """
     payload = dict(data)
     payload.setdefault("name", "generated_strategy")
     if source:
         payload["source"] = source
-    conditions = payload.get("entry_conditions", [])
-    exits = payload.get("exit_conditions", [])
-    payload["entry_conditions"] = [
-        item
-        if isinstance(item, dict)
-        else {"indicator": "close", "operator": "gt", "value": 0, "description": str(item)}
-        for item in conditions
-    ]
-    payload["exit_conditions"] = [
-        item
-        if isinstance(item, dict)
-        else {"indicator": "close", "operator": "lt", "value": 0, "description": str(item)}
-        for item in exits
-    ]
+    if isinstance(payload.get("asset_types"), str):
+        payload["asset_types"] = [payload["asset_types"]]
+    if isinstance(payload.get("indicators"), dict):
+        payload["indicators"] = list(payload["indicators"])
+    payload["indicator_specs"] = _normalize_indicator_specs(payload.get("indicator_specs"))
+    payload["entry_conditions"] = _normalize_conditions(
+        payload.get("entry_conditions"), default_operator="gt"
+    )
+    payload["exit_conditions"] = _normalize_conditions(
+        payload.get("exit_conditions"), default_operator="lt"
+    )
+    for field in ("stop_loss_pct", "take_profit_pct", "position_size_pct"):
+        if field in payload:
+            payload[field] = _normalize_ratio(payload[field])
     if not payload.get("asset_types"):
         payload["asset_types"] = [AssetType.ETF, AssetType.LOF]
-    return StrategySpec.model_validate(payload)
+    spec = StrategySpec.model_validate(payload)
+    errors = validate_strategy_spec(spec)
+    if errors:
+        raise ValueError("策略包含不受支持的指标: " + "; ".join(errors))
+    return spec
 
 
-def _indicator(history: pd.DataFrame, name: str, window: int | None) -> float | None:
+def _indicator_definition(specs: list[IndicatorSpec], name: str) -> tuple[str, int | None]:
+    normalized = name.strip().lower()
+    for spec in specs:
+        if normalized in {spec.name.lower(), (spec.alias or "").lower()}:
+            configured_window = spec.window
+            raw_window = spec.params.get("window")
+            if configured_window is None and raw_window is not None:
+                try:
+                    configured_window = int(raw_window)
+                except (TypeError, ValueError):
+                    configured_window = None
+            return spec.name.lower(), configured_window
+    if normalized.startswith(("ma", "ema")) and normalized[2:].isdigit():
+        return normalized[:2], int(normalized[2:])
+    return normalized, None
+
+
+def _indicator(
+    history: pd.DataFrame,
+    name: str,
+    window: int | None,
+    indicator_specs: list[IndicatorSpec] | None = None,
+) -> float | None:
+    canonical, configured_window = _indicator_definition(indicator_specs or [], name)
+    window = window or configured_window
     if history.empty or "close" not in history:
         return None
     close = pd.to_numeric(history["close"], errors="coerce").dropna()
     if close.empty:
         return None
-    if name == "close":
+    if canonical == "close":
         return float(close.iloc[-1])
-    if name == "return_pct":
+    if canonical == "return_pct":
         periods = window or 1
         if len(close) <= periods:
             return None
         return float((close.iloc[-1] / close.iloc[-periods - 1] - 1) * 100)
-    if name.startswith("ma"):
-        periods = window or int(name.removeprefix("ma"))
+    if canonical == "ma":
+        periods = window or 20
         return float(close.rolling(periods).mean().iloc[-1]) if len(close) >= periods else None
-    if name == "volume_ratio":
+    if canonical == "ema":
+        periods = window or 20
+        return float(close.ewm(span=periods, adjust=False).mean().iloc[-1]) if len(close) >= periods else None
+    if canonical == "price_vs_ma_pct":
+        periods = window or 20
+        if len(close) < periods:
+            return None
+        average = close.rolling(periods).mean().iloc[-1]
+        return float((close.iloc[-1] / average - 1) * 100) if average else None
+    if canonical == "volume_ratio":
         if "volume" not in history or len(history) < (window or 20):
             return None
         volume = pd.to_numeric(history["volume"], errors="coerce").dropna()
@@ -59,7 +245,67 @@ def _indicator(history: pd.DataFrame, name: str, window: int | None) -> float | 
             return None
         average = volume.tail(periods).mean()
         return float(volume.iloc[-1] / average) if average else None
+    if canonical == "rsi":
+        periods = window or 14
+        if len(close) <= periods:
+            return None
+        changes = close.diff()
+        gains = changes.clip(lower=0).rolling(periods).mean().iloc[-1]
+        losses = -changes.clip(upper=0).rolling(periods).mean().iloc[-1]
+        if losses == 0:
+            return 100.0
+        return float(100 - (100 / (1 + gains / losses)))
+    if canonical == "atr":
+        if not {"high", "low", "close"}.issubset(history.columns):
+            return None
+        periods = window or 14
+        if len(history) < periods:
+            return None
+        high = pd.to_numeric(history["high"], errors="coerce")
+        low = pd.to_numeric(history["low"], errors="coerce")
+        previous_close = pd.to_numeric(history["close"], errors="coerce").shift(1)
+        true_range = pd.concat(
+            [high - low, (high - previous_close).abs(), (low - previous_close).abs()], axis=1
+        ).max(axis=1)
+        value = true_range.rolling(periods).mean().iloc[-1]
+        return float(value) if pd.notna(value) else None
+    if canonical == "volatility":
+        periods = window or 20
+        if len(close) <= periods:
+            return None
+        returns = close.pct_change().dropna().tail(periods)
+        return float(returns.std() * (252**0.5) * 100) if len(returns) >= periods else None
     return None
+
+
+def validate_strategy_spec(
+    spec: StrategySpec,
+    *,
+    available_columns: set[str] | None = None,
+) -> list[str]:
+    """Validate indicators before a strategy is allowed to run."""
+    errors: list[str] = []
+    definitions = {item["name"].lower(): item for item in available_indicators()}
+    aliases = {
+        item.alias.lower(): item.name.lower()
+        for item in spec.indicator_specs
+        if item.alias
+    }
+    requested = [*spec.indicators, *(item.name for item in spec.indicator_specs)]
+    requested.extend(condition.indicator for condition in [*spec.entry_conditions, *spec.exit_conditions])
+    for name in requested:
+        canonical = aliases.get(name.lower(), name.lower())
+        if canonical.startswith(("ma", "ema")) and canonical[2:].isdigit():
+            canonical = canonical[:2]
+        if canonical not in definitions:
+            errors.append(name)
+            continue
+        if available_columns is not None:
+            required = set(definitions[canonical]["requires"])
+            missing = sorted(required - available_columns)
+            if missing:
+                errors.append(f"{name} 缺少字段: {', '.join(missing)}")
+    return list(dict.fromkeys(errors))
 
 
 def _matches(value: float | None, condition: StrategyCondition) -> bool:
@@ -83,12 +329,15 @@ def _matches(value: float | None, condition: StrategyCondition) -> bool:
 def evaluate_strategy(spec: StrategySpec, history: pd.DataFrame, *, asset_type: AssetType | str) -> dict[str, Any]:
     """Evaluate all conditions without any LLM call or future data."""
     asset_type = AssetType(asset_type)
+    errors = validate_strategy_spec(spec, available_columns=set(history.columns))
+    if errors:
+        return {"matched": False, "reason": "unsupported_indicator", "errors": errors, "conditions": []}
     if asset_type not in spec.asset_types:
         return {"matched": False, "reason": "asset_type_not_supported", "conditions": []}
     def evaluate_conditions(conditions: list[StrategyCondition]) -> list[dict[str, Any]]:
         results = []
         for condition in conditions:
-            value = _indicator(history, condition.indicator, condition.window)
+            value = _indicator(history, condition.indicator, condition.window, spec.indicator_specs)
             results.append(
                 {
                     "condition": condition.model_dump(mode="json"),

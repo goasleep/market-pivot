@@ -146,6 +146,13 @@ class DataCache:
             return None
         return json.loads(value_str)
 
+    def get_stale(self, key: str) -> Any | None:
+        """Read an expired cache entry for an immutable, fully historical query."""
+        row = self._database.get_cache(key)
+        if row is None:
+            return None
+        return json.loads(row[0])
+
     def set(self, key: str, value: Any):
         self._database.set_cache(key, value)
 
@@ -276,6 +283,10 @@ def get_stock_history(
 
     cache_key = f"hist:{ticker}:{start_date}:{end_date}:{adjust}"
     cached = _cache.get(cache_key, ttl=TTL_DAILY)
+    if cached is None and end_date < datetime.now().strftime("%Y%m%d"):
+        cached = _cache.get_stale(cache_key)
+        if cached is not None:
+            logger.warning(f"Using stale historical cache for immutable query: {cache_key}")
     if cached is not None:
         logger.debug(f"Cache hit: {cache_key}")
         return pd.DataFrame(cached)
@@ -618,6 +629,10 @@ def get_fund_history(
 
     cache_key = f"fund_hist:{asset_type}:{ticker}:{start_date}:{end_date}:{adjust}"
     cached = _cache.get(cache_key, ttl=TTL_DAILY)
+    if cached is None and end_date < datetime.now().strftime("%Y%m%d"):
+        cached = _cache.get_stale(cache_key)
+        if cached is not None:
+            logger.warning(f"Using stale historical cache for immutable query: {cache_key}")
     if cached is not None:
         return pd.DataFrame(cached)
     fail_key = f"fail:{cache_key}"

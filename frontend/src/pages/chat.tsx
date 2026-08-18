@@ -4,6 +4,7 @@ import {
   ChatMessage,
   type ChatMessagePart,
   type ChatMessageData,
+  type ChatInteraction,
   type ChatReference,
 } from "@/components/chat/ChatMessage";
 import type { A2UIAction, A2UIMessage } from "@/components/chat/A2UIRenderer";
@@ -122,6 +123,8 @@ const TERMINAL_TASK_STATUSES = new Set([
   "failed",
   "cancelled",
   "interrupted",
+  "waiting_user",
+  "superseded",
 ]);
 
 function waitForReconnect(delayMs: number, signal: AbortSignal): Promise<void> {
@@ -708,6 +711,11 @@ export function ChatPage() {
               type: "artifact",
               content: data.artifact as ChatMessagePart["content"],
             });
+          if (data.interaction !== undefined)
+            appendToAssistant(conversationId, assistantIndex, {
+              type: "interaction",
+              content: data.interaction as ChatInteraction,
+            });
           if (Array.isArray(data.references))
             setAssistantReferences(
               conversationId,
@@ -833,6 +841,8 @@ export function ChatPage() {
                         ? "cancelled"
                         : taskStatus === "interrupted"
                           ? "interrupted"
+                          : taskStatus === "waiting_user"
+                            ? "waiting_user"
                           : "completed",
                 }
               : message,
@@ -952,6 +962,12 @@ export function ChatPage() {
                     content: data.artifact,
                   });
                 }
+                if (data.interaction !== undefined) {
+                  appendToTask(conversationId, resumedTaskId, {
+                    type: "interaction",
+                    content: data.interaction as ChatInteraction,
+                  });
+                }
                 if (Array.isArray(data.references)) {
                   setTaskReferences(
                     conversationId,
@@ -1054,6 +1070,53 @@ export function ChatPage() {
       // Interactive surfaces remain usable locally if the action endpoint is unavailable.
     });
   }, []);
+
+  const handleInteraction = useCallback(
+    async (interaction: ChatInteraction) => {
+      if (interaction.status !== "pending" || !activeConversation) return;
+      const response = await fetch(
+        `/api/chat/tasks/${encodeURIComponent(interaction.task_id)}/respond`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            interaction_id: interaction.interaction_id,
+            option_id: interaction.selected_option,
+          }),
+        },
+      );
+      if (!response.ok) return;
+      updateConversation(activeConversation.conversationId, (item) => ({
+        ...item,
+        messages: item.messages.map((message) =>
+          message.taskId !== interaction.task_id
+            ? message
+            : {
+                ...message,
+                loading: true,
+                status: "running",
+                parts: message.parts.map((part) => {
+                  if (part.type !== "interaction") return part;
+                  const content = part.content as ChatInteraction;
+                  return content.interaction_id !== interaction.interaction_id
+                    ? part
+                    : {
+                        ...part,
+                        content: {
+                          ...content,
+                          status: "answered",
+                          selected_option: interaction.selected_option,
+                        },
+                      };
+                }),
+              },
+        ),
+        updatedAt: new Date().toISOString(),
+      }));
+      setSending(true);
+    },
+    [activeConversation, updateConversation],
+  );
 
   const regenerateMessage = useCallback(
     (messageIndex: number) => {
@@ -1287,6 +1350,7 @@ export function ChatPage() {
                   }
                   onOpenReferences={openReferences}
                   onAction={handleA2UIAction}
+                  onInteraction={handleInteraction}
                 />
               ))}
             </div>

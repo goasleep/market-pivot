@@ -10,6 +10,7 @@ import { WidgetRenderer } from "./WidgetRenderer";
 import { ArtifactCard } from "./ArtifactCard";
 import type { Artifact } from "@/types";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 import {
   Check,
   Copy,
@@ -22,9 +23,25 @@ import {
 } from "lucide-react";
 
 export interface ChatMessagePart {
-  type: "text" | "a2ui" | "widget" | "artifact";
-  content: string | A2UIMessage | A2UIMessage[] | Artifact;
+  type: "text" | "a2ui" | "widget" | "artifact" | "interaction";
+  content: string | A2UIMessage | A2UIMessage[] | Artifact | ChatInteraction;
   widgetType?: string;
+}
+
+export interface ChatInteractionOption {
+  id: string;
+  label: string;
+}
+
+export interface ChatInteraction {
+  interaction_id: string;
+  task_id: string;
+  kind: "intent_clarification" | "tool_confirmation" | string;
+  question: string;
+  options: ChatInteractionOption[];
+  status: "pending" | "answered" | "cancelled";
+  selected_option?: string | null;
+  tool?: { tool_name?: string; args?: Record<string, unknown> };
 }
 
 export interface ChatReference {
@@ -48,7 +65,9 @@ export interface ChatMessageData {
     | "completed"
     | "cancelled"
     | "failed"
-    | "interrupted";
+    | "interrupted"
+    | "waiting_user"
+    | "superseded";
   taskId?: string;
 }
 
@@ -59,6 +78,7 @@ interface ChatMessageProps {
   onRegenerate?: () => void;
   onOpenReferences?: (references: ChatReference[]) => void;
   onAction?: (action: A2UIAction) => void;
+  onInteraction?: (interaction: ChatInteraction) => void;
 }
 
 function messageText(message: ChatMessageData): string {
@@ -93,6 +113,7 @@ export function ChatMessage({
   onRegenerate,
   onOpenReferences,
   onAction,
+  onInteraction,
 }: ChatMessageProps) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
@@ -192,6 +213,34 @@ export function ChatMessage({
                 return (
                   <div key={i} className="w-full overflow-hidden rounded-lg">
                     <ArtifactCard artifact={part.content as Artifact} />
+                  </div>
+                );
+              }
+              if (part.type === "interaction") {
+                const interaction = part.content as ChatInteraction;
+                const answered = interaction.status !== "pending";
+                return (
+                  <div key={i} className="w-full rounded-xl border border-primary/30 bg-primary/5 p-4">
+                    <div className="text-sm font-medium">{interaction.question}</div>
+                    {interaction.kind === "tool_confirmation" && interaction.tool?.tool_name && (
+                      <div className="mt-2 rounded-md bg-background/70 px-3 py-2 text-xs text-muted-foreground">
+                        工具：{interaction.tool.tool_name}
+                      </div>
+                    )}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {interaction.options.map((option) => (
+                        <Button
+                          key={option.id}
+                          size="sm"
+                          variant={interaction.selected_option === option.id ? "default" : "outline"}
+                          disabled={answered}
+                          onClick={() => onInteraction?.({ ...interaction, selected_option: option.id })}
+                        >
+                          {option.label}
+                        </Button>
+                      ))}
+                    </div>
+                    {answered && <p className="mt-2 text-xs text-muted-foreground">已提交选择，Agent 将继续执行。</p>}
                   </div>
                 );
               }

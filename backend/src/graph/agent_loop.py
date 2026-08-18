@@ -7,12 +7,13 @@ import json
 import operator
 from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage, messages_from_dict, messages_to_dict
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, StateGraph
 
 from llm.service import get_llm_service
+from tools.policies import tool_requires_confirmation
 
 DEFAULT_MAX_STEPS = 100
 TOOL_TIMEOUT_SECONDS = 60
@@ -44,6 +45,8 @@ class AgentLoopState(TypedDict, total=False):
     reasoning_events: Annotated[list[dict[str, Any]], operator.add]
     final_response: str
     max_steps_reached: bool
+    pending_tool_confirmation: dict[str, Any]
+    checkpoint_messages: list[dict[str, Any]]
 
 
 def _content_text(content: Any) -> str:
@@ -100,6 +103,23 @@ async def execute_tool_calls(
     response = state["messages"][-1]
     if not isinstance(response, AIMessage):
         return {"tool_events": [{"name": "unknown", "status": "invalid model response"}]}
+
+    calls = response.tool_calls or []
+    for call in calls:
+        name = str(call.get("name", ""))
+        if tool_requires_confirmation(name):
+            args = call.get("args", {})
+            if not isinstance(args, dict):
+                args = {}
+            call_id = call.get("id", "") or f"tool-call-{state.get('step', 0)}-0"
+            return {
+                "pending_tool_confirmation": {
+                    "tool_name": name,
+                    "tool_call_id": call_id,
+                    "args": args,
+                },
+                "checkpoint_messages": messages_to_dict(state["messages"]),
+            }
 
     tool_messages: list[ToolMessage] = []
     events: list[dict[str, Any]] = []
@@ -183,6 +203,11 @@ def route_after_decision(state: AgentLoopState) -> str:
     return END
 
 
+def route_after_tools(state: AgentLoopState) -> str:
+    """Stop the graph when a tool call needs a durable user confirmation."""
+    return END if state.get("pending_tool_confirmation") else "decide"
+
+
 def build_agent_loop():
     """Compile the cyclic LLM/tool graph.
 
@@ -198,7 +223,11 @@ def build_agent_loop():
         route_after_decision,
         {"execute_tools": "execute_tools", END: END},
     )
-    graph.add_edge("execute_tools", "decide")
+    graph.add_conditional_edges(
+        "execute_tools",
+        route_after_tools,
+        {"decide": "decide", END: END},
+    )
     return graph.compile()
 
 
@@ -247,5 +276,99 @@ async def stream_agent_loop(
         },
         config=config,
         stream_mode="updates",
-    ):
+        ):
+        yield update
+
+
+async def resume_agent_loop(
+    checkpoint_messages: list[dict[str, Any]],
+    tools: list[StructuredTool],
+    pending_tool_call: dict[str, Any],
+    *,
+    approved: bool,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    config: dict[str, Any] | None = None,
+):
+    """Resume a loop after a persisted tool confirmation decision.
+
+    The checkpoint contains the model's original AI tool-call message. We
+    execute that exact call once when approved, append its observation, and
+    then re-enter the normal loop so the model can continue from the same
+    conversation state. A rejection becomes a durable tool observation and
+    never invokes the underlying tool.
+    """
+    messages = messages_from_dict(checkpoint_messages)
+    name = str(pending_tool_call.get("tool_name", ""))
+    call_id = str(pending_tool_call.get("tool_call_id", ""))
+    args = pending_tool_call.get("args", {})
+    if not isinstance(args, dict):
+        args = {}
+    if not approved:
+        result = json.dumps(
+            {"ok": False, "error": {"code": "user_denied", "message": "用户拒绝执行该工具"}},
+            ensure_ascii=False,
+        )
+        messages.append(ToolMessage(content=result, tool_call_id=call_id))
+        async for update in stream_agent_loop(messages, tools, max_steps=max_steps, config=config):
+            yield update
+        return
+
+    tool_map = {tool.name: tool for tool in tools}
+    tool = tool_map.get(name)
+    if tool is None:
+        result = json.dumps(
+            {"ok": False, "error": {"code": "unknown_tool", "message": f"未知工具: {name}"}},
+            ensure_ascii=False,
+        )
+        status = "failed"
+    else:
+        result = None
+        error_payload: dict[str, Any] | None = None
+        attempts = tool_attempts(name)
+        timeout_seconds = tool_timeout_seconds(name)
+        for attempt in range(attempts):
+            try:
+                value = await asyncio.wait_for(tool.ainvoke(args, config=config), timeout=timeout_seconds)
+                result = str(value)
+                break
+            except asyncio.TimeoutError:
+                error_payload = {
+                    "code": "tool_timeout",
+                    "message": f"工具 {name} 执行超过 {timeout_seconds} 秒",
+                    "timeout_seconds": timeout_seconds,
+                    "attempt": attempt + 1,
+                    "attempts": attempts,
+                }
+            except Exception as exc:  # Tool failures are observations, not model failures.
+                error_payload = {
+                    "code": "tool_error",
+                    "message": str(exc)[:500],
+                    "attempt": attempt + 1,
+                    "attempts": attempts,
+                }
+            if attempt + 1 < attempts:
+                await asyncio.sleep(0.2 * (attempt + 1))
+        if result is None:
+            result = json.dumps(
+                {"ok": False, "error": error_payload or {"code": "tool_error", "message": "工具执行失败"}},
+                ensure_ascii=False,
+            )
+            status = "failed"
+        else:
+            status = "completed"
+
+    messages.append(ToolMessage(content=result, tool_call_id=call_id))
+    async for update in stream_agent_loop(messages, tools, max_steps=max_steps, config=config):
+        for node_update in update.values():
+            if isinstance(node_update, dict) and status:
+                # The normal stream owns subsequent events. The synthetic
+                # tool event is emitted before it so the UI sees one audit
+                # entry for the confirmed call.
+                node_update.setdefault("tool_events", [])
+                node_update["tool_events"] = [
+                    {"name": name, "status": status, "result": result},
+                    *node_update["tool_events"],
+                ]
+                status = ""
+                break
         yield update

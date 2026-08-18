@@ -127,8 +127,51 @@ async def run_backtest(
     return _dump(
         {
             "data_type": "backtest",
-            "paper_trading": True,
+            "backtest": True,
+            "paper_trading": False,
             "result": result,
+            "provenance": provenance("akshare", freshness="historical"),
+        }
+    )
+
+
+@tool
+async def design_and_run_backtest(
+    objective: str,
+    start_date: str,
+    end_date: str,
+    ticker: str | None = None,
+    tickers: list[str] | None = None,
+    mode: str = "auto",
+    asset_type: str = "stock",
+    initial_capital: float = 1_000_000,
+    decision_interval: int = 1,
+    portfolio_spec: dict | None = None,
+) -> str:
+    """让 Agent 设计策略和组合规则，运行回测并保存完整实验报告附件。"""
+    from application.backtest_experiment import run_backtest_experiment
+
+    experiment = await run_backtest_experiment(
+        objective=objective,
+        ticker=ticker,
+        tickers=tickers,
+        mode=mode,
+        start_date=start_date,
+        end_date=end_date,
+        asset_type=asset_type,
+        initial_capital=initial_capital,
+        decision_interval=decision_interval,
+        portfolio_spec=portfolio_spec,
+    )
+    return _dump(
+        {
+            "data_type": "backtest_experiment",
+            "backtest": True,
+            "paper_trading": False,
+            "experiment_id": experiment["experiment_id"],
+            "strategy_spec": experiment["strategy_spec"],
+            "result": experiment["result"],
+            "artifacts": experiment["artifacts"],
             "provenance": provenance("akshare", freshness="historical"),
         }
     )
@@ -146,4 +189,11 @@ async def list_trading_strategies() -> str:
     )
 
 
-TOOLS = [compute_technical_indicators, calculate_risk_metrics, build_trade_plan, run_backtest, list_trading_strategies]
+TOOLS = [
+    compute_technical_indicators,
+    calculate_risk_metrics,
+    build_trade_plan,
+    run_backtest,
+    design_and_run_backtest,
+    list_trading_strategies,
+]

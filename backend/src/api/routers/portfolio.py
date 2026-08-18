@@ -8,7 +8,12 @@ from pydantic import BaseModel, Field
 
 from data.fund_provider import async_get_fund_realtime
 from data.stock_provider import async_get_stock_realtime
-from engine.broker_adapters import broker_status, live_broker_status
+from engine.broker_adapters import (
+    SimulationBrokerUnavailableError,
+    broker_status,
+    get_simulation_broker,
+    live_broker_status,
+)
 from engine.simulation_account import simulation_accounts
 from engine.simulation_events import simulation_events
 from models.schemas import (
@@ -263,6 +268,27 @@ async def validate_broker(account_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/accounts/{account_id}/broker/sync")
+async def sync_broker(account_id: str):
+    """Read the configured external simulation output files into the local mirror."""
+    try:
+        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        broker = get_simulation_broker(account.config.external)
+        snapshot = await asyncio.to_thread(broker.sync)
+        await asyncio.to_thread(simulation_accounts.apply_external_snapshot, account_id, snapshot)
+        payload = await _account_payload(account_id)
+        await _publish_account_update(
+            account_id,
+            event_type="broker.synced",
+            data={"broker": payload["broker"], "as_of": snapshot.get("as_of")},
+        )
+        return payload
+    except SimulationBrokerUnavailableError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/accounts/{account_id}/status")
 async def update_status(account_id: str, req: StatusRequest):
     try:
@@ -294,6 +320,7 @@ async def reset_default_account(account_id: str = "default"):
 async def create_order(account_id: str, req: OrderRequest):
     try:
         submitted_date = req.trade_date or date.today().isoformat()
+        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
         order = await asyncio.to_thread(
             simulation_accounts.create_order,
             account_id,
@@ -305,6 +332,19 @@ async def create_order(account_id: str, req: OrderRequest):
             submitted_date,
             asset_type=req.asset_type,
         )
+        if account.config.external.enabled and account.config.external.provider != "internal":
+            try:
+                broker = get_simulation_broker(account.config.external)
+                await asyncio.to_thread(broker.submit_order, order)
+            except SimulationBrokerUnavailableError as exc:
+                await asyncio.to_thread(simulation_accounts.cancel_order, order.order_id)
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await _publish_account_update(
+                account_id,
+                event_type="order.updated",
+                data={"order": order.model_dump(mode="json")},
+            )
+            return order.model_dump(mode="json")
         if req.fill_immediately and req.order_type == "market":
             fill_price = req.price
             if fill_price is None:
@@ -322,6 +362,8 @@ async def create_order(account_id: str, req: OrderRequest):
         return order.model_dump(mode="json")
     except HTTPException:
         raise
+    except SimulationBrokerUnavailableError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -335,9 +377,13 @@ async def list_orders(account_id: str):
 @router.post("/accounts/{account_id}/orders/{order_id}/cancel")
 async def cancel_order(account_id: str, order_id: str):
     try:
+        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
         orders = await asyncio.to_thread(simulation_accounts.list_orders, account_id)
         if not any(item.order_id == order_id for item in orders):
             raise HTTPException(status_code=404, detail="订单不属于该模拟账户")
+        if account.config.external.enabled and account.config.external.provider != "internal":
+            broker = get_simulation_broker(account.config.external)
+            await asyncio.to_thread(broker.cancel_order, order_id)
         order = await asyncio.to_thread(simulation_accounts.cancel_order, order_id)
         await _publish_account_update(
             account_id,
@@ -347,6 +393,8 @@ async def cancel_order(account_id: str, order_id: str):
         return order.model_dump(mode="json")
     except HTTPException:
         raise
+    except SimulationBrokerUnavailableError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -425,41 +473,3 @@ async def list_snapshots(account_id: str, limit: int = 100):
         max(1, min(limit, 5000)),
     )
     return {"snapshots": [snapshot.model_dump(mode="json") for snapshot in snapshots]}
-
-
-@router.post("/accounts/{account_id}/execute-decision")
-async def execute_decision(account_id: str, decision: TradeDecision, price: float | None = None):
-    account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
-    fill_price = price
-    if fill_price is None:
-        quote = await _quote(decision.ticker, decision.asset_type)
-        fill_price = float(quote.get("price", 0) or 0)
-    if fill_price <= 0:
-        raise ValueError("无法取得可执行价格")
-    issues = DecisionValidator.validate(decision, current_price=fill_price)
-    if decision.decision == Decision.BUY and issues:
-        raise ValueError("决策未通过风险校验: " + "；".join(issue.message for issue in issues))
-    shares = decision_shares(account.portfolio, account.config, decision, fill_price)
-    if decision.decision == Decision.HOLD or shares <= 0:
-        return await _account_payload(account_id)
-    order = await asyncio.to_thread(
-        simulation_accounts.create_order,
-        account_id,
-        decision.ticker,
-        decision.decision,
-        shares,
-        "market",
-        None,
-        date.today().isoformat(),
-        asset_type=decision.asset_type,
-        stop_loss=decision.stop_loss,
-        take_profit=decision.take_profit,
-    )
-    await asyncio.to_thread(simulation_accounts.fill_order, order.order_id, fill_price, date.today().isoformat())
-    payload = await _account_payload(account_id)
-    await _publish_account_update(
-        account_id,
-        event_type="agent.order.executed",
-        data={"ticker": decision.ticker, "decision": decision.decision.value, "total_value": payload["total_value"]},
-    )
-    return payload

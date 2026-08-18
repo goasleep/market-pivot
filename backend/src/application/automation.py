@@ -14,7 +14,12 @@ from application.research import research_service
 from config import settings
 from data.stock_provider import async_get_stock_history, async_get_stock_realtime
 from data.trading_calendar import is_trading_day
-from engine.broker_adapters import LiveBrokerUnavailableError, get_live_broker
+from engine.broker_adapters import (
+    LiveBrokerUnavailableError,
+    SimulationBrokerUnavailableError,
+    get_live_broker,
+    get_simulation_broker,
+)
 from engine.simulation_account import simulation_accounts
 from engine.simulation_events import simulation_events
 from engine.trading_engine import decision_shares
@@ -305,6 +310,14 @@ class AutomationService:
             stop_loss=decision.stop_loss,
             take_profit=decision.take_profit,
         )
+        if account.config.external.enabled and account.config.external.provider != "internal":
+            try:
+                broker = get_simulation_broker(account.config.external)
+                await asyncio.to_thread(broker.submit_order, order)
+            except SimulationBrokerUnavailableError as exc:
+                await asyncio.to_thread(simulation_accounts.cancel_order, order.order_id)
+                return "rejected", str(exc), order.order_id
+            return "approved", "订单已写入东方财富文件单，等待终端回报", order.order_id
         if config.fill_time == "same_close":
             order = await asyncio.to_thread(simulation_accounts.fill_order, order.order_id, price, trade_date)
         return (
@@ -438,7 +451,9 @@ class AutomationService:
             0,
             True,
         )
-        if order_id and config.execution_mode != "live" and config.fill_time == "manual":
+        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        uses_external = account.config.external.enabled and account.config.external.provider != "internal"
+        if order_id and config.execution_mode != "live" and not uses_external and config.fill_time == "manual":
             filled_order = await asyncio.to_thread(
                 simulation_accounts.fill_order,
                 order_id,
@@ -469,8 +484,33 @@ class AutomationService:
         task = await asyncio.to_thread(automation_store.get_task, account_id)
         if task["config"].execution_mode == "live":
             return await self.sync_live_account(account_id)
+        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        if account.config.external.enabled and account.config.external.provider != "internal":
+            return await self.sync_external_account(account_id)
         async with self._lock_for(account_id):
             return await self._settle_account(account_id, settlement_date, prices, open_prices)
+
+    async def sync_external_account(self, account_id: str) -> dict:
+        """Read an external paper account and mirror it into the local UI model."""
+        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        try:
+            broker = get_simulation_broker(account.config.external)
+            snapshot = await asyncio.to_thread(broker.sync)
+            await asyncio.to_thread(simulation_accounts.apply_external_snapshot, account_id, snapshot)
+        except SimulationBrokerUnavailableError as exc:
+            raise ValueError(str(exc)) from exc
+        payload = {
+            "account_id": account_id,
+            "mode": "external_simulation",
+            "provider": account.config.external.provider,
+            "as_of": snapshot.get("as_of"),
+            "positions": len(snapshot.get("positions", [])),
+            "orders": len(snapshot.get("orders", [])),
+            "trades": len(snapshot.get("trades", [])),
+        }
+        await asyncio.to_thread(automation_store.add_event, account_id, "external.sync", payload)
+        await simulation_events.publish(account_id, "external.sync", payload)
+        return {**payload, "sync": snapshot}
 
     async def sync_live_account(self, account_id: str) -> dict:
         """Reconcile live broker state without applying paper fills locally."""

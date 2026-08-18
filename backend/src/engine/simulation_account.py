@@ -29,6 +29,7 @@ from models.schemas import (
     SimulationAccountConfig,
     SimulationOrder,
     SimulationSnapshot,
+    TradeRecord,
 )
 
 ACCOUNT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -232,6 +233,127 @@ class SimulationAccountService:
         with self._lock, self._connect() as connection:
             self._save_account(account, connection)
         return account
+
+    def apply_external_snapshot(self, account_id: str, snapshot: dict) -> SimulationAccount:
+        """Mirror an external paper account and reconcile its local order IDs."""
+        if not isinstance(snapshot, dict) or snapshot.get("cash") is None:
+            raise ValueError("外部模拟同步缺少 cash")
+        cash = float(snapshot["cash"])
+        if cash < 0:
+            raise ValueError("外部模拟同步返回的 cash 不能为负数")
+
+        account = self.get_account(account_id)
+        previous_positions = {item.ticker: item for item in account.portfolio.positions}
+        positions = []
+        for item in snapshot.get("positions", []):
+            ticker = (
+                str(item.get("ticker", ""))
+                .strip()
+                .lower()
+                .removeprefix("sh")
+                .removeprefix("sz")
+                .removeprefix("bj")
+                .zfill(6)
+            )
+            shares = int(item.get("shares", 0) or 0)
+            if not ticker or shares <= 0:
+                continue
+            previous = previous_positions.get(ticker)
+            positions.append(
+                Position(
+                    ticker=ticker,
+                    asset_type=account.config.asset_type,
+                    shares=shares,
+                    avg_cost=float(item.get("avg_cost", 0) or 0),
+                    current_price=float(item.get("current_price", 0) or 0),
+                    available_shares=max(0, min(shares, int(item.get("available_shares", shares) or 0))),
+                    frozen_shares=max(0, min(shares, int(item.get("frozen_shares", 0) or 0))),
+                    stop_loss=previous.stop_loss if previous else None,
+                    take_profit=previous.take_profit if previous else None,
+                )
+            )
+
+        existing_external_ids = {trade.external_id for trade in account.portfolio.trades if trade.external_id}
+        for item in snapshot.get("trades", []):
+            external_id = str(item.get("external_id", "")).strip()
+            shares = int(item.get("shares", 0) or 0)
+            price = float(item.get("price", 0) or 0)
+            if not external_id or external_id in existing_external_ids or shares <= 0 or price <= 0:
+                continue
+            account.portfolio.trades.append(
+                TradeRecord(
+                    date=str(item.get("date") or snapshot.get("as_of") or account.current_date),
+                    action=Decision(str(item.get("action", "buy"))),
+                    ticker=(
+                        str(item.get("ticker", ""))
+                        .strip()
+                        .lower()
+                        .removeprefix("sh")
+                        .removeprefix("sz")
+                        .removeprefix("bj")
+                        .zfill(6)
+                    ),
+                    asset_type=account.config.asset_type,
+                    shares=shares,
+                    price=price,
+                    amount=float(item.get("amount", 0) or shares * price),
+                    external_id=external_id,
+                )
+            )
+            existing_external_ids.add(external_id)
+
+        account.portfolio.cash = cash
+        account.portfolio.positions = positions
+        snapshot_date = str(snapshot.get("as_of") or "")[:10]
+        if snapshot_date:
+            account.current_date = snapshot_date
+
+        with self._lock, self._connect() as connection:
+            self._reconcile_external_orders(snapshot.get("orders", []), connection)
+            self._save_account(account, connection)
+            if snapshot_date:
+                synced_snapshot = SimulationSnapshot(
+                    account_id=account_id,
+                    date=snapshot_date,
+                    cash=account.portfolio.cash,
+                    total_value=account.portfolio.total_value,
+                    total_pnl=account.portfolio.total_pnl,
+                    total_return_pct=account.portfolio.total_return_pct,
+                    positions=account.portfolio.positions,
+                )
+                connection.execute(
+                    "INSERT OR REPLACE INTO simulation_snapshots "
+                    "(account_id, snapshot_date, snapshot_json, created_at) VALUES (?, ?, ?, ?)",
+                    (account_id, snapshot_date, _json(synced_snapshot), _now()),
+                )
+        return account
+
+    @staticmethod
+    def _reconcile_external_orders(orders: list[dict], connection: sqlite3.Connection) -> None:
+        """Apply Eastmoney status rows to local orders identified by ``sid``."""
+        for remote in orders:
+            sid = str(remote.get("sid", "")).strip()
+            if not sid:
+                continue
+            row = connection.execute(
+                "SELECT * FROM simulation_orders WHERE order_id = ?",
+                (sid,),
+            ).fetchone()
+            if row is None:
+                continue
+            order = SimulationOrder.model_validate(json.loads(row["order_json"]))
+            status = remote.get("status")
+            if status in {"pending", "cancelled", "rejected", "filled"}:
+                order.status = status
+            if status == "filled":
+                order.fill_price = float(remote.get("fill_price") or 0) or order.fill_price
+                order.fill_date = str(remote.get("fill_date") or "")[:10] or order.fill_date
+            if remote.get("reject_reason"):
+                order.reject_reason = str(remote["reject_reason"])
+            connection.execute(
+                "UPDATE simulation_orders SET status = ?, order_json = ?, updated_at = ? WHERE order_id = ?",
+                (order.status, _json(order), _now(), sid),
+            )
 
     def reset_account(self, account_id: str = "default") -> SimulationAccount:
         account = self.get_account(account_id)

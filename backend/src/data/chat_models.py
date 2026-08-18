@@ -80,6 +80,36 @@ class ChatTaskEvent(Model):
         unique_together = (("task_id", "sequence"),)
 
 
+class ChatTaskState(Model):
+    """Durable request/checkpoint state used when a chat task is waiting."""
+
+    task_id = fields.CharField(max_length=255, primary_key=True)
+    state_json = fields.TextField()
+    updated_at = fields.CharField(max_length=64)
+
+    class Meta:
+        table = "chat_task_states"
+
+
+class ChatTaskInteraction(Model):
+    """A persisted user decision required before a task can continue."""
+
+    interaction_id = fields.CharField(max_length=255, primary_key=True)
+    task_id = fields.CharField(max_length=255, db_index=True)
+    kind = fields.CharField(max_length=64)
+    question = fields.TextField()
+    options_json = fields.TextField()
+    payload_json = fields.TextField()
+    status = fields.CharField(max_length=32, default="pending")
+    selected_option = fields.CharField(max_length=128, null=True)
+    created_at = fields.CharField(max_length=64)
+    responded_at = fields.CharField(max_length=64, null=True)
+
+    class Meta:
+        table = "chat_task_interactions"
+        indexes = (("task_id", "status"),)
+
+
 class ChatMessageReference(Model):
     """Message references using the legacy composite key."""
 
@@ -98,6 +128,8 @@ __models__ = [
     ChatConversation,
     ChatMessage,
     ChatTask,
+    ChatTaskState,
+    ChatTaskInteraction,
     ChatMessageSearch,
     ChatTaskEvent,
     ChatMessageReference,

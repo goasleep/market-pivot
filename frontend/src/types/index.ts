@@ -57,9 +57,21 @@ export interface Artifact {
   download_url: string;
 }
 
+export type BacktestMode = "auto" | "single" | "pool" | "portfolio";
+
+export interface PortfolioSpec {
+  allocation_method: "equal_weight";
+  rebalance_frequency: "daily" | "weekly" | "monthly" | "manual";
+  max_position_weight: number;
+  max_positions: number;
+  cash_reserve: number;
+}
+
 export interface BacktestResult {
   ticker: string;
+  mode?: "single" | "pool" | "portfolio";
   tickers?: string[];
+  asset_type: AssetType;
   start_date: string;
   end_date: string;
   initial_capital: number;
@@ -73,6 +85,27 @@ export interface BacktestResult {
   total_trades: number;
   equity_curve: { date: string; value: number }[];
   trades: TradeRecord[];
+  strategy_spec?: Record<string, unknown> | null;
+  portfolio_spec?: PortfolioSpec | null;
+  portfolio_history?: Array<Record<string, unknown>>;
+  target_weights_history?: Array<Record<string, unknown>>;
+  symbol_metrics?: Array<Record<string, unknown>>;
+  data_snapshot?: Record<string, unknown> | null;
+  data_snapshots?: Record<string, unknown>[];
+  data_rejections?: Array<Record<string, unknown>>;
+  buy_hold_return?: number;
+  error?: string | null;
+}
+
+export interface BacktestExperimentResult {
+  experiment_id: string;
+  status: string;
+  objective: string;
+  mode?: BacktestMode;
+  strategy_spec: Record<string, unknown>;
+  portfolio_spec?: PortfolioSpec | null;
+  result: BacktestResult;
+  artifacts: Artifact[];
 }
 
 export interface TradeRecord {
@@ -85,6 +118,7 @@ export interface TradeRecord {
   amount: number;
   commission?: number;
   tax?: number;
+  external_id?: string | null;
 }
 
 export interface Position {
@@ -163,11 +197,13 @@ export interface SimulationEvent {
 }
 
 export interface ExternalSimulationConfig {
-  provider: "internal" | "eastmoney_emt" | "juejin" | "joinquant" | "ricequant" | "custom";
+  provider: "internal" | "eastmoney_emt" | "eastmoney_file" | "juejin" | "joinquant" | "ricequant" | "custom";
   enabled: boolean;
   simulation_only: boolean;
   endpoint: string;
   account_id: string;
+  input_dir: string;
+  output_dir: string;
   token_set: boolean;
   token_masked: string;
   options: Record<string, unknown>;
@@ -286,11 +322,6 @@ export interface AgentDecisionAudit {
   risk_reason: string | null;
   order_id: string | null;
   created_at: string;
-}
-
-export interface SSEProgress {
-  stage: string;
-  message: string;
 }
 
 // --- Chat / A2UI types ---

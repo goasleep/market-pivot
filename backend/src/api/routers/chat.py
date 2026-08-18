@@ -42,6 +42,11 @@ class A2UIActionRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class ChatInteractionResponse(BaseModel):
+    interaction_id: str = Field(..., min_length=1, max_length=255)
+    option_id: str = Field(..., min_length=1, max_length=128)
+
+
 @router.post("/send")
 async def chat_send(req: ChatRequest):
     """Create a durable Agent task and stream its events to this subscriber."""
@@ -55,6 +60,8 @@ async def chat_send(req: ChatRequest):
             task_id=task_id,
             message=req.message,
             history=history,
+            strategy=req.strategy,
+            asset_type=req.asset_type.value if req.asset_type else None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -74,6 +81,17 @@ async def chat_send(req: ChatRequest):
             yield event
 
     return EventSourceResponse(event_generator())
+
+
+@router.post("/tasks/{task_id}/respond")
+async def respond_chat_task(task_id: str, req: ChatInteractionResponse):
+    """Answer a persisted Agent interaction and resume the same task."""
+    try:
+        return await chat_task_manager.respond(task_id, req.interaction_id, req.option_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/tasks/{task_id}/cancel")

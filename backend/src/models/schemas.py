@@ -172,6 +172,17 @@ class StrategyCondition(BaseModel):
     description: str = ""
 
 
+class IndicatorSpec(BaseModel):
+    """A bounded, auditable indicator requested by an Agent strategy."""
+
+    name: str
+    alias: str | None = None
+    source: Literal["close", "ohlcv"] = "close"
+    window: int | None = Field(default=None, ge=1)
+    role: Literal["entry", "exit", "filter", "confirmation", "risk"] = "filter"
+    params: dict[str, float | int | str] = Field(default_factory=dict)
+
+
 class StrategySpec(BaseModel):
     """Versioned strategy definition produced by YAML or an LLM."""
 
@@ -180,6 +191,7 @@ class StrategySpec(BaseModel):
     description: str = ""
     asset_types: list[AssetType] = Field(default_factory=lambda: [AssetType.ETF, AssetType.LOF])
     indicators: list[str] = Field(default_factory=list)
+    indicator_specs: list[IndicatorSpec] = Field(default_factory=list)
     entry_conditions: list[StrategyCondition] = Field(default_factory=list)
     exit_conditions: list[StrategyCondition] = Field(default_factory=list)
     stop_loss_pct: float | None = Field(default=None, ge=0, le=1)
@@ -187,6 +199,16 @@ class StrategySpec(BaseModel):
     position_size_pct: float = Field(default=0.2, ge=0, le=1)
     rebalance_frequency: Literal["daily", "weekly", "manual"] = "daily"
     source: Literal["yaml", "llm", "user"] = "yaml"
+
+
+class PortfolioSpec(BaseModel):
+    """Deterministic portfolio construction rules for multi-asset backtests."""
+
+    allocation_method: Literal["equal_weight"] = "equal_weight"
+    rebalance_frequency: Literal["daily", "weekly", "monthly", "manual"] = "weekly"
+    max_position_weight: float = Field(default=0.4, gt=0.0, le=1.0)
+    max_positions: int = Field(default=3, ge=1, le=100)
+    cash_reserve: float = Field(default=0.1, ge=0.0, lt=1.0)
 
 
 class BattlePlan(TradePlan):
@@ -365,6 +387,7 @@ class TradeRecord(BaseModel):
     amount: float
     commission: float = 0.0
     tax: float = 0.0
+    external_id: str | None = None
 
 
 class Position(BaseModel):
@@ -429,16 +452,12 @@ class PortfolioState(BaseModel):
 
 
 class ExternalSimulationConfig(BaseModel):
-    """Configuration reserved for an external paper-trading provider.
-
-    The current implementation stores this configuration but does not connect
-    to a remote provider. A broker adapter can be enabled later without
-    changing the account model or Agent workflow.
-    """
+    """Configuration for an external paper-trading provider."""
 
     provider: Literal[
         "internal",
         "eastmoney_emt",
+        "eastmoney_file",
         "juejin",
         "joinquant",
         "ricequant",
@@ -449,6 +468,8 @@ class ExternalSimulationConfig(BaseModel):
     endpoint: str = ""
     account_id: str = ""
     token: str = ""
+    input_dir: str = ""
+    output_dir: str = ""
     options: dict[str, Any] = Field(default_factory=dict)
 
 

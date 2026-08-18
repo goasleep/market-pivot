@@ -6,7 +6,7 @@ delegating analysis to the existing multi-agent LangGraph workflow.
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Sequence
 
@@ -14,7 +14,7 @@ from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
 
 from application.research import research_service
-from graph.agent_loop import stream_agent_loop
+from graph.agent_loop import resume_agent_loop, stream_agent_loop
 from models.schemas import AssetType
 from observability import build_trace_config
 from tools.registry import build_artifact_tools, build_chat_tools
@@ -61,10 +61,15 @@ class AssetAgentRequest:
     strategy: str | None = None
     conversation_id: str | None = None
     task_id: str | None = None
+    allow_mutating_tools: bool = False
+    intent_confirmed: bool = False
 
     @property
     def ticker(self) -> str | None:
         return self.tickers[0] if self.tickers else None
+
+    def with_intent(self, intent: AssetIntent) -> "AssetAgentRequest":
+        return replace(self, intent=intent, intent_confirmed=True)
 
 
 class AssetAgent:
@@ -146,6 +151,69 @@ class AssetAgent:
             return AssetIntent.ANALYZE
         return AssetIntent.HELP
 
+    def _matched_intents(self, message: str) -> list[AssetIntent]:
+        text = f" {message.lower()} "
+        matches: list[AssetIntent] = []
+        for intent in (
+            AssetIntent.BACKTEST,
+            AssetIntent.COMPARE,
+            AssetIntent.NEWS,
+            AssetIntent.HISTORY,
+            AssetIntent.QUOTE,
+            AssetIntent.STRATEGIES,
+            AssetIntent.PORTFOLIO,
+            AssetIntent.ANALYZE,
+        ):
+            if any(keyword in text for keyword in self._keyword_groups[intent]):
+                matches.append(intent)
+        return matches
+
+    @staticmethod
+    def _explicitly_requests_mutation(message: str) -> bool:
+        return bool(
+            re.search(
+                r"(?:下单|提交(?:模拟)?订单|创建(?:模拟)?订单|取消订单|买入(?:模拟)?单|卖出(?:模拟)?单)",
+                message or "",
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def resolve_intent(self, request: AssetAgentRequest) -> tuple[AssetAgentRequest, dict[str, Any] | None]:
+        """Resolve unambiguous intent or return a choice request before tools run."""
+        if request.intent_confirmed:
+            return request, None
+        matches = self._matched_intents(request.message)
+        if len(matches) == 1:
+            return request.with_intent(matches[0]), None
+        if len(matches) == 0 and not request.tickers:
+            return request.with_intent(AssetIntent.HELP), None
+        if len(matches) == 0 and request.tickers:
+            matches = [AssetIntent.QUOTE, AssetIntent.HISTORY, AssetIntent.ANALYZE, AssetIntent.BACKTEST]
+        elif AssetIntent.COMPARE in matches and len(matches) > 1:
+            matches = [AssetIntent.COMPARE]
+        options = [
+            {
+                "id": intent.value,
+                "label": {
+                    AssetIntent.QUOTE: "查询实时行情",
+                    AssetIntent.HISTORY: "查看历史走势",
+                    AssetIntent.ANALYZE: "进行交易分析",
+                    AssetIntent.BACKTEST: "进行历史回测",
+                    AssetIntent.NEWS: "查看最新资讯",
+                    AssetIntent.COMPARE: "进行标的对比",
+                    AssetIntent.STRATEGIES: "查看交易策略",
+                    AssetIntent.PORTFOLIO: "查看模拟账户",
+                }.get(intent, intent.value),
+            }
+            for intent in matches
+        ]
+        ticker_label = "、".join(request.tickers) if request.tickers else "当前请求"
+        return request, {
+            "kind": "intent_clarification",
+            "question": f"你希望对 {ticker_label} 做哪类处理？",
+            "options": options,
+        }
+
     @staticmethod
     def _infer_asset_type(message: str, history: Sequence[dict[str, str]]) -> AssetType:
         text = " ".join([message, *(item.get("content", "") for item in history[-6:])]).lower()
@@ -178,6 +246,37 @@ class AssetAgent:
             strategy=kwargs.get("strategy"),
             conversation_id=kwargs.get("conversation_id"),
             task_id=kwargs.get("task_id"),
+            allow_mutating_tools=self._explicitly_requests_mutation(message),
+        )
+
+    @staticmethod
+    def request_payload(request: AssetAgentRequest) -> dict[str, Any]:
+        return {
+            "message": request.message,
+            "history": request.history,
+            "intent": request.intent.value,
+            "tickers": list(request.tickers),
+            "asset_type": request.asset_type.value,
+            "strategy": request.strategy,
+            "conversation_id": request.conversation_id,
+            "task_id": request.task_id,
+            "allow_mutating_tools": request.allow_mutating_tools,
+            "intent_confirmed": request.intent_confirmed,
+        }
+
+    @staticmethod
+    def request_from_payload(payload: dict[str, Any]) -> AssetAgentRequest:
+        return AssetAgentRequest(
+            message=str(payload.get("message", "")),
+            history=list(payload.get("history") or []),
+            intent=AssetIntent(str(payload.get("intent", AssetIntent.ANALYZE.value))),
+            tickers=tuple(str(item) for item in payload.get("tickers", []) if item),
+            asset_type=AssetType(str(payload.get("asset_type", AssetType.STOCK.value))),
+            strategy=payload.get("strategy"),
+            conversation_id=payload.get("conversation_id"),
+            task_id=payload.get("task_id"),
+            allow_mutating_tools=bool(payload.get("allow_mutating_tools", False)),
+            intent_confirmed=bool(payload.get("intent_confirmed", False)),
         )
 
     def _analysis_tool(
@@ -248,6 +347,14 @@ class AssetAgent:
         progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Run the LangGraph LLM/tool loop and stream its trace to the UI."""
+        request, clarification = self.resolve_intent(request)
+        if clarification:
+            yield {
+                "type": "interaction_required",
+                **clarification,
+                "resume": {"request": self.request_payload(request)},
+            }
+            return
         tools = build_chat_tools(
             self._analysis_tool(
                 progress_callback,
@@ -258,9 +365,10 @@ class AssetAgent:
                 conversation_id=request.conversation_id,
                 task_id=request.task_id,
             ),
+            allow_mutating_tools=request.allow_mutating_tools,
         )
         system = (
-            "你是 A-Share Agent 的对话入口。你必须自行判断用户意图，并在需要事实数据时调用工具；"
+            "你是 A-Share Agent 的对话入口。用户意图已经通过系统闸门确认，你只执行该意图范围内的任务；"
             "禁止根据记忆编造行情、历史价格或新闻。行情、历史、新闻、对比和策略都必须通过工具获取。"
             "当前价格、历史价格、成交量、净值、折溢价、技术指标和候选筛选属于结构化市场数据，"
             "必须使用行情、历史或筛选工具，不能用网页摘要代替。"
@@ -304,6 +412,23 @@ class AssetAgent:
             for node_update in update.values():
                 if not isinstance(node_update, dict):
                     continue
+                if node_update.get("pending_tool_confirmation"):
+                    yield {
+                        "type": "interaction_required",
+                        "kind": "tool_confirmation",
+                        "question": "Agent 准备执行一个需要用户确认的工具操作，是否继续？",
+                        "options": [
+                            {"id": "approve", "label": "确认执行"},
+                            {"id": "reject", "label": "取消执行"},
+                        ],
+                        "resume": {
+                            "request": self.request_payload(request),
+                            "checkpoint_messages": node_update.get("checkpoint_messages", []),
+                            "pending_tool_call": node_update["pending_tool_confirmation"],
+                        },
+                        "tool": node_update["pending_tool_confirmation"],
+                    }
+                    return
                 for event in node_update.get("tool_events", []):
                     if event.get("name") in {"run_fund_or_stock_analysis", "save_artifacts"}:
                         try:
@@ -325,6 +450,81 @@ class AssetAgent:
         if final_response:
             text = _compact_generated_report(final_response) if artifacts_generated else final_response
             yield {"type": "text", "text": text}
+
+    async def resume_chat(
+        self,
+        interaction: dict[str, Any],
+        option_id: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Resume a persisted clarification or tool confirmation."""
+        payload = interaction.get("payload") or {}
+        request_payload = payload.get("request") or {}
+        request = self.request_from_payload(request_payload)
+        if interaction.get("kind") == "intent_clarification":
+            request = request.with_intent(AssetIntent(option_id))
+            async for event in self.chat(request):
+                yield event
+            return
+
+        if interaction.get("kind") != "tool_confirmation":
+            raise ValueError(f"不支持的交互类型: {interaction.get('kind')}")
+        tools = build_chat_tools(
+            self._analysis_tool(
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+            ),
+            artifact_tools=build_artifact_tools(
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+            ),
+            allow_mutating_tools=request.allow_mutating_tools,
+        )
+        approved = option_id == "approve"
+        async for update in resume_agent_loop(
+            payload.get("checkpoint_messages") or [],
+            tools,
+            payload.get("pending_tool_call") or {},
+            approved=approved,
+            max_steps=100,
+            config=build_trace_config(
+                "asset-agent-chat-resume",
+                tags=["asset-agent", "chat", request.intent.value],
+                metadata={"intent": request.intent.value, "task_id": request.task_id or ""},
+                session_id=request.conversation_id,
+            ),
+        ):
+            for node_update in update.values():
+                if not isinstance(node_update, dict):
+                    continue
+                if node_update.get("pending_tool_confirmation"):
+                    yield {
+                        "type": "interaction_required",
+                        "kind": "tool_confirmation",
+                        "question": "Agent 准备执行一个需要用户确认的工具操作，是否继续？",
+                        "options": [
+                            {"id": "approve", "label": "确认执行"},
+                            {"id": "reject", "label": "取消执行"},
+                        ],
+                        "resume": {
+                            "request": self.request_payload(request),
+                            "checkpoint_messages": node_update.get("checkpoint_messages", []),
+                            "pending_tool_call": node_update["pending_tool_confirmation"],
+                        },
+                        "tool": node_update["pending_tool_confirmation"],
+                    }
+                    return
+                for event in node_update.get("tool_events", []):
+                    yield {
+                        "type": "tool",
+                        "name": event.get("name", "unknown"),
+                        "status": event.get("status", "completed"),
+                        "result": event.get("result", ""),
+                    }
+                for event in node_update.get("reasoning_events", []):
+                    if isinstance(event, dict) and event.get("text"):
+                        yield {"type": "reasoning", "text": str(event["text"])}
+                if node_update.get("final_response"):
+                    yield {"type": "text", "text": str(node_update["final_response"])}
 
     async def analyze(
         self,

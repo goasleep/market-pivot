@@ -12,6 +12,7 @@ import {
   updateLiveTradingConfig,
   updateSimulationConfig,
   validateSimulationBroker,
+  syncSimulationBroker,
   openSimulationStream,
   getSimulationSnapshots,
 } from "@/api";
@@ -89,13 +90,11 @@ export function PortfolioPage() {
     setMessage(null);
     try {
       let updated = await updateSimulationConfig(portfolio.account_id, configDraft);
-      if (externalToken.trim()) {
-        updated = await updateExternalSimulationConfig(portfolio.account_id, {
-          ...configDraft.external,
-          token: externalToken.trim(),
-        });
-        setExternalToken("");
-      }
+      updated = await updateExternalSimulationConfig(portfolio.account_id, {
+        ...configDraft.external,
+        ...(externalToken.trim() ? { token: externalToken.trim() } : {}),
+      });
+      setExternalToken("");
       if (liveToken.trim()) {
         updated = await updateLiveTradingConfig(portfolio.account_id, {
           ...configDraft.live,
@@ -149,7 +148,13 @@ export function PortfolioPage() {
       });
       setOrder({ ...order, ticker: "", price: "" });
       await fetchPortfolio();
-      setMessage(created.status === "filled" ? "模拟订单已提交并成交" : "模拟订单已提交，等待日级撮合");
+      setMessage(
+        portfolio.broker.provider === "eastmoney_file"
+          ? "订单已写入东方财富文件单，等待终端成交回报"
+          : created.status === "filled"
+            ? "模拟订单已提交并成交"
+            : "模拟订单已提交，等待日级撮合"
+      );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "模拟下单失败");
     } finally {
@@ -167,6 +172,22 @@ export function PortfolioPage() {
       setMessage(broker.message);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "验证东方财富 EMT 配置失败");
+    } finally {
+      setValidatingBroker(false);
+    }
+  };
+
+  const handleSyncBroker = async () => {
+    if (!portfolio) return;
+    setValidatingBroker(true);
+    setMessage(null);
+    try {
+      const updated = await syncSimulationBroker(portfolio.account_id);
+      setPortfolio(updated);
+      setConfigDraft(cloneConfig(updated.config));
+      setMessage("东方财富文件单已同步");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "同步东方财富文件单失败");
     } finally {
       setValidatingBroker(false);
     }
@@ -237,7 +258,7 @@ export function PortfolioPage() {
 
       <Card>
         <CardHeader><CardTitle className="text-base">模拟账户配置</CardTitle>
-          <CardDescription>当前默认使用 FastAPI Web-native 日级模拟盘；不依赖 EMT 或桌面端柜台。</CardDescription></CardHeader>
+          <CardDescription>当前默认使用 FastAPI Web-native 日级模拟盘；也可以切换到东方财富文件单仿真账户。</CardDescription></CardHeader>
         <CardContent className="space-y-5">
           <div className="grid gap-4 md:grid-cols-3">
             <div className="space-y-2"><Label>账户名称</Label><Input value={configDraft.name} onChange={(e) => setConfig({ name: e.target.value })} /></div>
@@ -257,21 +278,23 @@ export function PortfolioPage() {
           </div>
 
           <div className="rounded-md border p-4">
-            <p className="mb-3 text-sm font-medium">外部模拟平台（预留）</p>
+            <p className="mb-3 text-sm font-medium">外部模拟平台</p>
             <div className="grid gap-4 md:grid-cols-3">
               <div className="space-y-2"><Label>Provider</Label>
                 <select className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm" value={configDraft.external.provider} onChange={(e) => setConfig({ external: { ...configDraft.external, provider: e.target.value as SimulationAccountConfig["external"]["provider"] } })}>
-                  <option value="internal">FastAPI Web 日级模拟</option><option value="eastmoney_emt">东方财富 EMT（预留）</option><option value="juejin">掘金（预留）</option><option value="joinquant">聚宽（预留）</option><option value="ricequant">米筐（预留）</option><option value="custom">custom（预留）</option>
+                  <option value="internal">FastAPI Web 日级模拟</option><option value="eastmoney_file">东方财富文件单仿真</option><option value="eastmoney_emt">东方财富 EMT（预留）</option><option value="juejin">掘金（预留）</option><option value="joinquant">聚宽（预留）</option><option value="ricequant">米筐（预留）</option><option value="custom">custom（预留）</option>
                 </select>
               </div>
-              <div className="space-y-2"><Label>Endpoint</Label><Input value={configDraft.external.endpoint} onChange={(e) => setConfig({ external: { ...configDraft.external, endpoint: e.target.value } })} /></div>
+              <div className="space-y-2"><Label>{configDraft.external.provider === "eastmoney_file" ? "文件单输入目录" : "Endpoint"}</Label><Input value={configDraft.external.provider === "eastmoney_file" ? configDraft.external.input_dir : configDraft.external.endpoint} onChange={(e) => setConfig({ external: { ...configDraft.external, ...(configDraft.external.provider === "eastmoney_file" ? { input_dir: e.target.value } : { endpoint: e.target.value }) } })} placeholder={configDraft.external.provider === "eastmoney_file" ? "例如 C:\\eastmoney\\scan_order" : ""} /></div>
               <div className="space-y-2"><Label>外部账户 ID</Label><Input value={configDraft.external.account_id} onChange={(e) => setConfig({ external: { ...configDraft.external, account_id: e.target.value } })} /></div>
+              {configDraft.external.provider === "eastmoney_file" && <div className="space-y-2"><Label>文件单输出目录</Label><Input value={configDraft.external.output_dir} onChange={(e) => setConfig({ external: { ...configDraft.external, output_dir: e.target.value } })} placeholder="例如 C:\\eastmoney\\push" /></div>}
               <div className="space-y-2"><Label>Token</Label><Input type="password" placeholder={configDraft.external.token_set ? `已配置：${configDraft.external.token_masked}` : "仅在接入时填写"} value={externalToken} onChange={(e) => setExternalToken(e.target.value)} /></div>
               <div className="flex items-end gap-2"><input id="external-enabled" type="checkbox" checked={configDraft.external.enabled} onChange={(e) => setConfig({ external: { ...configDraft.external, enabled: e.target.checked } })} /><Label htmlFor="external-enabled">启用外部 Adapter 配置</Label></div>
               <div className="flex items-end gap-2"><input id="simulation-only" type="checkbox" checked={configDraft.external.simulation_only} onChange={(e) => setConfig({ external: { ...configDraft.external, simulation_only: e.target.checked } })} /><Label htmlFor="simulation-only">仅允许模拟账户</Label></div>
             </div>
             {configDraft.external.provider === "internal" && <p className="mt-3 text-xs text-muted-foreground">Web-native 模拟盘直接运行在当前 FastAPI 服务中，订单、成交、账户快照都会持久化到 SQLite。</p>}
-            {configDraft.external.provider === "eastmoney_emt" && <p className="mt-3 text-xs text-muted-foreground">东方财富 EMT 仅作为预留外部适配器，不是当前 Web 模拟盘的必需依赖。</p>}
+            {configDraft.external.provider === "eastmoney_file" && <p className="mt-3 text-xs text-muted-foreground">东方财富量化终端需要开启文件单输入/输出，并连接仿真账户。项目下单写入输入目录，点击“同步”或定时任务时读取输出目录。</p>}
+            {configDraft.external.provider === "eastmoney_emt" && <p className="mt-3 text-xs text-muted-foreground">东方财富 EMT 仍作为预留外部适配器；当前已实现的是 CSV 文件单仿真。</p>}
           </div>
           <div className="rounded-md border border-red-200 bg-red-50/40 p-4">
             <p className="mb-3 text-sm font-medium text-red-900">实盘 Adapter（默认关闭）</p>
@@ -310,7 +333,7 @@ export function PortfolioPage() {
             <span>WebSocket 实时推送</span>
             <Badge variant={streamConnected ? "success" : "warning"}>{streamConnected ? "已连接" : "未连接，使用 REST 刷新"}</Badge>
           </div>
-          {portfolio.broker.provider === "eastmoney_emt" && <div className="flex items-center justify-between gap-3 rounded-md bg-muted/40 p-3 text-xs text-muted-foreground"><span>东方财富网页模拟组合不等同于 EMT API 账户；需使用 EMT 模拟权限和行情/交易柜台配置。</span><Button variant="outline" size="sm" onClick={handleValidateBroker} disabled={validatingBroker}>{validatingBroker ? "验证中..." : "验证 EMT 配置"}</Button></div>}
+          {(portfolio.broker.provider === "eastmoney_file" || portfolio.broker.provider === "eastmoney_emt") && <div className="flex items-center justify-between gap-3 rounded-md bg-muted/40 p-3 text-xs text-muted-foreground"><span>{portfolio.broker.provider === "eastmoney_file" ? "项目订单会写入东方财富文件单输入目录；同步时读取账户资金、持仓、委托和成交回报。" : "东方财富网页模拟组合不等同于 EMT API 账户；当前 EMT 适配器仍为预留。"}</span><div className="flex gap-2"><Button variant="outline" size="sm" onClick={handleValidateBroker} disabled={validatingBroker}>{validatingBroker ? "处理中..." : "验证配置"}</Button>{portfolio.broker.provider === "eastmoney_file" && <Button variant="outline" size="sm" onClick={handleSyncBroker} disabled={validatingBroker}>{validatingBroker ? "同步中..." : "同步文件单"}</Button>}</div></div>}
         </CardContent>
       </Card>
 

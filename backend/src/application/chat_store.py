@@ -19,6 +19,8 @@ from data.chat_models import (
     ChatMessageSearch,
     ChatTask,
     ChatTaskEvent,
+    ChatTaskInteraction,
+    ChatTaskState,
 )
 
 
@@ -118,9 +120,33 @@ class ChatStore:
             );
             CREATE INDEX IF NOT EXISTS idx_chat_message_references_message
                 ON chat_message_references(message_id, position);
+            CREATE TABLE IF NOT EXISTS chat_task_states (
+                task_id TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_task_interactions (
+                interaction_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                question TEXT NOT NULL,
+                options_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                selected_option TEXT,
+                created_at TEXT NOT NULL,
+                responded_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_task_interactions_task
+                ON chat_task_interactions(task_id, status);
             """
         )
-        for table in ("chat_task_events", "chat_message_references"):
+        for table in (
+            "chat_task_events",
+            "chat_message_references",
+            "chat_task_states",
+            "chat_task_interactions",
+        ):
             try:
                 await connection.execute_query(f"ALTER TABLE {table} ADD COLUMN id TEXT")
             except Exception:
@@ -210,7 +236,8 @@ class ChatStore:
             return [
                 part
                 for part in parts
-                if isinstance(part, dict) and part.get("type") in {"text", "a2ui", "widget", "artifact"}
+                if isinstance(part, dict)
+                and part.get("type") in {"text", "a2ui", "widget", "artifact", "interaction"}
             ]
         return [_text_part(str(item.get("content", "")))]
 
@@ -254,6 +281,8 @@ class ChatStore:
         task_id: str,
         message: str,
         history: list[dict[str, Any]],
+        strategy: str | None = None,
+        asset_type: str | None = None,
     ) -> tuple[str, str]:
         await self._ensure_ready()
         user_message_id = f"msg-{uuid4().hex}"
@@ -281,14 +310,28 @@ class ChatStore:
             active = (
                 await ChatTask.filter(
                     conversation_id=conversation_id,
-                    status__in=["pending", "running", "cancel_requested"],
+                    status__in=["pending", "running", "cancel_requested", "waiting_user"],
                 )
                 .using_db(connection)
                 .order_by("-created_at")
                 .first()
             )
             if active:
-                raise ValueError(f"会话已有正在执行的任务: {active.task_id}")
+                if active.status == "waiting_user":
+                    await ChatTask.filter(task_id=active.task_id).using_db(connection).update(
+                        status="superseded",
+                        updated_at=timestamp,
+                    )
+                    await ChatMessage.filter(message_id=active.message_id).using_db(connection).update(
+                        status="superseded",
+                        updated_at=timestamp,
+                    )
+                    await ChatTaskInteraction.filter(
+                        task_id=active.task_id,
+                        status="pending",
+                    ).using_db(connection).update(status="cancelled", responded_at=timestamp)
+                else:
+                    raise ValueError(f"会话已有正在执行的任务: {active.task_id}")
 
             conversation = (
                 await ChatConversation.filter(conversation_id=conversation_id).using_db(connection).first()
@@ -384,6 +427,22 @@ class ChatStore:
                 updated_at=timestamp,
                 using_db=connection,
             )
+            await ChatTaskState.create(
+                task_id=task_id,
+                state_json=_json(
+                    {
+                        "task_id": task_id,
+                        "conversation_id": conversation_id,
+                        "message": message,
+                        "history": history,
+                        "strategy": strategy,
+                        "asset_type": asset_type,
+                        "assistant_message_id": assistant_message_id,
+                    }
+                ),
+                updated_at=timestamp,
+                using_db=connection,
+            )
         return user_message_id, assistant_message_id
 
     async def append_part(self, message_id: str, part: dict[str, Any], task_id: str | None = None) -> bool:
@@ -393,7 +452,14 @@ class ChatStore:
             return False
         if task_id:
             task = await ChatTask.filter(task_id=task_id).first()
-            if task is None or task.status in {"cancel_requested", "cancelled", "completed", "failed", "interrupted"}:
+            if task is None or task.status in {
+                "cancel_requested",
+                "cancelled",
+                "completed",
+                "failed",
+                "interrupted",
+                "superseded",
+            }:
                 return False
         parts = json.loads(message.parts_json)
         if part.get("type") == "text" and parts and parts[-1].get("type") == "text":
@@ -442,14 +508,101 @@ class ChatStore:
         task = await ChatTask.filter(task_id=task_id).first()
         if task is None:
             return None
-        if task.status not in {"pending", "running", "cancel_requested"}:
+        if task.status not in {"pending", "running", "cancel_requested", "waiting_user"}:
             return task.status
         timestamp = _now()
-        await ChatTask.filter(task_id=task_id, status__in=["pending", "running", "cancel_requested"]).update(
+        await ChatTask.filter(
+            task_id=task_id,
+            status__in=["pending", "running", "cancel_requested", "waiting_user"],
+        ).update(
             status="cancel_requested", updated_at=timestamp
         )
         await ChatMessage.filter(message_id=task.message_id).update(status="cancel_requested", updated_at=timestamp)
+        await ChatTaskInteraction.filter(task_id=task_id, status="pending").update(
+            status="cancelled", responded_at=timestamp
+        )
         return "cancel_requested"
+
+    async def get_task_state(self, task_id: str) -> dict[str, Any] | None:
+        await self._ensure_ready()
+        row = await ChatTaskState.filter(task_id=task_id).first()
+        return json.loads(row.state_json) if row else None
+
+    async def set_task_state(self, task_id: str, state: dict[str, Any]) -> None:
+        await self._ensure_ready()
+        await ChatTaskState.update_or_create(
+            task_id=task_id,
+            defaults={"state_json": _json(state), "updated_at": _now()},
+        )
+
+    async def create_interaction(
+        self,
+        task_id: str,
+        kind: str,
+        question: str,
+        options: list[dict[str, Any]],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        await self._ensure_ready()
+        interaction_id = f"interaction-{uuid4().hex}"
+        timestamp = _now()
+        await ChatTaskInteraction.create(
+            interaction_id=interaction_id,
+            task_id=task_id,
+            kind=kind,
+            question=question,
+            options_json=_json(options),
+            payload_json=_json(payload),
+            status="pending",
+            created_at=timestamp,
+        )
+        return {
+            "interaction_id": interaction_id,
+            "task_id": task_id,
+            "kind": kind,
+            "question": question,
+            "options": options,
+            "status": "pending",
+        }
+
+    async def get_interaction(self, interaction_id: str) -> dict[str, Any] | None:
+        await self._ensure_ready()
+        row = await ChatTaskInteraction.filter(interaction_id=interaction_id).first()
+        if row is None:
+            return None
+        return {
+            "interaction_id": row.interaction_id,
+            "task_id": row.task_id,
+            "kind": row.kind,
+            "question": row.question,
+            "options": json.loads(row.options_json),
+            "payload": json.loads(row.payload_json),
+            "status": row.status,
+            "selected_option": row.selected_option,
+            "created_at": row.created_at,
+            "responded_at": row.responded_at,
+        }
+
+    async def answer_interaction(self, interaction_id: str, option_id: str) -> dict[str, Any]:
+        await self._ensure_ready()
+        row = await ChatTaskInteraction.filter(interaction_id=interaction_id).first()
+        if row is None:
+            raise KeyError("交互请求不存在")
+        if row.status != "pending":
+            raise ValueError("该交互请求已经处理")
+        options = json.loads(row.options_json)
+        if not any(str(option.get("id")) == option_id for option in options if isinstance(option, dict)):
+            raise ValueError("无效的交互选项")
+        updated = await ChatTaskInteraction.filter(
+            interaction_id=interaction_id,
+            status="pending",
+        ).update(status="answered", selected_option=option_id, responded_at=_now())
+        if not updated:
+            raise ValueError("该交互请求已经处理")
+        result = await self.get_interaction(interaction_id)
+        if result is None:
+            raise KeyError("交互请求不存在")
+        return result
 
     async def update_task(self, task_id: str, status: str, error: str | None = None) -> None:
         await self._ensure_ready()
