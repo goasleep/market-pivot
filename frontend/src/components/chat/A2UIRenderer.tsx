@@ -302,7 +302,7 @@ function CollapsibleRenderer({
   );
 }
 
-function EChart({
+export function EChart({
   option,
   height = 280,
   ariaLabel,
