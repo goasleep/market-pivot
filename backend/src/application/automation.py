@@ -12,6 +12,7 @@ from loguru import logger
 from application.automation_store import automation_store
 from application.research import research_service
 from config import settings
+from data.runtime_store import runtime_store
 from data.stock_provider import async_get_stock_history, async_get_stock_realtime
 from data.trading_calendar import is_trading_day
 from engine.broker_adapters import (
@@ -636,28 +637,48 @@ class AutomationScheduler:
                 continue
 
     async def tick(self, now: datetime | None = None) -> None:
-        current = now or datetime.now(SHANGHAI)
-        for account in await asyncio.to_thread(simulation_accounts.list_accounts):
-            if account.status != "active":
-                continue
-            task = await asyncio.to_thread(automation_store.get_task, account.account_id)
-            config: AutomationTaskConfig = task["config"]
-            if not config.enabled or current.weekday() not in config.weekdays:
-                continue
-            if not await asyncio.to_thread(is_trading_day, current.date()):
-                continue
-            try:
-                scheduled = time.fromisoformat(config.schedule_time)
-            except ValueError:
-                logger.warning("Invalid automation schedule for {}: {}", account.account_id, config.schedule_time)
-                continue
-            scheduled_at = datetime.combine(current.date(), scheduled, tzinfo=SHANGHAI)
-            if current < scheduled_at:
-                continue
-            if task["last_run_date"] == current.date().isoformat():
-                continue
-            await self.service.settle_account(account.account_id, current.date().isoformat())
-            await self.service.run_account(account.account_id, trigger="schedule", run_date=current.date().isoformat())
+        acquired = await runtime_store.acquire_lease("automation-scheduler", 90)
+        if not acquired:
+            return
+        heartbeat = asyncio.create_task(self._renew_scheduler_lease(), name="automation-scheduler-heartbeat")
+        try:
+            current = now or datetime.now(SHANGHAI)
+            for account in await asyncio.to_thread(simulation_accounts.list_accounts):
+                if account.status != "active":
+                    continue
+                task = await asyncio.to_thread(automation_store.get_task, account.account_id)
+                config: AutomationTaskConfig = task["config"]
+                if not config.enabled or current.weekday() not in config.weekdays:
+                    continue
+                if not await asyncio.to_thread(is_trading_day, current.date()):
+                    continue
+                try:
+                    scheduled = time.fromisoformat(config.schedule_time)
+                except ValueError:
+                    logger.warning("Invalid automation schedule for {}: {}", account.account_id, config.schedule_time)
+                    continue
+                scheduled_at = datetime.combine(current.date(), scheduled, tzinfo=SHANGHAI)
+                if current < scheduled_at:
+                    continue
+                if task["last_run_date"] == current.date().isoformat():
+                    continue
+                await self.service.settle_account(account.account_id, current.date().isoformat())
+                await self.service.run_account(
+                    account.account_id,
+                    trigger="schedule",
+                    run_date=current.date().isoformat(),
+                )
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            await runtime_store.release_lease("automation-scheduler")
+
+    async def _renew_scheduler_lease(self) -> None:
+        while True:
+            await asyncio.sleep(30)
+            renewed = await runtime_store.renew_lease("automation-scheduler", 90)
+            if not renewed:
+                return
 
 
 automation_scheduler = AutomationScheduler(automation_service)

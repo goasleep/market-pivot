@@ -9,18 +9,19 @@ import html
 import json
 import math
 import re
-import sqlite3
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from loguru import logger
+from sqlalchemy import select
 
+from agents.report_agent import ReportAgent
 from artifacts.storage import ArtifactStorage, LocalArtifactStorage, S3ArtifactStorage
 from charts.echarts import ECHARTS_CDN, line_option, render_chart_container, signal_attribution_option
 from config import settings
+from data.orm import ArtifactRecord, build_database
 from llm.service import get_llm_service
 from models.schemas import TradeDecision
 
@@ -588,6 +589,7 @@ class ArtifactService:
         storage_dir: str | Path | None = None,
         db_path: str | Path | None = None,
         storage: ArtifactStorage | None = None,
+        report_agent: ReportAgent | None = None,
     ):
         # A local directory is only selected when explicitly supplied, which
         # keeps existing unit-test fixtures possible without making local disk
@@ -605,43 +607,30 @@ class ArtifactService:
                 addressing_style=settings.s3_addressing_style,
             )
         )
+        self.report_agent = report_agent or ReportAgent()
         self.db_path = str(db_path or settings.database_file_path)
-        self._lock = threading.RLock()
-        self._init_schema()
+        self.database = build_database(
+            database_url=settings.database_url if db_path is None else None,
+            db_path=db_path or settings.database_file_path,
+        )
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 30000")
-        return connection
-
-    def _init_schema(self) -> None:
-        with self._lock, self._connect() as connection:
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS artifacts (
-                    artifact_id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    artifact_type TEXT NOT NULL,
-                    mime_type TEXT NOT NULL,
-                    relative_path TEXT NOT NULL UNIQUE,
-                    size_bytes INTEGER NOT NULL,
-                    sha256 TEXT NOT NULL,
-                    ticker TEXT,
-                    asset_type TEXT,
-                    source TEXT NOT NULL,
-                    conversation_id TEXT,
-                    task_id TEXT,
-                    metadata_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )"""
-            )
-            connection.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_created_at ON artifacts(created_at DESC)")
-            connection.commit()
-
-    def _record(self, row: sqlite3.Row) -> dict[str, Any]:
-        item = dict(row)
-        item["metadata"] = json.loads(item.pop("metadata_json"))
-        item["object_key"] = item.pop("relative_path")
+    def _record(self, row: ArtifactRecord) -> dict[str, Any]:
+        item = {
+            "artifact_id": row.artifact_id,
+            "name": row.name,
+            "artifact_type": row.artifact_type,
+            "mime_type": row.mime_type,
+            "size_bytes": row.size_bytes,
+            "sha256": row.sha256,
+            "ticker": row.ticker,
+            "asset_type": row.asset_type,
+            "source": row.source,
+            "conversation_id": row.conversation_id,
+            "task_id": row.task_id,
+            "created_at": row.created_at,
+            "metadata": json.loads(row.metadata_json),
+            "object_key": row.relative_path,
+        }
         item["preview_url"] = f"/api/artifacts/{item['artifact_id']}/preview"
         item["download_url"] = f"/api/artifacts/{item['artifact_id']}/download"
         return item
@@ -682,16 +671,9 @@ class ArtifactService:
             "metadata_json": _json(metadata),
             "created_at": created_at,
         }
-        with self._lock, self._connect() as connection:
-            connection.execute(
-                """INSERT INTO artifacts
-                   (artifact_id, name, artifact_type, mime_type, relative_path, size_bytes,
-                    sha256, ticker, asset_type, source, conversation_id, task_id, metadata_json, created_at)
-                   VALUES (:artifact_id, :name, :artifact_type, :mime_type, :relative_path, :size_bytes,
-                    :sha256, :ticker, :asset_type, :source, :conversation_id, :task_id, :metadata_json, :created_at)""",
-                record,
-            )
-            connection.commit()
+        with self.database.session() as session:
+            session.add(ArtifactRecord(**record))
+            session.commit()
         response = {
             **{key: value for key, value in record.items() if key not in {"metadata_json", "relative_path"}},
             "object_key": object_key,
@@ -762,18 +744,13 @@ class ArtifactService:
         """Make retries idempotent without limiting distinct files per task."""
         if not conversation_id and not task_id:
             return None
-        clauses = ["name = ?", "sha256 = ?"]
-        values: list[Any] = [name, sha256]
+        statement = select(ArtifactRecord).where(ArtifactRecord.name == name, ArtifactRecord.sha256 == sha256)
         if task_id:
-            clauses.append("task_id = ?")
-            values.append(task_id)
+            statement = statement.where(ArtifactRecord.task_id == task_id)
         else:
-            clauses.append("conversation_id = ?")
-            values.append(conversation_id)
-        with self._lock, self._connect() as connection:
-            row = connection.execute(
-                f"SELECT * FROM artifacts WHERE {' AND '.join(clauses)} LIMIT 1", values
-            ).fetchone()
+            statement = statement.where(ArtifactRecord.conversation_id == conversation_id)
+        with self.database.session() as session:
+            row = session.scalar(statement.limit(1))
         return self._record(row) if row is not None else None
 
     def create_user_artifacts(
@@ -879,29 +856,16 @@ class ArtifactService:
         source: str = "analysis",
         conversation_id: str | None = None,
         task_id: str | None = None,
-        report_copy: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Create the single user-facing HTML report for an analysis.
-
-        Markdown remains the deterministic intermediate representation used to
-        render HTML, but it is not persisted as a second user-facing artifact.
-        This keeps chat and analysis results from presenting duplicate report
-        files while preserving the existing HTML preview/download contract.
-        """
+        """Create the single user-facing HTML report through ReportAgent."""
         generated_at = _now()
-        markdown = render_analysis_markdown(decision, market_context, generated_at, report_copy)
-        html_report = render_analysis_html(markdown, decision, generated_at, market_context)
-        base = f"{_safe_slug(decision.ticker)}-研究分析报告"
-        web_results = getattr(market_context, "web_results", []) or []
-        metadata = {
-            "generated_at": generated_at,
-            "report_version": "2.0",
-            "web_search_count": len(web_results),
-        }
+        report = self.report_agent.generate(decision, market_context, generated_at=generated_at)
+        metadata = dict(report.metadata)
+        metadata.setdefault("generated_at", generated_at)
         return [
             self._create_file(
-                f"{base}.html",
-                html_report,
+                report.name,
+                report.html,
                 "text/html",
                 decision,
                 source,
@@ -912,8 +876,8 @@ class ArtifactService:
         ]
 
     def get(self, artifact_id: str) -> dict[str, Any] | None:
-        with self._lock, self._connect() as connection:
-            row = connection.execute("SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
+        with self.database.session() as session:
+            row = session.get(ArtifactRecord, artifact_id)
         if row is None:
             return None
         return self._record(row)
@@ -936,20 +900,15 @@ class ArtifactService:
         task_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """List artifacts, optionally restricted to one chat scope."""
-        clauses: list[str] = []
-        values: list[Any] = []
+        statement = select(ArtifactRecord)
         if conversation_id:
-            clauses.append("conversation_id = ?")
-            values.append(conversation_id)
+            statement = statement.where(ArtifactRecord.conversation_id == conversation_id)
         if task_id:
-            clauses.append("task_id = ?")
-            values.append(task_id)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                f"SELECT * FROM artifacts{where} ORDER BY created_at DESC LIMIT ?",
-                [*values, max(1, min(limit, 200))],
-            ).fetchall()
+            statement = statement.where(ArtifactRecord.task_id == task_id)
+        with self.database.session() as session:
+            rows = session.scalars(
+                statement.order_by(ArtifactRecord.created_at.desc()).limit(max(1, min(limit, 200)))
+            ).all()
         return [self._record(row) for row in rows]
 
     def read_text(self, artifact_id: str, max_chars: int = 20_000) -> dict[str, Any] | None:

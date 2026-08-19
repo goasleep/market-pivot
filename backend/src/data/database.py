@@ -1,78 +1,68 @@
-"""Shared SQLite storage for cache and application settings."""
+"""ORM-backed cache and application settings storage."""
+
+from __future__ import annotations
 
 import json
-import sqlite3
-import threading
 import time
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import delete
+
+from data.orm import AppSetting, CacheEntry, OrmDatabase, build_database
+
 
 class SQLiteDatabase:
-    """Small thread-safe SQLite store shared by all persistent backend data."""
+    """Backward-compatible name for the dialect-neutral ORM database.
 
-    def __init__(self, db_path: str | Path):
-        self.db_path = str(db_path)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        self._init_schema()
+    Existing callers use this small cache/settings API. The implementation now
+    uses SQLAlchemy models and selects PostgreSQL whenever ``database_url`` is
+    supplied, while retaining SQLite as the local default.
+    """
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=30)
-        connection.execute("PRAGMA busy_timeout = 30000")
-        return connection
-
-    def _init_schema(self) -> None:
-        with self._lock, self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS cache (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    timestamp REAL NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS app_settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at REAL NOT NULL
-                );
-                """
-            )
-            connection.commit()
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        database_url: str | None = None,
+        orm_database: OrmDatabase | None = None,
+    ):
+        self.db_path = str(db_path) if db_path is not None else None
+        self.database_url = database_url
+        self.orm_database = orm_database or build_database(database_url=database_url, db_path=db_path)
 
     def get_cache(self, key: str) -> tuple[str, float] | None:
-        with self._lock, self._connect() as connection:
-            return connection.execute(
-                "SELECT value, timestamp FROM cache WHERE key = ?",
-                (key,),
-            ).fetchone()
+        with self.orm_database.session() as session:
+            entry = session.get(CacheEntry, key)
+            return (entry.value, entry.timestamp) if entry else None
 
     def set_cache(self, key: str, value: Any) -> None:
-        with self._lock, self._connect() as connection:
-            connection.execute(
-                "INSERT OR REPLACE INTO cache (key, value, timestamp) VALUES (?, ?, ?)",
-                (key, json.dumps(value, ensure_ascii=False, default=str), time.time()),
-            )
-            connection.commit()
+        with self.orm_database.session() as session:
+            entry = session.get(CacheEntry, key)
+            payload = json.dumps(value, ensure_ascii=False, default=str)
+            if entry is None:
+                session.add(CacheEntry(key=key, value=payload, timestamp=time.time()))
+            else:
+                entry.value = payload
+                entry.timestamp = time.time()
+            session.commit()
 
     def clear_cache(self) -> None:
-        with self._lock, self._connect() as connection:
-            connection.execute("DELETE FROM cache")
-            connection.commit()
+        with self.orm_database.session() as session:
+            session.execute(delete(CacheEntry))
+            session.commit()
 
     def get_setting(self, key: str) -> Any | None:
-        with self._lock, self._connect() as connection:
-            row = connection.execute(
-                "SELECT value FROM app_settings WHERE key = ?",
-                (key,),
-            ).fetchone()
-        return json.loads(row[0]) if row else None
+        with self.orm_database.session() as session:
+            entry = session.get(AppSetting, key)
+            return json.loads(entry.value) if entry else None
 
     def set_setting(self, key: str, value: Any) -> None:
-        with self._lock, self._connect() as connection:
-            connection.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-                (key, json.dumps(value, ensure_ascii=False, default=str), time.time()),
-            )
-            connection.commit()
+        with self.orm_database.session() as session:
+            entry = session.get(AppSetting, key)
+            payload = json.dumps(value, ensure_ascii=False, default=str)
+            if entry is None:
+                session.add(AppSetting(key=key, value=payload, updated_at=time.time()))
+            else:
+                entry.value = payload
+                entry.updated_at = time.time()
+            session.commit()

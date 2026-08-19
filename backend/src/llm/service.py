@@ -98,6 +98,33 @@ class LLMService:
             logger.error("LLM call failed: {}", exc)
             raise
 
+    def chat_sync(
+        self,
+        prompt: str,
+        system: str = "",
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Synchronous model call for blocking artifact-generation boundaries."""
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        try:
+            response = self.get_model(
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            ).invoke(_to_messages(messages))
+            content = _message_text(response)
+            logger.debug("Synchronous LLM response ({}): {} chars", model or "configured", len(content))
+            return content
+        except Exception as exc:
+            logger.error("Synchronous LLM call failed: {}", exc)
+            raise
+
     async def chat_json(
         self,
         prompt: str,

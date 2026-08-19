@@ -7,7 +7,6 @@ import hashlib
 import html
 import io
 import json
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,7 +17,9 @@ from langchain.agents.structured_output import ToolStrategy
 from agents.deep_agent_runtime import build_deep_agent, deep_agents_enabled, invoke_structured
 from application.backtest_service import run_backtest, run_pool_backtest
 from artifacts.service import artifact_service
+from charts.echarts import ECHARTS_CDN, line_option, render_chart_container
 from config import settings
+from data.orm import BacktestExperimentRecord, build_database
 from llm.service import get_llm_service
 from models.schemas import AssetType, PortfolioSpec, StrategySpec
 from strategies.compiler import available_indicators, strategy_from_mapping
@@ -59,44 +60,41 @@ class BacktestExperimentStore:
 
     def __init__(self, db_path: str | Path | None = None):
         self.db_path = str(db_path or settings.database_file_path)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as connection:
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS backtest_experiments (
-                    experiment_id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )"""
-            )
+        self.database = build_database(
+            database_url=settings.database_url if db_path is None else None,
+            db_path=db_path or settings.database_file_path,
+        )
 
     def save(self, experiment_id: str, status: str, payload: dict[str, Any]) -> None:
         timestamp = _now()
-        with sqlite3.connect(self.db_path) as connection:
-            connection.execute(
-                """INSERT OR REPLACE INTO backtest_experiments
-                   (experiment_id, status, payload_json, created_at, updated_at)
-                   VALUES (?, ?, ?, COALESCE(
-                       (SELECT created_at FROM backtest_experiments WHERE experiment_id = ?), ?
-                   ), ?)""",
-                (experiment_id, status, _json(payload), experiment_id, timestamp, timestamp),
-            )
+        with self.database.session() as session:
+            row = session.get(BacktestExperimentRecord, experiment_id)
+            if row is None:
+                row = BacktestExperimentRecord(
+                    experiment_id=experiment_id,
+                    status=status,
+                    payload_json=_json(payload),
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+                session.add(row)
+            else:
+                row.status = status
+                row.payload_json = _json(payload)
+                row.updated_at = timestamp
+            session.commit()
 
     def get(self, experiment_id: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.db_path) as connection:
-            row = connection.execute(
-                "SELECT status, payload_json, created_at, updated_at FROM backtest_experiments WHERE experiment_id = ?",
-                (experiment_id,),
-            ).fetchone()
+        with self.database.session() as session:
+            row = session.get(BacktestExperimentRecord, experiment_id)
         if row is None:
             return None
         return {
             "experiment_id": experiment_id,
-            "status": row[0],
-            **json.loads(row[1]),
-            "created_at": row[2],
-            "updated_at": row[3],
+            "status": row.status,
+            **json.loads(row.payload_json),
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
         }
 
 
@@ -308,11 +306,104 @@ def _build_report_markdown(
     return "\n".join(lines) + "\n"
 
 
-def _render_report_html(markdown: str, title: str) -> str:
+def _experiment_equity_points(result: dict[str, Any]) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    for item in result.get("equity_curve") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            value = float(item["value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        label = str(item.get("date") or len(points))
+        points.append({"label": label, "value": value})
+    return points[-250:]
+
+
+def _experiment_drawdown_points(result: dict[str, Any]) -> list[dict[str, Any]]:
+    points = _experiment_equity_points(result)
+    drawdowns: list[dict[str, Any]] = []
+    peak = 0.0
+    for point in points:
+        peak = max(peak, float(point["value"]))
+        drawdown = ((float(point["value"]) - peak) / peak * 100) if peak else 0.0
+        drawdowns.append({"label": point["label"], "value": round(drawdown, 4)})
+    return drawdowns
+
+
+def _experiment_equity_chart(result: dict[str, Any]) -> str:
+    points = _experiment_equity_points(result)
+    if len(points) < 2:
+        return '<p class="chart-empty">暂无足够的资产曲线数据</p>'
+    option = line_option("回测资产曲线", points)
+    labels = {str(point["label"]): point["value"] for point in points}
+    trade_markers = []
+    for trade in result.get("trades") or []:
+        if not isinstance(trade, dict):
+            continue
+        date = str(trade.get("date") or "")
+        if date not in labels:
+            continue
+        action = str(trade.get("action") or "").lower()
+        is_buy = action == "buy"
+        trade_markers.append(
+            {
+                "name": "买入" if is_buy else "卖出",
+                "coord": [date, labels[date]],
+                "value": "买" if is_buy else "卖",
+                "itemStyle": {"color": "#16a34a" if is_buy else "#dc2626"},
+            }
+        )
+    if trade_markers:
+        option["series"][0]["markPoint"] = {
+            "symbol": "pin",
+            "symbolSize": 42,
+            "data": trade_markers,
+            "label": {"color": "#fff", "fontSize": 11},
+        }
+    return render_chart_container(
+        "experiment-equity-chart",
+        option,
+        aria_label="回测资产曲线",
+        height=340,
+    )
+
+
+def _experiment_drawdown_chart(result: dict[str, Any]) -> str:
+    points = _experiment_drawdown_points(result)
+    if len(points) < 2:
+        return '<p class="chart-empty">暂无足够的回撤数据</p>'
+    option = line_option("回测回撤曲线", points)
+    option["yAxis"] = {"type": "value", "max": 0, "axisLabel": {"formatter": "{value}%"}}
+    option["series"][0].update(
+        {
+            "lineStyle": {"width": 2, "color": "#dc2626"},
+            "itemStyle": {"color": "#dc2626"},
+            "areaStyle": {"color": "#dc2626", "opacity": 0.1},
+        }
+    )
+    return render_chart_container(
+        "experiment-drawdown-chart",
+        option,
+        aria_label="回测回撤曲线",
+        height=280,
+    )
+
+
+def _render_report_html(markdown: str, title: str, result: dict[str, Any] | None = None) -> str:
+    chart_tokens = ""
+    if result is not None:
+        chart_tokens = (
+            "\n\n[[EXPERIMENT_EQUITY_CHART]]\n\n"
+            "[[EXPERIMENT_DRAWDOWN_CHART]]\n"
+        )
+        markdown = markdown.replace("## 二、回测结果", f"## 二、回测结果{chart_tokens}", 1)
     rendered: list[str] = []
     for raw_line in markdown.splitlines():
         line = html.escape(raw_line)
-        if line.startswith("# "):
+        if line in {"[[EXPERIMENT_EQUITY_CHART]]", "[[EXPERIMENT_DRAWDOWN_CHART]]"}:
+            rendered.append(line)
+        elif line.startswith("# "):
             rendered.append(f"<h1>{line[2:]}</h1>")
         elif line.startswith("## "):
             rendered.append(f"<h2>{line[3:]}</h2>")
@@ -321,15 +412,20 @@ def _render_report_html(markdown: str, title: str) -> str:
         elif line:
             rendered.append(f"<p>{line}</p>")
     body = "\n".join(rendered)
+    if result is not None:
+        body = body.replace("[[EXPERIMENT_EQUITY_CHART]]", _experiment_equity_chart(result))
+        body = body.replace("[[EXPERIMENT_DRAWDOWN_CHART]]", _experiment_drawdown_chart(result))
     # The report remains intentionally simple and self-contained; the source
     # Markdown is also persisted for machine-readable reproducibility.
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{html.escape(title)}</title><style>
+<title>{html.escape(title)}</title><script src="{ECHARTS_CDN}"></script><style>
 body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
 background:#f5f7fb;color:#172033;line-height:1.7;margin:0}}
 main{{max-width:920px;margin:32px auto;padding:36px 44px;background:#fff;box-shadow:0 8px 32px #17203312}}
 h1{{color:#102a56;margin-top:0}} h2{{color:#1d4d91;border-bottom:1px solid #dce4f2;padding-bottom:6px;margin-top:28px}}
+.echarts-chart{{margin:16px 0 12px;padding:8px;border:1px solid #dce4f2;border-radius:14px;background:#fbfcff}}
+.chart-empty{{color:#64748b;font-size:13px}}
 @media(max-width:640px){{main{{margin:0;padding:24px}}}}
 </style></head><body><main>{body}</main></body></html>"""
 
@@ -466,7 +562,11 @@ async def run_backtest_experiment(
         spec=spec,
         result=result,
     )
-    report_html = _render_report_html(report_markdown, f"Agent 回测实验报告：{spec.name}")
+    report_html = _render_report_html(
+        report_markdown,
+        f"Agent 回测实验报告：{spec.name}",
+        result=result,
+    )
     run_json = {
         "experiment_id": experiment_id,
         "objective": objective,

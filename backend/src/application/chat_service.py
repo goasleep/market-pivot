@@ -37,8 +37,52 @@ class ChatTaskManager:
         self._tasks: dict[str, asyncio.Task] = {}
         self._subscribers: dict[str, set[asyncio.Queue[dict | None]]] = {}
         self._task_locks: dict[str, asyncio.Lock] = {}
+        self._worker: asyncio.Task | None = None
+        self._stopping = asyncio.Event()
 
-    async def start(self, task_input: ChatTaskInput) -> None:
+    async def start_worker(self) -> None:
+        if self._worker and not self._worker.done():
+            return
+        self._stopping = asyncio.Event()
+        self._worker = asyncio.create_task(self._poll_runnable_tasks(), name="chat-task-worker")
+
+    async def stop_worker(self) -> None:
+        self._stopping.set()
+        if self._worker:
+            await self._worker
+        self._worker = None
+        task_ids = tuple(self._tasks)
+        for task_id in task_ids:
+            await self.store.update_task(task_id, "interrupted", "节点正在关闭，任务等待其他节点接管")
+        tasks = tuple(self._tasks.values())
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+
+    async def _poll_runnable_tasks(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                await self.store.recover_stale_tasks()
+                for task_id in await self.store.list_runnable_tasks():
+                    state = await self.store.get_task_state(task_id)
+                    if state is None:
+                        continue
+                    await self.start(self._task_input_from_state(state))
+            except Exception as exc:
+                logger.warning("Chat task worker poll failed: {}", exc)
+            try:
+                await asyncio.wait_for(self._stopping.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                continue
+
+    async def start(
+        self,
+        task_input: ChatTaskInput,
+        resume_interaction: dict[str, Any] | None = None,
+    ) -> None:
         if task_input.task_id in self._tasks:
             return
         record = await self.store.get_task(task_input.task_id)
@@ -46,43 +90,38 @@ class ChatTaskManager:
             await self.store.update_task(task_input.task_id, "cancelled")
             return
         if record and record["status"] in {
-            "completed", "failed", "cancelled", "interrupted", "waiting_user", "superseded"
+            "completed", "failed", "cancelled", "waiting_user", "superseded"
         }:
+            return
+        if not await self.store.begin_task(task_input.task_id):
             return
         self._subscribers.setdefault(task_input.task_id, set())
         self._task_locks.setdefault(task_input.task_id, asyncio.Lock())
+        runner = self._run_resume(task_input, resume_interaction) if resume_interaction else self._run(task_input)
         self._tasks[task_input.task_id] = asyncio.create_task(
-            self._run(task_input),
-            name=f"chat-agent-{task_input.task_id}",
+            runner,
+            name=f"chat-agent{'-resume' if resume_interaction else ''}-{task_input.task_id}",
         )
 
     async def subscribe(self, task_id: str, after_sequence: int = 0) -> AsyncIterator[dict]:
-        """Replay missed events and subscribe atomically to future events."""
-        lock = self._task_locks.setdefault(task_id, asyncio.Lock())
-        queue: asyncio.Queue[dict | None] = asyncio.Queue()
-        async with lock:
-            replay = await self.store.list_events(task_id, after_sequence)
+        """Replay and poll durable events so any node can serve the SSE stream."""
+        cursor = max(0, after_sequence)
+        while True:
+            events = await self.store.list_events(task_id, cursor)
+            for event in events:
+                cursor = max(cursor, int(event["id"]))
+                yield event
             record = await self.store.get_task(task_id)
             terminal = bool(
                 record
                 and record["status"]
                 in {"completed", "failed", "cancelled", "interrupted", "waiting_user", "superseded"}
             )
-            self._subscribers.setdefault(task_id, set()).add(queue)
-        try:
-            for event in replay:
-                yield event
-            if terminal and not replay:
-                yield {"event": "done", "data": "{}"}
-            if terminal or any(event.get("event") == "done" for event in replay):
+            if terminal and not events:
+                if cursor == 0:
+                    yield {"event": "done", "data": "{}"}
                 return
-            while True:
-                event = await queue.get()
-                if event is None:
-                    return
-                yield event
-        finally:
-            self._subscribers.get(task_id, set()).discard(queue)
+            await asyncio.sleep(0.25)
 
     async def cancel(self, task_id: str) -> dict[str, Any]:
         task = self._tasks.get(task_id)
@@ -311,9 +350,8 @@ class ChatTaskManager:
 
     async def _run(self, task_input: ChatTaskInput) -> None:
         task_id = task_input.task_id
+        heartbeat = asyncio.create_task(self._heartbeat(task_id), name=f"chat-heartbeat-{task_id}")
         try:
-            if not await self.store.begin_task(task_id):
-                raise asyncio.CancelledError
             await self._emit_text(task_input, "A-Share Agent：正在让模型判断任务并选择数据工具。")
             orchestration_surface = f"orchestration-{task_id}"
             await self._emit_a2ui(
@@ -356,6 +394,8 @@ class ChatTaskManager:
             await self.store.update_task(task_id, "failed", str(exc))
             await self._broadcast(task_id, {"event": "done", "data": "{}"})
         finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
             await self._broadcast(task_id, None)
             self._tasks.pop(task_id, None)
             self._subscribers.pop(task_id, None)
@@ -375,7 +415,7 @@ class ChatTaskManager:
         state = await self.store.get_task_state(task_id)
         if state is None:
             raise ValueError("聊天任务缺少恢复上下文")
-        await self.store.update_task(task_id, "running")
+        await self.store.update_task(task_id, "pending")
         task_input = ChatTaskInput(
             task_id=task_id,
             conversation_id=str(state["conversation_id"]),
@@ -385,16 +425,24 @@ class ChatTaskManager:
             asset_type=state.get("asset_type"),
             assistant_message_id=str(state["assistant_message_id"]),
         )
-        self._subscribers.setdefault(task_id, set())
-        self._task_locks.setdefault(task_id, asyncio.Lock())
-        self._tasks[task_id] = asyncio.create_task(
-            self._run_resume(task_input, answered),
-            name=f"chat-agent-resume-{task_id}",
-        )
+        await self.start(task_input, answered)
         return {"task_id": task_id, "status": "running", "interaction": answered}
+
+    @staticmethod
+    def _task_input_from_state(state: dict[str, Any]) -> ChatTaskInput:
+        return ChatTaskInput(
+            task_id=str(state["task_id"]),
+            conversation_id=str(state["conversation_id"]),
+            message=str(state["message"]),
+            history=list(state.get("history") or []),
+            strategy=state.get("strategy"),
+            asset_type=state.get("asset_type"),
+            assistant_message_id=str(state["assistant_message_id"]),
+        )
 
     async def _run_resume(self, task_input: ChatTaskInput, interaction: dict[str, Any]) -> None:
         task_id = task_input.task_id
+        heartbeat = asyncio.create_task(self._heartbeat(task_id), name=f"chat-heartbeat-{task_id}")
         try:
             await self._emit_text(task_input, "已收到你的选择，Agent 继续执行。")
             paused = await self._consume_agent_events(
@@ -419,10 +467,17 @@ class ChatTaskManager:
             await self.store.update_task(task_id, "failed", str(exc))
             await self._broadcast(task_id, {"event": "done", "data": "{}"})
         finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
             await self._broadcast(task_id, None)
             self._tasks.pop(task_id, None)
             self._subscribers.pop(task_id, None)
             self._task_locks.pop(task_id, None)
+
+    async def _heartbeat(self, task_id: str) -> None:
+        while True:
+            await asyncio.sleep(20)
+            await self.store.touch_task(task_id)
 
 
 chat_store = ChatStore()

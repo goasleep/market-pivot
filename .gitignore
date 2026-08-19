@@ -14,7 +14,10 @@ coverage/
 htmlcov/
 *.log
 **/data/cache.db
+**/data/*.db-shm
+**/data/*.db-wal
 **/data/artifacts/
+backend/data/strategies.json
 **/*-journal
 backend/data/llm_config.json
 .vite/

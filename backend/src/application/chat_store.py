@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -154,13 +155,24 @@ class ChatStore:
                 pass
 
     async def _recover_interrupted_tasks(self) -> None:
+        # Only reclaim tasks whose worker lease has gone stale. A node joining
+        # a live cluster must not interrupt work owned by another node.
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
         timestamp = _now()
-        await ChatTask.filter(status__in=["pending", "running", "cancel_requested"]).update(
+        stale_running = await ChatTask.filter(status="running", updated_at__lt=cutoff).update(
             status="interrupted", updated_at=timestamp
         )
-        await ChatMessage.filter(status__in=["pending", "running"]).update(
-            status="interrupted", updated_at=timestamp
+        await ChatTask.filter(status="cancel_requested", updated_at__lt=cutoff).update(
+            status="cancelled", updated_at=timestamp
         )
+        if stale_running:
+            await ChatMessage.filter(status__in=["pending", "running"], updated_at__lt=cutoff).update(
+                status="interrupted", updated_at=timestamp
+            )
+
+    async def recover_stale_tasks(self) -> None:
+        await self._ensure_ready()
+        await self._recover_interrupted_tasks()
 
     async def _ensure_search_indexes(self) -> None:
         connection = Tortoise.get_connection("default")
@@ -477,6 +489,8 @@ class ChatStore:
         message.status = "running"
         message.updated_at = _now()
         await message.save(update_fields=["parts_json", "status", "updated_at"])
+        if task_id:
+            await ChatTask.filter(task_id=task_id).update(updated_at=message.updated_at)
         await self._sync_search(message_id, message.conversation_id, parts)
         return True
 
@@ -492,6 +506,7 @@ class ChatStore:
             data=data,
             created_at=_now(),
         )
+        await ChatTask.filter(task_id=task_id, status__in=["pending", "running"]).update(updated_at=_now())
         return {"id": str(sequence), "event": event, "data": data}
 
     async def list_events(self, task_id: str, after_sequence: int = 0) -> list[dict[str, Any]]:
@@ -627,6 +642,10 @@ class ChatStore:
         if task:
             await ChatMessage.filter(message_id=task.message_id).update(status=status, updated_at=timestamp)
 
+    async def touch_task(self, task_id: str) -> None:
+        await self._ensure_ready()
+        await ChatTask.filter(task_id=task_id, status="running").update(updated_at=_now())
+
     async def complete_task(self, task_id: str) -> bool:
         await self._ensure_ready()
         timestamp = _now()
@@ -642,7 +661,7 @@ class ChatStore:
     async def begin_task(self, task_id: str) -> bool:
         await self._ensure_ready()
         timestamp = _now()
-        updated = await ChatTask.filter(task_id=task_id, status="pending").update(
+        updated = await ChatTask.filter(task_id=task_id, status__in=["pending", "interrupted"]).update(
             status="running", updated_at=timestamp
         )
         if updated:
@@ -650,6 +669,16 @@ class ChatStore:
             if task:
                 await ChatMessage.filter(message_id=task.message_id).update(status="running", updated_at=timestamp)
         return bool(updated)
+
+    async def list_runnable_tasks(self, limit: int = 50) -> list[str]:
+        await self._ensure_ready()
+        rows = await (
+            ChatTask.filter(status__in=["pending", "interrupted"])
+            .order_by("created_at")
+            .limit(max(1, min(limit, 100)))
+            .values("task_id")
+        )
+        return [str(row["task_id"]) for row in rows]
 
     async def mark_cancelled(self, task_id: str) -> bool:
         await self._ensure_ready()

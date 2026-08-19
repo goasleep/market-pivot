@@ -195,12 +195,25 @@ async def stream_account(account_id: str, websocket: WebSocket):
                 "data": {"broker": initial["broker"], "total_value": initial["total_value"]},
             }
         )
+        last_event_id = 0
+        idle_seconds = 0
         while True:
-            try:
-                result = await asyncio.wait_for(queue.get(), timeout=30)
+            persisted_events = await simulation_events.list_events(account_id, last_event_id)
+            for result in persisted_events:
+                last_event_id = max(last_event_id, int(result.get("event_id", 0) or 0))
                 await websocket.send_json(result)
+            try:
+                result = await asyncio.wait_for(queue.get(), timeout=1)
+                event_id = int(result.get("event_id", 0) or 0)
+                if event_id > last_event_id:
+                    last_event_id = event_id
+                    await websocket.send_json(result)
+                idle_seconds = 0
             except asyncio.TimeoutError:
+                idle_seconds += 1
+            if idle_seconds >= 30:
                 await websocket.send_json({"type": "heartbeat", "account_id": account_id})
+                idle_seconds = 0
     except WebSocketDisconnect:
         pass
     finally:

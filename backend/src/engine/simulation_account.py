@@ -8,15 +8,20 @@ the ``ExternalSimulationConfig`` without changing the account API.
 
 import json
 import re
-import sqlite3
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from loguru import logger
+from sqlalchemy import delete, select
 
 from config import settings
+from data.orm import (
+    SimulationAccountRecord,
+    SimulationOrderRecord,
+    SimulationSnapshotRecord,
+    build_database,
+)
 from engine.trading_engine import TradingEngine
 from models.schemas import (
     AssetType,
@@ -48,87 +53,63 @@ class SimulationAccountService:
 
     def __init__(self, db_path: str | Path | None = None):
         self.db_path = str(db_path or settings.database_file_path)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        self._init_schema()
-        self._ensure_default_account()
+        self.database = build_database(
+            database_url=settings.database_url if db_path is None else None,
+            db_path=db_path or settings.database_file_path,
+        )
+        self._ready = False
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 30000")
-        return connection
+    def _ensure_ready(self) -> None:
+        if self._ready:
+            return
+        self.database.ensure_schema()
+        with self.database.session() as session:
+            if session.get(SimulationAccountRecord, "default") is None:
+                config = SimulationAccountConfig()
+                timestamp = _now()
+                session.add(
+                    SimulationAccountRecord(
+                        account_id="default",
+                        status="active",
+                        current_date="",
+                        config_json=_json(config),
+                        portfolio_json=_json(
+                            PortfolioState(cash=config.initial_cash, initial_capital=config.initial_cash)
+                        ),
+                        created_at=timestamp,
+                        updated_at=timestamp,
+                    )
+                )
+                session.commit()
+        self._ready = True
 
-    def _init_schema(self) -> None:
-        with self._lock, self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS simulation_accounts (
-                    account_id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    current_date TEXT NOT NULL DEFAULT '',
-                    config_json TEXT NOT NULL,
-                    portfolio_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
+    def _session(self):
+        self._ensure_ready()
+        return self.database.session()
 
-                CREATE TABLE IF NOT EXISTS simulation_orders (
-                    order_id TEXT PRIMARY KEY,
-                    account_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    order_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    FOREIGN KEY(account_id) REFERENCES simulation_accounts(account_id)
-                );
+    def _get_row(self, account_id: str) -> SimulationAccountRecord | None:
+        with self._session() as session:
+            return session.get(SimulationAccountRecord, account_id)
 
-                CREATE TABLE IF NOT EXISTS simulation_snapshots (
-                    account_id TEXT NOT NULL,
-                    snapshot_date TEXT NOT NULL,
-                    snapshot_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(account_id, snapshot_date),
-                    FOREIGN KEY(account_id) REFERENCES simulation_accounts(account_id)
-                );
-                """
-            )
-
-    def _ensure_default_account(self) -> None:
-        if self._get_row("default") is None:
-            self.create_account("default", SimulationAccountConfig())
-
-    def _get_row(self, account_id: str) -> sqlite3.Row | None:
-        with self._lock, self._connect() as connection:
-            return connection.execute(
-                "SELECT * FROM simulation_accounts WHERE account_id = ?",
-                (account_id,),
-            ).fetchone()
-
-    def _account_from_row(self, row: sqlite3.Row) -> SimulationAccount:
+    def _account_from_row(self, row: SimulationAccountRecord) -> SimulationAccount:
         return SimulationAccount(
-            account_id=row["account_id"],
-            status=row["status"],
-            current_date=row["current_date"],
-            config=SimulationAccountConfig.model_validate(json.loads(row["config_json"])),
-            portfolio=PortfolioState.model_validate(json.loads(row["portfolio_json"])),
+            account_id=row.account_id,
+            status=row.status,
+            current_date=row.current_date,
+            config=SimulationAccountConfig.model_validate(json.loads(row.config_json)),
+            portfolio=PortfolioState.model_validate(json.loads(row.portfolio_json)),
         )
 
-    def _save_account(self, account: SimulationAccount, connection: sqlite3.Connection) -> None:
+    def _save_account(self, account: SimulationAccount, session) -> None:
         timestamp = _now()
-        connection.execute(
-            """UPDATE simulation_accounts
-               SET status = ?, current_date = ?, config_json = ?, portfolio_json = ?, updated_at = ?
-               WHERE account_id = ?""",
-            (
-                account.status,
-                account.current_date,
-                _json(account.config),
-                _json(account.portfolio),
-                timestamp,
-                account.account_id,
-            ),
-        )
+        row = session.get(SimulationAccountRecord, account.account_id)
+        if row is None:
+            raise KeyError(f"模拟账户不存在: {account.account_id}")
+        row.status = account.status
+        row.current_date = account.current_date
+        row.config_json = _json(account.config)
+        row.portfolio_json = _json(account.portfolio)
+        row.updated_at = timestamp
 
     def create_account(self, account_id: str, config: SimulationAccountConfig | None = None) -> SimulationAccount:
         if not ACCOUNT_ID_PATTERN.fullmatch(account_id):
@@ -142,32 +123,28 @@ class SimulationAccountService:
                 initial_capital=account_config.initial_cash,
             ),
         )
-        with self._lock, self._connect() as connection:
-            if connection.execute(
-                "SELECT 1 FROM simulation_accounts WHERE account_id = ?", (account_id,)
-            ).fetchone():
+        with self._session() as session:
+            if session.get(SimulationAccountRecord, account_id) is not None:
                 raise ValueError(f"模拟账户已存在: {account_id}")
             timestamp = _now()
-            connection.execute(
-                """INSERT INTO simulation_accounts
-                   (account_id, status, current_date, config_json, portfolio_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    account.account_id,
-                    account.status,
-                    account.current_date,
-                    _json(account.config),
-                    _json(account.portfolio),
-                    timestamp,
-                    timestamp,
-                ),
+            session.add(
+                SimulationAccountRecord(
+                    account_id=account.account_id,
+                    status=account.status,
+                    current_date=account.current_date,
+                    config_json=_json(account.config),
+                    portfolio_json=_json(account.portfolio),
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
             )
+            session.commit()
         logger.info(f"Created simulation account: {account_id}")
         return account
 
     def list_accounts(self) -> list[SimulationAccount]:
-        with self._lock, self._connect() as connection:
-            rows = connection.execute("SELECT * FROM simulation_accounts ORDER BY created_at").fetchall()
+        with self._session() as session:
+            rows = session.scalars(select(SimulationAccountRecord).order_by(SimulationAccountRecord.created_at)).all()
         return [self._account_from_row(row) for row in rows]
 
     def get_account(self, account_id: str = "default") -> SimulationAccount:
@@ -188,8 +165,9 @@ class SimulationAccountService:
         if not config.live.token:
             config = config.model_copy(update={"live": account.config.live})
         account.config = config
-        with self._lock, self._connect() as connection:
-            self._save_account(account, connection)
+        with self._session() as session:
+            self._save_account(account, session)
+            session.commit()
         return account
 
     def update_external_config(
@@ -200,8 +178,9 @@ class SimulationAccountService:
         if not update.token:
             update = update.model_copy(update={"token": current.token})
         account.config = account.config.model_copy(update={"external": update})
-        with self._lock, self._connect() as connection:
-            self._save_account(account, connection)
+        with self._session() as session:
+            self._save_account(account, session)
+            session.commit()
         return account
 
     def update_live_config(self, account_id: str, update: LiveTradingConfig) -> SimulationAccount:
@@ -211,8 +190,9 @@ class SimulationAccountService:
         if not update.token:
             update = update.model_copy(update={"token": current.token})
         account.config = account.config.model_copy(update={"live": update})
-        with self._lock, self._connect() as connection:
-            self._save_account(account, connection)
+        with self._session() as session:
+            self._save_account(account, session)
+            session.commit()
         return account
 
     def apply_live_snapshot(
@@ -230,8 +210,9 @@ class SimulationAccountService:
         account.portfolio.positions = [Position.model_validate(item) for item in positions]
         if snapshot_date:
             account.current_date = snapshot_date
-        with self._lock, self._connect() as connection:
-            self._save_account(account, connection)
+        with self._session() as session:
+            self._save_account(account, session)
+            session.commit()
         return account
 
     def apply_external_snapshot(self, account_id: str, snapshot: dict) -> SimulationAccount:
@@ -308,9 +289,9 @@ class SimulationAccountService:
         if snapshot_date:
             account.current_date = snapshot_date
 
-        with self._lock, self._connect() as connection:
-            self._reconcile_external_orders(snapshot.get("orders", []), connection)
-            self._save_account(account, connection)
+        with self._session() as session:
+            self._reconcile_external_orders(snapshot.get("orders", []), session)
+            self._save_account(account, session)
             if snapshot_date:
                 synced_snapshot = SimulationSnapshot(
                     account_id=account_id,
@@ -321,27 +302,28 @@ class SimulationAccountService:
                     total_return_pct=account.portfolio.total_return_pct,
                     positions=account.portfolio.positions,
                 )
-                connection.execute(
-                    "INSERT OR REPLACE INTO simulation_snapshots "
-                    "(account_id, snapshot_date, snapshot_json, created_at) VALUES (?, ?, ?, ?)",
-                    (account_id, snapshot_date, _json(synced_snapshot), _now()),
+                session.merge(
+                    SimulationSnapshotRecord(
+                        account_id=account_id,
+                        snapshot_date=snapshot_date,
+                        snapshot_json=_json(synced_snapshot),
+                        created_at=_now(),
+                    )
                 )
+            session.commit()
         return account
 
     @staticmethod
-    def _reconcile_external_orders(orders: list[dict], connection: sqlite3.Connection) -> None:
+    def _reconcile_external_orders(orders: list[dict], session) -> None:
         """Apply Eastmoney status rows to local orders identified by ``sid``."""
         for remote in orders:
             sid = str(remote.get("sid", "")).strip()
             if not sid:
                 continue
-            row = connection.execute(
-                "SELECT * FROM simulation_orders WHERE order_id = ?",
-                (sid,),
-            ).fetchone()
+            row = session.get(SimulationOrderRecord, sid)
             if row is None:
                 continue
-            order = SimulationOrder.model_validate(json.loads(row["order_json"]))
+            order = SimulationOrder.model_validate(json.loads(row.order_json))
             status = remote.get("status")
             if status in {"pending", "cancelled", "rejected", "filled"}:
                 order.status = status
@@ -350,10 +332,9 @@ class SimulationAccountService:
                 order.fill_date = str(remote.get("fill_date") or "")[:10] or order.fill_date
             if remote.get("reject_reason"):
                 order.reject_reason = str(remote["reject_reason"])
-            connection.execute(
-                "UPDATE simulation_orders SET status = ?, order_json = ?, updated_at = ? WHERE order_id = ?",
-                (order.status, _json(order), _now(), sid),
-            )
+            row.status = order.status
+            row.order_json = _json(order)
+            row.updated_at = _now()
 
     def reset_account(self, account_id: str = "default") -> SimulationAccount:
         account = self.get_account(account_id)
@@ -363,10 +344,11 @@ class SimulationAccountService:
             cash=account.config.initial_cash,
             initial_capital=account.config.initial_cash,
         )
-        with self._lock, self._connect() as connection:
-            self._save_account(account, connection)
-            connection.execute("DELETE FROM simulation_orders WHERE account_id = ?", (account_id,))
-            connection.execute("DELETE FROM simulation_snapshots WHERE account_id = ?", (account_id,))
+        with self._session() as session:
+            self._save_account(account, session)
+            session.execute(delete(SimulationOrderRecord).where(SimulationOrderRecord.account_id == account_id))
+            session.execute(delete(SimulationSnapshotRecord).where(SimulationSnapshotRecord.account_id == account_id))
+            session.commit()
         logger.info(f"Reset simulation account: {account_id}")
         return account
 
@@ -375,8 +357,9 @@ class SimulationAccountService:
             raise ValueError("status 必须是 active 或 paused")
         account = self.get_account(account_id)
         account.status = status
-        with self._lock, self._connect() as connection:
-            self._save_account(account, connection)
+        with self._session() as session:
+            self._save_account(account, session)
+            session.commit()
         return account
 
     def advance_date(self, account_id: str, current_date: str) -> SimulationAccount:
@@ -390,8 +373,9 @@ class SimulationAccountService:
         engine.set_date(current_date)
         account.portfolio = engine.portfolio
         account.current_date = current_date
-        with self._lock, self._connect() as connection:
-            self._save_account(account, connection)
+        with self._session() as session:
+            self._save_account(account, session)
+            session.commit()
         return account
 
     def mark_to_market(self, account_id: str, prices: dict[str, float], snapshot_date: str) -> SimulationAccount:
@@ -415,13 +399,17 @@ class SimulationAccountService:
             total_return_pct=account.portfolio.total_return_pct,
             positions=account.portfolio.positions,
         )
-        with self._lock, self._connect() as connection:
-            self._save_account(account, connection)
-            connection.execute(
-                """INSERT OR REPLACE INTO simulation_snapshots
-                   (account_id, snapshot_date, snapshot_json, created_at) VALUES (?, ?, ?, ?)""",
-                (account_id, snapshot_date, _json(snapshot), _now()),
+        with self._session() as session:
+            self._save_account(account, session)
+            session.merge(
+                SimulationSnapshotRecord(
+                    account_id=account_id,
+                    snapshot_date=snapshot_date,
+                    snapshot_json=_json(snapshot),
+                    created_at=_now(),
+                )
             )
+            session.commit()
         return account
 
     def create_order(
@@ -473,24 +461,27 @@ class SimulationAccountService:
             stop_loss=stop_loss,
             take_profit=take_profit,
         )
-        with self._lock, self._connect() as connection:
+        with self._session() as session:
             timestamp = _now()
-            connection.execute(
-                """INSERT INTO simulation_orders
-                   (order_id, account_id, status, order_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (order.order_id, account_id, order.status, _json(order), timestamp, timestamp),
+            session.add(
+                SimulationOrderRecord(
+                    order_id=order.order_id,
+                    account_id=account_id,
+                    status=order.status,
+                    order_json=_json(order),
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
             )
+            session.commit()
         return order
 
     def fill_order(self, order_id: str, fill_price: float, fill_date: str) -> SimulationOrder:
-        with self._lock, self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM simulation_orders WHERE order_id = ?", (order_id,)
-            ).fetchone()
+        with self._session() as session:
+            row = session.get(SimulationOrderRecord, order_id)
             if row is None:
                 raise KeyError(f"订单不存在: {order_id}")
-            order = SimulationOrder.model_validate(json.loads(row["order_json"]))
+            order = SimulationOrder.model_validate(json.loads(row.order_json))
             if order.status != "pending":
                 raise ValueError(f"订单当前状态为 {order.status}，不能成交")
             if fill_price <= 0:
@@ -506,10 +497,10 @@ class SimulationAccountService:
             if risk_reason:
                 order.status = "rejected"
                 order.reject_reason = risk_reason
-                connection.execute(
-                    "UPDATE simulation_orders SET status = ?, order_json = ?, updated_at = ? WHERE order_id = ?",
-                    (order.status, _json(order), _now(), order_id),
-                )
+                row.status = order.status
+                row.order_json = _json(order)
+                row.updated_at = _now()
+                session.commit()
                 return order
 
             execution_price = fill_price
@@ -551,13 +542,13 @@ class SimulationAccountService:
                 order.fill_price = trade.price
                 account.portfolio = engine.portfolio
                 account.current_date = fill_date
-                self._save_account(account, connection)
+                self._save_account(account, session)
 
             order_json = _json(order)
-            connection.execute(
-                "UPDATE simulation_orders SET status = ?, order_json = ?, updated_at = ? WHERE order_id = ?",
-                (order.status, order_json, _now(), order_id),
-            )
+            row.status = order.status
+            row.order_json = order_json
+            row.updated_at = _now()
+            session.commit()
         return order
 
     @staticmethod
@@ -589,39 +580,39 @@ class SimulationAccountService:
         return None
 
     def cancel_order(self, order_id: str) -> SimulationOrder:
-        with self._lock, self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM simulation_orders WHERE order_id = ?", (order_id,)
-            ).fetchone()
+        with self._session() as session:
+            row = session.get(SimulationOrderRecord, order_id)
             if row is None:
                 raise KeyError(f"订单不存在: {order_id}")
-            order = SimulationOrder.model_validate(json.loads(row["order_json"]))
+            order = SimulationOrder.model_validate(json.loads(row.order_json))
             if order.status == "pending":
                 order.status = "cancelled"
-                connection.execute(
-                    "UPDATE simulation_orders SET status = ?, order_json = ?, updated_at = ? WHERE order_id = ?",
-                    (order.status, _json(order), _now(), order_id),
-                )
+                row.status = order.status
+                row.order_json = _json(order)
+                row.updated_at = _now()
+                session.commit()
         return order
 
     def list_orders(self, account_id: str = "default") -> list[SimulationOrder]:
         self.get_account(account_id)
-        with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                "SELECT order_json FROM simulation_orders WHERE account_id = ? ORDER BY created_at DESC",
-                (account_id,),
-            ).fetchall()
-        return [SimulationOrder.model_validate(json.loads(row["order_json"])) for row in rows]
+        with self._session() as session:
+            rows = session.scalars(
+                select(SimulationOrderRecord)
+                .where(SimulationOrderRecord.account_id == account_id)
+                .order_by(SimulationOrderRecord.created_at.desc())
+            ).all()
+        return [SimulationOrder.model_validate(json.loads(row.order_json)) for row in rows]
 
     def list_snapshots(self, account_id: str = "default", limit: int = 100) -> list[SimulationSnapshot]:
         self.get_account(account_id)
-        with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                """SELECT snapshot_json FROM simulation_snapshots
-                   WHERE account_id = ? ORDER BY snapshot_date DESC LIMIT ?""",
-                (account_id, limit),
-            ).fetchall()
-        return [SimulationSnapshot.model_validate(json.loads(row["snapshot_json"])) for row in rows]
+        with self._session() as session:
+            rows = session.scalars(
+                select(SimulationSnapshotRecord)
+                .where(SimulationSnapshotRecord.account_id == account_id)
+                .order_by(SimulationSnapshotRecord.snapshot_date.desc())
+                .limit(limit)
+            ).all()
+        return [SimulationSnapshot.model_validate(json.loads(row.snapshot_json)) for row in rows]
 
     def daily_pnl(self, account_id: str = "default") -> float:
         """Return change from the previous stored mark-to-market snapshot."""

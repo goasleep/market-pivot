@@ -23,7 +23,7 @@ A 股 AI Agent 模拟交易系统 — 基于多智能体协作的回测 + 纸上
 
 报告内容由“数据上下文 + 多 Agent 分析 + 综合决策 + 固定报告模板”共同决定。固定模板负责报告结构，LLM 负责综合结论、风险、交易计划和各 Agent 观点；实时分析还会加入联网搜索结果，回测场景保持历史 as-of 数据边界，不主动查询实时网页。
 
-报告文件保存到配置的 S3 兼容对象存储，报告索引和元数据保存到 SQLite。后端代理预览与下载请求，因此对象存储不需要公开读权限。
+报告文件保存到配置的 S3 兼容对象存储，报告索引和元数据保存到 ORM 配置的数据库。后端代理预览与下载请求，因此对象存储不需要公开读权限。
 
 ### 并行联网搜索
 
@@ -156,7 +156,7 @@ GET /api/artifacts/{artifact_id}/download
 - `next_open` 下一交易日开盘成交、`same_close` 当日收盘成交、`manual` 手动成交
 - 单日亏损熔断、每次最大股票数和最大订单数
 
-任务默认关闭，paper 模式下所有订单只写入本地 SQLite 模拟账户，不连接真实券商。调度器会读取 A 股交易日历，数据源不可用时退化为周一至周五并记录警告。Portfolio 页面展示持仓、订单来源、日级净值快照和 WebSocket 事件；Chat 中的 Agent 决策可以在用户明确要求后提交到模拟账户。
+任务默认关闭，paper 模式下所有订单只写入 ORM 管理的模拟账户，不连接真实券商。调度器会读取 A 股交易日历，数据源不可用时退化为周一至周五并记录警告。Portfolio 页面展示持仓、订单来源、日级净值快照和 WebSocket 事件；Chat 中的 Agent 决策可以在用户明确要求后提交到模拟账户。
 
 实盘模式需要同时满足 `LIVE_TRADING_ENABLED=true`、自动化任务 `execution_mode=live` 且 `live_armed=true`、账户配置启用 `custom_http` Adapter。Adapter 对接一个由用户自行维护的交易网关：`POST /orders` 接收标准化订单，`DELETE /orders/{id}` 撤单，`GET /sync?account_id=...` 返回现金和持仓快照。默认配置和未实现的 provider 都会 fail-closed；未完成券商适配、风控和人工审批前，不应启用真实账户。
 
@@ -202,11 +202,31 @@ make down
 ```
 
 Docker 启动后访问 http://localhost:5173，后端健康检查地址为
-http://localhost:8000/api/health。会话历史通过 Tortoise ORM 保存，默认使用
-`DATABASE_PATH` 指定的 SQLite 文件；设置 `DATABASE_URL` 后可切换到 PostgreSQL，例如
-`postgres://postgres:password@localhost:5432/a_share_agent`。行情缓存、配置和模拟盘等其他
-现有模块仍使用 `DATABASE_PATH` 指定的本地 SQLite 文件。可通过 `FRONTEND_PORT` 和
+http://localhost:8000/api/health。`DATABASE_URL` 为空时，会话历史、任务状态和其他持久化数据
+使用本地 SQLite，适合单节点部署；设置 `DATABASE_URL` 后，聊天数据、任务协调、事件日志和
+账户、自动化、回测实验、制品索引、缓存、配置和 Agent checkpoint 统一使用 PostgreSQL，例如：
+`postgres://postgres:password@localhost:5432/a_share_agent`。可通过 `FRONTEND_PORT` 和
 `BACKEND_PORT` 修改映射端口。
+
+### PostgreSQL 多节点部署
+
+只有 PostgreSQL 模式支持多节点。多个 backend 节点可以同时运行，自动化调度、回测任务、
+聊天任务领取、模拟盘事件和 Agent HITL checkpoint 都使用 PostgreSQL 的事务、行锁和租约。
+节点异常后，过期租约可以由其他节点接管。
+
+多节点部署要求：
+
+- 所有节点使用同一个 `DATABASE_URL`，并连接同一个 PostgreSQL 数据库。
+- 每个节点运行一个 backend worker；不需要也不建议在同一节点启动多个 Uvicorn worker。
+- 前端请求和 SSE/WebSocket 可以被负载均衡到不同节点，任务和事件状态从 PostgreSQL 恢复。
+- `DATABASE_PATH` 仅作为本地 SQLite 单节点模式的路径，不参与 PostgreSQL 多节点协调。
+
+所有业务持久化模块均通过 ORM 访问数据库，SQLite 和 PostgreSQL 由同一套模型和 Repository
+切换。多节点模式下，业务状态、任务协调、事件、缓存和配置都写入同一个 PostgreSQL 数据库。
+制品二进制内容仍应配置共享的 S3 兼容对象存储；对象存储未配置时，不应使用节点本地目录承载
+多节点制品文件。
+
+SQLite 不承诺跨节点协调，也不建议通过共享文件系统把 SQLite 扩展成多节点部署。
 
 ## 项目结构
 

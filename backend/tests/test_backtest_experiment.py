@@ -19,6 +19,29 @@ def _history() -> pd.DataFrame:
     )
 
 
+def test_experiment_html_report_embeds_echarts_for_equity_and_drawdown():
+    from application.backtest_experiment import _render_report_html
+
+    report = _render_report_html(
+        "# 实验报告\n\n## 二、回测结果\n\n- 总收益率：10%",
+        "实验报告",
+        result={
+            "equity_curve": [
+                {"date": "2026-01-01", "value": 100000},
+                {"date": "2026-01-02", "value": 105000},
+                {"date": "2026-01-03", "value": 102000},
+            ],
+            "trades": [{"date": "2026-01-02", "action": "buy"}],
+        },
+    )
+
+    assert "echarts.min.js" in report
+    assert 'id="experiment-equity-chart"' in report
+    assert 'id="experiment-drawdown-chart"' in report
+    assert '"markPoint"' in report
+    assert "echarts.init" in report
+
+
 def test_indicator_contract_and_extended_indicators_are_deterministic():
     names = {item["name"] for item in available_indicators()}
     assert {"price_vs_ma_pct", "rsi", "atr", "volatility"}.issubset(names)

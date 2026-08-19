@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, AsyncIterator
 
-from artifacts.service import artifact_service, generate_report_copy
+from artifacts.service import artifact_service
 from graph.workflow import workflow as compiled_workflow
 from models.schemas import AssetType, MarketContext, TradeDecision
 from observability import build_trace_config
@@ -211,8 +211,7 @@ class ResearchService:
         conversation_id: str | None = None,
         task_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Create report files through the analysis application boundary."""
-        report_copy = await generate_report_copy(decision, market_context)
+        """Create report files through the dedicated ReportAgent."""
         return await asyncio.to_thread(
             artifact_service.create_analysis_artifacts,
             decision,
@@ -220,7 +219,6 @@ class ResearchService:
             source=source,
             conversation_id=conversation_id,
             task_id=task_id,
-            report_copy=report_copy,
         )
 
     @staticmethod

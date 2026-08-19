@@ -1,4 +1,4 @@
-"""Serper-backed web search with a small SQLite cache and failure isolation."""
+"""Serper-backed web search with a small ORM cache and failure isolation."""
 
 from __future__ import annotations
 

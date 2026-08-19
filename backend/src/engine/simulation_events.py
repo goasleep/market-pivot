@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+from data.runtime_store import runtime_store
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -38,12 +40,13 @@ class SimulationEventHub:
                 self._subscribers.pop(account_id, None)
 
     async def publish(self, account_id: str, event_type: str, data: dict[str, Any]) -> None:
-        event = {
-            "type": event_type,
-            "account_id": account_id,
-            "timestamp": _now(),
-            "data": data,
-        }
+        event = await runtime_store.append_event(
+            "simulation-account",
+            account_id,
+            event_type,
+            data,
+        )
+        event["account_id"] = account_id
         async with self._lock:
             subscribers = tuple(self._subscribers.get(account_id, ()))
 
@@ -54,6 +57,15 @@ class SimulationEventHub:
                 except asyncio.QueueEmpty:
                     pass
             queue.put_nowait(event)
+
+    async def list_events(self, account_id: str, after_id: int = 0) -> list[dict[str, Any]]:
+        """Read events produced by any node after the supplied cursor."""
+        events = await runtime_store.list_events(
+            "simulation-account",
+            account_id,
+            after_id,
+        )
+        return [{**event, "account_id": account_id} for event in events]
 
 
 simulation_events = SimulationEventHub()

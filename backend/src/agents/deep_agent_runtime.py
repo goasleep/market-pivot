@@ -15,19 +15,23 @@ from deepagents import create_deep_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 from loguru import logger
 
+from config import settings
+from data.postgres_checkpoint import PostgresCheckpointSaver
+from data.sqlite_checkpoint import SQLiteCheckpointSaver
 from llm.service import get_llm_service
 
 StructuredT = TypeVar("StructuredT")
 
-# A process-local checkpointer lets the application use native Deep Agent HITL
-# while the durable chat store continues to own task and UI event persistence.
-# A future deployment can replace this with a database-backed saver without
-# changing callers of this module.
-deep_agent_checkpointer = MemorySaver()
+def _build_checkpoint_saver():
+    if settings.database_url and settings.database_url.startswith(("postgres://", "postgresql://")):
+        return PostgresCheckpointSaver(settings.database_url)
+    return SQLiteCheckpointSaver()
+
+
+deep_agent_checkpointer = _build_checkpoint_saver()
 
 
 def deep_agents_enabled() -> bool:

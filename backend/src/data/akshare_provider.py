@@ -131,11 +131,13 @@ class CircuitBreaker:
 
 
 class DataCache:
-    """SQLite-based cache with TTL support and failure caching."""
+    """ORM-backed cache with TTL support and failure caching."""
 
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
-        self._database = SQLiteDatabase(db_path)
+        configured_path = str(settings.database_file_path)
+        database_url = settings.database_url if self.db_path == configured_path else None
+        self._database = SQLiteDatabase(db_path, database_url=database_url)
 
     def get(self, key: str, ttl: int = 3600) -> Any | None:
         row = self._database.get_cache(key)

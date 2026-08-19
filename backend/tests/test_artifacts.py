@@ -1,6 +1,9 @@
 import base64
 from types import SimpleNamespace
 
+import pytest
+
+from agents.report_agent import ReportAgent, ReportArtifact
 from artifacts.service import ArtifactService, render_analysis_html, render_analysis_markdown
 from models.schemas import Decision, TradeDecision
 
@@ -17,9 +20,54 @@ class MemoryArtifactStorage:
         return self.objects[object_key]
 
 
+class FakeReportAgent:
+    def generate(self, decision, market_context=None, *, generated_at=None):
+        del market_context
+        return ReportArtifact(
+            name=f"{decision.ticker}-研究分析报告.html",
+            html="<!doctype html><html><body><h1>ReportAgent report</h1></body></html>",
+            metadata={
+                "generated_by": "report_agent",
+                "report_version": "test",
+                "generated_at": generated_at,
+            },
+        )
+
+
+class FakeReportLLM:
+    def __init__(self, response: str):
+        self.response = response
+        self.calls = []
+
+    def chat_sync(self, prompt, *, system):
+        self.calls.append((prompt, system))
+        return self.response
+
+
+def test_report_agent_returns_model_generated_html_without_template_rendering():
+    llm = FakeReportLLM("```html\n<!doctype html><html><body><h1>动态报告</h1></body></html>\n```")
+    decision = TradeDecision(ticker="600000", decision=Decision.HOLD)
+
+    report = ReportAgent(llm).generate(decision, generated_at="2026-08-19T08:00:00+00:00")
+
+    assert report.html.startswith("<!doctype html>")
+    assert "动态报告" in report.html
+    assert report.metadata["generated_by"] == "report_agent"
+    assert '"generated_at": "2026-08-19T08:00:00+00:00"' in llm.calls[0][0]
+
+
+def test_report_agent_rejects_non_html_output():
+    with pytest.raises(ValueError, match="完整 HTML"):
+        ReportAgent(FakeReportLLM("这不是 HTML")).generate(TradeDecision(ticker="600000"))
+
+
 def test_analysis_artifacts_are_written_and_retrievable(tmp_path):
     storage = MemoryArtifactStorage()
-    service = ArtifactService(db_path=tmp_path / "artifacts.db", storage=storage)
+    service = ArtifactService(
+        db_path=tmp_path / "artifacts.db",
+        storage=storage,
+        report_agent=FakeReportAgent(),
+    )
     decision = TradeDecision(
         ticker="510300",
         decision=Decision.HOLD,
@@ -36,7 +84,7 @@ def test_analysis_artifacts_are_written_and_retrievable(tmp_path):
         assert saved["object_key"] in storage.objects
         assert saved["size_bytes"] > 0
         assert artifact["preview_url"].endswith(f"/{artifact['artifact_id']}/preview")
-    assert "研究分析报告" in storage.objects[artifacts[0]["object_key"]].decode()
+    assert "ReportAgent report" in storage.objects[artifacts[0]["object_key"]].decode()
     assert len(service.list()) == 1
 
 

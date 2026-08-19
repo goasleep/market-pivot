@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from data.database import SQLiteDatabase
 
-# --- LLM config persistence (SQLite, hot-reloadable) ---
+# --- LLM config persistence (ORM-backed, hot-reloadable) ---
 
 _LEGACY_LLM_CONFIG_PATH = Path(__file__).parent.parent / "data" / "llm_config.json"
 _LLM_SETTINGS_KEY = "llm_config"
@@ -24,14 +24,14 @@ _LLM_CONFIG_DEFAULTS = {
 
 
 def _load_llm_config() -> dict:
-    """Load LLM config from SQLite, falling back to env vars / defaults."""
+    """Load LLM config from the configured ORM database, then env/defaults."""
     # Start with env defaults
     config = dict(_LLM_CONFIG_DEFAULTS)
     config["api_key"] = settings.deepseek_api_key
     config["base_url"] = settings.deepseek_base_url
     config["model"] = settings.deepseek_model
 
-    # Override with the persisted SQLite setting
+    # Override with the persisted database setting
     persisted = database.get_setting(_LLM_SETTINGS_KEY)
     if isinstance(persisted, dict):
         for key in _LLM_CONFIG_DEFAULTS:
@@ -42,7 +42,7 @@ def _load_llm_config() -> dict:
 
 
 def get_llm_config() -> dict:
-    """Get current LLM configuration (hot-reads from SQLite each time)."""
+    """Get current LLM configuration (hot-reads from the ORM database)."""
     return _load_llm_config()
 
 
@@ -66,9 +66,9 @@ def save_llm_config(updates: dict) -> dict:
                 continue
             current[key] = val
 
-    # Persist alongside the data cache in the shared SQLite database
+    # Persist alongside the data cache in the configured database
     database.set_setting(_LLM_SETTINGS_KEY, current)
-    logger.info(f"LLM config saved to SQLite (model={current['model']})")
+    logger.info(f"LLM config saved to database (model={current['model']})")
 
     return current
 
@@ -93,7 +93,8 @@ class Settings(BaseSettings):
     # adapter and an isolated live account have been configured.
     live_trading_enabled: bool = False
 
-    # Unified SQLite database (cache, settings, and future trading records)
+    # Local SQLite database for single-node mode. DATABASE_URL selects the
+    # PostgreSQL runtime backend for durable multi-node deployments.
     database_path: str = "./data/cache.db"
     data_cache_path: str | None = None  # backwards-compatible legacy environment variable
     database_url: str | None = None  # optional Tortoise URL for chat persistence
@@ -148,11 +149,13 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-database = SQLiteDatabase(settings.database_file_path)
+database = SQLiteDatabase(settings.database_file_path, database_url=settings.database_url)
 
 
 def _migrate_legacy_llm_config() -> None:
     """Import the old JSON config once, then remove the legacy file."""
+    if settings.database_url:
+        return
     if database.get_setting(_LLM_SETTINGS_KEY) is not None or not _LEGACY_LLM_CONFIG_PATH.exists():
         return
 
@@ -163,7 +166,7 @@ def _migrate_legacy_llm_config() -> None:
         migrated = {key: legacy[key] for key in _LLM_CONFIG_DEFAULTS if key in legacy}
         database.set_setting(_LLM_SETTINGS_KEY, migrated)
         _LEGACY_LLM_CONFIG_PATH.unlink()
-        logger.info("Migrated LLM config from JSON into the shared SQLite database")
+        logger.info("Migrated LLM config from JSON into the local database")
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning(f"Failed to migrate legacy LLM config: {exc}")
 
