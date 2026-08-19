@@ -83,9 +83,15 @@ def build_deep_agent(
     name: str | None = None,
     model: BaseChatModel | None = None,
 ):
-    """Build one Deep Agent using the application's configured chat model."""
+    """Build one Deep Agent using a tool-call-compatible configured model.
+
+    DeepSeek V4's Thinking mode rejects forced or specific ``tool_choice``
+    values used by Deep Agents and ToolStrategy.  Deep Agents are therefore
+    built with Thinking disabled; regular chat calls retain the provider
+    default and can still use Thinking.
+    """
     return create_deep_agent(
-        model=model or get_llm_service().get_model(),
+        model=model or get_llm_service().get_model(thinking=False),
         tools=list(tools or []),
         system_prompt=system_prompt,
         response_format=response_format,

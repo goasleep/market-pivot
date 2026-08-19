@@ -62,8 +62,14 @@ class LLMService:
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        thinking: bool | None = None,
     ) -> BaseChatModel:
-        return get_chat_model(model=model, temperature=temperature, max_tokens=max_tokens)
+        return get_chat_model(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            thinking=thinking,
+        )
 
     async def chat(
         self,
@@ -139,7 +145,7 @@ class LLMService:
         responsible for executing returned tool calls and feeding ToolMessage
         results back into the conversation.
         """
-        bound_model = self.get_model(model=model, temperature=temperature).bind_tools(tools)
+        bound_model = self.get_model(model=model, temperature=temperature, thinking=False).bind_tools(tools)
         response = await bound_model.ainvoke(_to_messages(messages))
         return response
 
