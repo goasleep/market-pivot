@@ -162,6 +162,14 @@ data_sources = DataSourceRegistry(
             ("research.indicator", "research.risk", "research.plan"),
             priority=10,
         ),
+        DataSourceSpec(
+            "methodology_library",
+            "本地投资方法论库",
+            "knowledge",
+            ("knowledge.methodology",),
+            priority=10,
+            citation_required=True,
+        ),
     ]
 )
 

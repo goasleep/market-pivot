@@ -2,7 +2,7 @@
 
 from langchain_core.tools import StructuredTool
 
-from tools import artifacts, assets, data, research, simulation
+from tools import artifacts, assets, data, methodology, research, simulation
 from tools.policies import tool_policy
 
 
@@ -34,7 +34,14 @@ def build_chat_tools(
     """Build the provider-agnostic tool surface from business groups."""
     tools: list[StructuredTool] = []
     seen: set[str] = set()
-    for candidate in [*assets.TOOLS, *data.TOOLS, *research.TOOLS, *simulation.TOOLS, analysis_tool]:
+    for candidate in [
+        *assets.TOOLS,
+        *data.TOOLS,
+        *methodology.TOOLS,
+        *research.TOOLS,
+        *simulation.TOOLS,
+        analysis_tool,
+    ]:
         if tool_policy(candidate.name).side_effect and not allow_mutating_tools:
             continue
         if candidate.name not in seen:
