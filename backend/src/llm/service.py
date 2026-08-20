@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.output_parsers import JsonOutputParser
 from loguru import logger
 
-from llm.deepseek import get_chat_model
+from llm.factory import get_chat_model
 
 
 def _message_text(message: AIMessage) -> str:
@@ -63,12 +63,16 @@ class LLMService:
         temperature: float | None = None,
         max_tokens: int | None = None,
         thinking: bool | None = None,
+        profile_id: str | None = None,
+        route: str | None = None,
     ) -> BaseChatModel:
         return get_chat_model(
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
             thinking=thinking,
+            profile_id=profile_id,
+            route=route,
         )
 
     async def chat(
@@ -78,6 +82,8 @@ class LLMService:
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        profile_id: str | None = None,
+        route: str | None = None,
     ) -> str:
         """Invoke the configured chat model and return its text content."""
         messages: list[dict[str, str]] = []
@@ -90,6 +96,8 @@ class LLMService:
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                profile_id=profile_id,
+                route=route,
             ).ainvoke(_to_messages(messages))
             content = _message_text(response)
             logger.debug("LLM response ({}): {} chars", model or "configured", len(content))
@@ -105,6 +113,8 @@ class LLMService:
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        profile_id: str | None = None,
+        route: str | None = None,
     ) -> str:
         """Synchronous model call for blocking artifact-generation boundaries."""
         messages: list[dict[str, str]] = []
@@ -117,6 +127,8 @@ class LLMService:
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                profile_id=profile_id,
+                route=route,
             ).invoke(_to_messages(messages))
             content = _message_text(response)
             logger.debug("Synchronous LLM response ({}): {} chars", model or "configured", len(content))
@@ -130,11 +142,22 @@ class LLMService:
         prompt: str,
         system: str = "",
         model: str | None = None,
+        profile_id: str | None = None,
+        route: str | None = None,
     ) -> dict[str, Any]:
         """Invoke the model and parse a JSON object using LangChain's parser."""
         json_instruction = "You must respond with valid JSON only, no markdown, no explanation."
         system = f"{system}\n\n{json_instruction}" if system else json_instruction
-        raw = (await self.chat(prompt, system=system, model=model, temperature=0.0)).strip()
+        raw = (
+            await self.chat(
+                prompt,
+                system=system,
+                model=model,
+                temperature=0.0,
+                profile_id=profile_id,
+                route=route,
+            )
+        ).strip()
 
         # Keep compatibility with models that still wrap JSON in a markdown fence.
         if raw.startswith("```"):
@@ -154,9 +177,16 @@ class LLMService:
         messages: list[Any],
         model: str | None = None,
         temperature: float | None = None,
+        profile_id: str | None = None,
+        route: str | None = None,
     ) -> str:
         """Invoke the underlying LangChain model with role/content messages."""
-        response = await self.get_model(model=model, temperature=temperature).ainvoke(_to_messages(messages))
+        response = await self.get_model(
+            model=model,
+            temperature=temperature,
+            profile_id=profile_id,
+            route=route,
+        ).ainvoke(_to_messages(messages))
         return _message_text(response)
 
     async def chat_with_tools(
@@ -165,6 +195,8 @@ class LLMService:
         tools: list[Any],
         model: str | None = None,
         temperature: float | None = None,
+        profile_id: str | None = None,
+        route: str | None = None,
     ) -> AIMessage:
         """Invoke the configured model with tool definitions.
 
@@ -172,7 +204,13 @@ class LLMService:
         responsible for executing returned tool calls and feeding ToolMessage
         results back into the conversation.
         """
-        bound_model = self.get_model(model=model, temperature=temperature, thinking=False).bind_tools(tools)
+        bound_model = self.get_model(
+            model=model,
+            temperature=temperature,
+            thinking=False,
+            profile_id=profile_id,
+            route=route,
+        ).bind_tools(tools)
         response = await bound_model.ainvoke(_to_messages(messages))
         return response
 

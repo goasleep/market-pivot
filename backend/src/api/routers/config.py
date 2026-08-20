@@ -8,9 +8,8 @@ from fastapi import APIRouter
 from loguru import logger
 from pydantic import BaseModel
 
-from config import get_llm_config
+from config import get_llm_config, get_llm_state
 from data.settings_store import update_llm_config
-from llm import MODEL_CONFIGS
 
 router = APIRouter()
 
@@ -23,6 +22,10 @@ def _mask_key(key: str) -> str:
 
 
 class LLMConfigResponse(BaseModel):
+    active_profile_id: str
+    profiles: dict[str, dict]
+    routing: dict
+    # Legacy active-profile fields retained for older clients.
     api_key_masked: str
     api_key_set: bool
     base_url: str
@@ -33,6 +36,13 @@ class LLMConfigResponse(BaseModel):
 
 
 class LLMConfigUpdate(BaseModel):
+    active_profile_id: str = ""
+    profile_id: str = ""
+    profile_name: str = ""
+    provider_type: str = ""
+    routing: dict | None = None
+    models: dict[str, dict] | None = None
+    # Legacy active-profile fields.
     api_key: str = ""  # empty = keep existing
     base_url: str = ""
     model: str = ""
@@ -40,28 +50,74 @@ class LLMConfigUpdate(BaseModel):
     max_tokens: int | None = None
 
 
+def _profile_response(profile: dict) -> dict:
+    return {
+        "id": profile.get("id", ""),
+        "name": profile.get("name", profile.get("id", "")),
+        "type": profile.get("type", "openai_compatible"),
+        "api_key_masked": _mask_key(str(profile.get("api_key", ""))),
+        "api_key_set": bool(profile.get("api_key")),
+        "base_url": profile.get("base_url", ""),
+        "model": profile.get("model", ""),
+        "temperature": profile.get("temperature", 0.3),
+        "max_tokens": profile.get("max_tokens", 8192),
+        "available_models": {
+            key: {
+                "description": value.get("description", "Configured model"),
+                "max_tokens": value.get("max_tokens", profile.get("max_tokens", 8192)),
+                "temperature": value.get("temperature", profile.get("temperature", 0.3)),
+                "supports_tools": value.get("supports_tools", True),
+                "supports_reasoning": value.get("supports_reasoning", False),
+            }
+            for key, value in (profile.get("models", {}) or {}).items()
+            if isinstance(value, dict)
+        },
+    }
+
+
+def _response() -> LLMConfigResponse:
+    state = get_llm_state()
+    profiles = {key: _profile_response(value) for key, value in state["profiles"].items()}
+    active_id = state["active_profile_id"]
+    active = profiles[active_id]
+    return LLMConfigResponse(
+        active_profile_id=active_id,
+        profiles=profiles,
+        routing=state.get("routing", {}),
+        api_key_masked=active["api_key_masked"],
+        api_key_set=active["api_key_set"],
+        base_url=active["base_url"],
+        model=active["model"],
+        temperature=active["temperature"],
+        max_tokens=active["max_tokens"],
+        available_models=active["available_models"],
+    )
+
+
 @router.get("/llm", response_model=LLMConfigResponse)
 async def get_llm_settings():
     """Get current LLM configuration (API key masked)."""
-    cfg = get_llm_config()
-    return LLMConfigResponse(
-        api_key_masked=_mask_key(cfg["api_key"]),
-        api_key_set=bool(cfg["api_key"]),
-        base_url=cfg["base_url"],
-        model=cfg["model"],
-        temperature=cfg["temperature"],
-        max_tokens=cfg["max_tokens"],
-        available_models={
-            k: {"description": v["description"], "max_tokens": v["max_tokens"]} for k, v in MODEL_CONFIGS.items()
-        },
-    )
+    return _response()
 
 
 @router.put("/llm", response_model=LLMConfigResponse)
 async def update_llm_settings(update: LLMConfigUpdate):
     """Update LLM configuration. Persists to SQLite, hot-reloads immediately."""
-    # Build updates dict, skipping empty/null fields
+    # Build updates dict, skipping empty/null fields. A profile_id selects the
+    # profile being edited; active_profile_id changes the default profile.
     updates = {}
+    if update.active_profile_id:
+        updates["active_profile_id"] = update.active_profile_id
+    if update.profile_id:
+        updates["profile_id"] = update.profile_id
+    if update.profile_name:
+        updates["name"] = update.profile_name
+    if update.provider_type:
+        updates["type"] = update.provider_type
+    if update.routing is not None:
+        updates["routing"] = update.routing
+    if update.models is not None:
+        updates["models"] = update.models
     if update.api_key:
         updates["api_key"] = update.api_key
     if update.base_url:
@@ -74,19 +130,14 @@ async def update_llm_settings(update: LLMConfigUpdate):
         updates["max_tokens"] = update.max_tokens
 
     if not updates:
-        return await get_llm_settings()
+        return _response()
 
-    cfg = await update_llm_config(updates)
-    logger.info(f"LLM config updated via API: model={cfg['model']}, base_url={cfg['base_url']}")
-
-    return LLMConfigResponse(
-        api_key_masked=_mask_key(cfg["api_key"]),
-        api_key_set=bool(cfg["api_key"]),
-        base_url=cfg["base_url"],
-        model=cfg["model"],
-        temperature=cfg["temperature"],
-        max_tokens=cfg["max_tokens"],
-        available_models={
-            k: {"description": v["description"], "max_tokens": v["max_tokens"]} for k, v in MODEL_CONFIGS.items()
-        },
+    await update_llm_config(updates)
+    active = get_llm_config()
+    logger.info(
+        "LLM config updated via API: profile={}, model={}, base_url={}",
+        active["profile_id"],
+        active["model"],
+        active["base_url"],
     )
+    return _response()

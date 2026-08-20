@@ -63,6 +63,9 @@ class AssetAgentRequest:
     task_id: str | None = None
     allow_mutating_tools: bool = False
     intent_confirmed: bool = False
+    llm_profile_id: str | None = None
+    llm_model: str | None = None
+    llm_auto: bool = False
 
     @property
     def ticker(self) -> str | None:
@@ -249,6 +252,9 @@ class AssetAgent:
             conversation_id=kwargs.get("conversation_id"),
             task_id=kwargs.get("task_id"),
             allow_mutating_tools=self._explicitly_requests_mutation(message),
+            llm_profile_id=kwargs.get("llm_profile_id"),
+            llm_model=kwargs.get("llm_model"),
+            llm_auto=bool(kwargs.get("llm_auto", False)),
         )
 
     @staticmethod
@@ -264,6 +270,9 @@ class AssetAgent:
             "task_id": request.task_id,
             "allow_mutating_tools": request.allow_mutating_tools,
             "intent_confirmed": request.intent_confirmed,
+            "llm_profile_id": request.llm_profile_id,
+            "llm_model": request.llm_model,
+            "llm_auto": request.llm_auto,
         }
 
     @staticmethod
@@ -279,6 +288,9 @@ class AssetAgent:
             task_id=payload.get("task_id"),
             allow_mutating_tools=bool(payload.get("allow_mutating_tools", False)),
             intent_confirmed=bool(payload.get("intent_confirmed", False)),
+            llm_profile_id=payload.get("llm_profile_id"),
+            llm_model=payload.get("llm_model"),
+            llm_auto=bool(payload.get("llm_auto", False)),
         )
 
     def _analysis_tool(

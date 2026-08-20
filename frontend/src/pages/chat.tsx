@@ -8,6 +8,7 @@ import {
   type ChatReference,
 } from "@/components/chat/ChatMessage";
 import type { A2UIAction, A2UIMessage } from "@/components/chat/A2UIRenderer";
+import { getLLMConfig, type LLMConfig } from "@/api";
 import {
   a2uiMessageKey,
   a2uiMessages,
@@ -84,6 +85,10 @@ export function ChatPage() {
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
   const [sending, setSending] = useState(false);
+  const [llmConfig, setLlmConfig] = useState<LLMConfig | null>(null);
+  const [llmProfileId, setLlmProfileId] = useState("");
+  const [llmModel, setLlmModel] = useState("");
+  const [llmAuto, setLlmAuto] = useState(false);
   const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(
     null,
   );
@@ -106,6 +111,18 @@ export function ChatPage() {
       ) || store.conversations[0],
     [store],
   );
+
+  useEffect(() => {
+    void getLLMConfig()
+      .then((data) => {
+        setLlmConfig(data);
+        setLlmProfileId(data.active_profile_id);
+        setLlmModel(data.profiles[data.active_profile_id]?.model || data.model);
+      })
+      .catch(() => {
+        // The backend still has a default model if settings are unavailable.
+      });
+  }, []);
 
   // `sending` represents a task running anywhere in this chat page. Keep it
   // separate from the selected conversation so switching views never cancels
@@ -580,6 +597,9 @@ export function ChatPage() {
               })),
               conversation_id: conversationId,
               task_id: taskId,
+              llm_profile_id: llmAuto ? undefined : llmProfileId || undefined,
+              llm_model: llmAuto ? undefined : llmModel || undefined,
+              llm_auto: llmAuto,
             }),
             signal: abortController.signal,
           });
@@ -660,6 +680,9 @@ export function ChatPage() {
       activeConversation,
       appendToAssistant,
       editingMessageIndex,
+      llmAuto,
+      llmModel,
+      llmProfileId,
       sending,
       setAssistantReferences,
       updateConversation,
@@ -1174,6 +1197,42 @@ export function ChatPage() {
               </div>
             )}
             <div className="flex items-end gap-2 rounded-xl border bg-background p-2 shadow-sm">
+              <div className="hidden shrink-0 items-center border-r pr-2 sm:flex">
+                <select
+                  aria-label="选择模型"
+                  value={llmAuto ? "__auto__" : `${llmProfileId}:${llmModel}`}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === "__auto__") {
+                      setLlmAuto(true);
+                      return;
+                    }
+                    const separator = value.indexOf(":");
+                    if (separator < 0) return;
+                    setLlmAuto(false);
+                    setLlmProfileId(value.slice(0, separator));
+                    setLlmModel(value.slice(separator + 1));
+                  }}
+                  disabled={sending || !llmConfig}
+                  className="max-w-[180px] bg-transparent text-xs outline-none"
+                >
+                  <option value="__auto__">自动路由</option>
+                  {llmConfig && Object.values(llmConfig.profiles).map((profile) => (
+                    <optgroup key={profile.id} label={profile.name}>
+                      {Object.keys(profile.available_models).map((model) => (
+                        <option key={`${profile.id}:${model}`} value={`${profile.id}:${model}`}>
+                          {model}
+                        </option>
+                      ))}
+                      {profile.model && !profile.available_models[profile.model] && (
+                        <option value={`${profile.id}:${profile.model}`}>
+                          {profile.model}（自定义）
+                        </option>
+                      )}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
               <Input
                 value={input}
                 onChange={(event) => setInput(event.target.value)}

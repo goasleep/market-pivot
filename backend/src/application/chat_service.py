@@ -11,6 +11,8 @@ from loguru import logger
 
 from agents.asset_agent import asset_agent
 from application.chat_store import ChatStore
+from config import resolve_llm_profile
+from llm_runtime import use_llm_profile
 from widgets.a2ui import render_activity, render_markdown, render_tool_result
 
 
@@ -27,6 +29,24 @@ class ChatTaskInput:
     strategy: str | None
     asset_type: Any
     assistant_message_id: str
+    llm_profile_id: str | None = None
+    llm_model: str | None = None
+    llm_auto: bool = False
+
+
+def _llm_route(intent: Any, message: str = "") -> str:
+    if isinstance(intent, dict):
+        message = str(intent.get("message", message))
+        value = str(intent.get("intent", ""))
+    else:
+        value = getattr(intent, "value", str(intent))
+    research_terms = (
+        "分析", "回测", "策略", "对比", "行情", "历史", "新闻", "风险", "买入", "卖出",
+        "基金", "股票", "etf", "lof",
+    )
+    return "analysis" if value in {"analyze", "backtest", "compare", "strategies"} or any(
+        term in message.lower() for term in research_terms
+    ) or any(char.isdigit() for char in message) else "chat"
 
 
 class ChatTaskManager:
@@ -365,8 +385,21 @@ class ChatTaskManager:
                 conversation_id=task_input.conversation_id,
                 task_id=task_input.task_id,
                 asset_type=task_input.asset_type,
+                llm_profile_id=task_input.llm_profile_id,
+                llm_model=task_input.llm_model,
+                llm_auto=task_input.llm_auto,
             )
-            paused = await self._consume_agent_events(task_input, asset_agent.chat(request))
+            profile = resolve_llm_profile(
+                task_input.llm_profile_id,
+                task_input.llm_model,
+                route=_llm_route(
+                    request.get("intent") if isinstance(request, dict) else request.intent,
+                    request.get("message", "") if isinstance(request, dict) else request.message,
+                ),
+                auto=task_input.llm_auto,
+            )
+            with use_llm_profile(profile):
+                paused = await self._consume_agent_events(task_input, asset_agent.chat(request))
             if paused:
                 return
             await self._emit_a2ui(
@@ -424,6 +457,9 @@ class ChatTaskManager:
             strategy=state.get("strategy"),
             asset_type=state.get("asset_type"),
             assistant_message_id=str(state["assistant_message_id"]),
+            llm_profile_id=state.get("llm_profile_id"),
+            llm_model=state.get("llm_model"),
+            llm_auto=bool(state.get("llm_auto", False)),
         )
         await self.start(task_input, answered)
         return {"task_id": task_id, "status": "running", "interaction": answered}
@@ -438,6 +474,9 @@ class ChatTaskManager:
             strategy=state.get("strategy"),
             asset_type=state.get("asset_type"),
             assistant_message_id=str(state["assistant_message_id"]),
+            llm_profile_id=state.get("llm_profile_id"),
+            llm_model=state.get("llm_model"),
+            llm_auto=bool(state.get("llm_auto", False)),
         )
 
     async def _run_resume(self, task_input: ChatTaskInput, interaction: dict[str, Any]) -> None:
@@ -445,10 +484,25 @@ class ChatTaskManager:
         heartbeat = asyncio.create_task(self._heartbeat(task_id), name=f"chat-heartbeat-{task_id}")
         try:
             await self._emit_text(task_input, "已收到你的选择，Agent 继续执行。")
-            paused = await self._consume_agent_events(
-                task_input,
-                asset_agent.resume_chat(interaction, str(interaction["selected_option"])),
+            request_payload = (interaction.get("payload") or {}).get("request") or {}
+            if hasattr(asset_agent, "request_from_payload"):
+                request = asset_agent.request_from_payload(request_payload)
+            else:
+                request = {"intent": "chat"}
+            profile = resolve_llm_profile(
+                task_input.llm_profile_id,
+                task_input.llm_model,
+                route=_llm_route(
+                    request.get("intent") if isinstance(request, dict) else request.intent,
+                    request.get("message", "") if isinstance(request, dict) else request.message,
+                ),
+                auto=task_input.llm_auto,
             )
+            with use_llm_profile(profile):
+                paused = await self._consume_agent_events(
+                    task_input,
+                    asset_agent.resume_chat(interaction, str(interaction["selected_option"])),
+                )
             if paused:
                 return
             record = await self.store.get_task(task_id)

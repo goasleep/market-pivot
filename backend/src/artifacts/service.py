@@ -19,7 +19,7 @@ from loguru import logger
 from agents.report_agent import ReportAgent
 from artifacts.storage import ArtifactStorage, LocalArtifactStorage, S3ArtifactStorage
 from charts.echarts import ECHARTS_CDN, line_option, render_chart_container, signal_attribution_option
-from config import settings
+from config import get_llm_config, settings
 from data.db_models import ArtifactRecord
 from data.tortoise_db import init_database
 from llm.service import get_llm_service
@@ -304,7 +304,7 @@ async def generate_report_copy(
     market_context: Any | None = None,
 ) -> dict[str, str]:
     """Ask the configured LLM for consistent report prose, with safe fallback."""
-    if not settings.deepseek_api_key.strip():
+    if not get_llm_config().get("api_key", "").strip():
         return {}
 
     prompt = _json(_report_prompt_payload(decision, market_context))

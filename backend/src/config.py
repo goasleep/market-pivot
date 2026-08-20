@@ -1,31 +1,145 @@
 """Configuration management for A-Share Agent backend."""
 
 import os
+from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from llm_catalog import default_profiles, model_info
+from llm_runtime import current_llm_profile
+
 # --- LLM config defaults (runtime state is loaded by the application startup) ---
 
 _LLM_CONFIG_DEFAULTS = {
-    "api_key": "",
-    "base_url": "https://api.deepseek.com/v1",
-    "model": "deepseek-v4-flash",
-    "temperature": 0.3,
-    "max_tokens": 8192,
+    "active_profile_id": "deepseek",
+    "profiles": {},
+    "routing": {
+        "enabled": False,
+        "routes": {
+            "chat": {"profile_id": "deepseek", "model": "deepseek-v4-flash"},
+            "analysis": {"profile_id": "deepseek", "model": "deepseek-v4-flash"},
+            "report": {"profile_id": "deepseek", "model": "deepseek-chat"},
+        },
+    },
 }
 
 
-_runtime_llm_config: dict = {}
+_runtime_llm_config: dict[str, Any] = {}
 
 
-def get_llm_config() -> dict:
-    """Get the hot-reloadable in-memory LLM configuration."""
-    return dict(_runtime_llm_config)
+def _normalise_state(raw: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Migrate the old flat DeepSeek config into the profile format."""
+    value = raw if isinstance(raw, dict) else {}
+    if isinstance(value.get("profiles"), dict) and value["profiles"]:
+        state = deepcopy(value)
+    else:
+        legacy = value
+        profiles = default_profiles(
+            deepseek_api_key=str(legacy.get("api_key", settings.deepseek_api_key) or ""),
+            deepseek_base_url=str(legacy.get("base_url", settings.deepseek_base_url) or ""),
+            deepseek_model=str(legacy.get("model", settings.deepseek_model) or ""),
+        )
+        if "temperature" in legacy:
+            profiles["deepseek"]["temperature"] = legacy["temperature"]
+        if "max_tokens" in legacy:
+            profiles["deepseek"]["max_tokens"] = legacy["max_tokens"]
+        state = {
+            "active_profile_id": "deepseek",
+            "profiles": profiles,
+            "routing": deepcopy(_LLM_CONFIG_DEFAULTS["routing"]),
+        }
+
+    state.setdefault("active_profile_id", "deepseek")
+    state.setdefault("routing", deepcopy(_LLM_CONFIG_DEFAULTS["routing"]))
+    routing = state["routing"]
+    if not isinstance(routing, dict):
+        routing = deepcopy(_LLM_CONFIG_DEFAULTS["routing"])
+        state["routing"] = routing
+    routing.setdefault("enabled", False)
+    routing.setdefault("routes", {})
+    for route, target in _LLM_CONFIG_DEFAULTS["routing"]["routes"].items():
+        routing["routes"].setdefault(route, deepcopy(target))
+
+    profiles = state["profiles"]
+    for profile_id, profile in list(profiles.items()):
+        if not isinstance(profile, dict):
+            del profiles[profile_id]
+            continue
+        profile.setdefault("id", profile_id)
+        profile.setdefault("name", profile_id)
+        profile.setdefault("type", "openai_compatible")
+        profile.setdefault("api_key", "")
+        profile.setdefault("base_url", "")
+        profile.setdefault("model", "")
+        profile.setdefault("temperature", 0.3)
+        profile.setdefault("max_tokens", 8192)
+        profile.setdefault("models", {})
+        if not isinstance(profile["models"], dict):
+            profile["models"] = {}
+        for model, info in profile["models"].items():
+            if isinstance(info, dict):
+                info.setdefault("max_tokens", profile["max_tokens"])
+                info.setdefault("temperature", profile["temperature"])
+                info.setdefault("description", "Configured model")
+                info.setdefault("supports_tools", True)
+                info.setdefault("supports_reasoning", False)
+
+    if state["active_profile_id"] not in profiles:
+        state["active_profile_id"] = next(iter(profiles), "deepseek")
+    return state
 
 
-def save_llm_config(updates: dict) -> dict:
+def get_llm_state() -> dict[str, Any]:
+    """Get the complete hot-reloadable profile configuration."""
+    return deepcopy(_runtime_llm_config)
+
+
+def get_llm_config(
+    profile_id: str | None = None,
+    model: str | None = None,
+    route: str | None = None,
+) -> dict[str, Any]:
+    """Get one effective profile, respecting request-scoped selection."""
+    scoped = current_llm_profile()
+    if scoped is not None and profile_id is None and model is None and route is None:
+        return scoped
+    state = get_llm_state()
+    profiles = state["profiles"]
+    selected_id = profile_id or state["active_profile_id"]
+    if route and state.get("routing", {}).get("enabled") and profile_id is None and model is None:
+        target = state.get("routing", {}).get("routes", {}).get(route, {})
+        selected_id = target.get("profile_id") or selected_id
+        model = model or target.get("model")
+    profile = deepcopy(profiles.get(selected_id) or profiles[state["active_profile_id"]])
+    selected_model = model or profile.get("model", "")
+    profile["profile_id"] = profile.get("id", selected_id)
+    profile["model"] = selected_model
+    info = model_info(profile, selected_model)
+    profile["temperature"] = info.get("temperature", profile.get("temperature", 0.3))
+    profile["max_tokens"] = info.get("max_tokens", profile.get("max_tokens", 8192))
+    profile["model_info"] = info
+    return profile
+
+
+def resolve_llm_profile(
+    profile_id: str | None = None,
+    model: str | None = None,
+    *,
+    route: str = "chat",
+    auto: bool = False,
+) -> dict[str, Any]:
+    """Resolve and snapshot a profile for one task."""
+    return get_llm_config(
+        profile_id=None if auto else profile_id,
+        model=None if auto else model,
+        route=route if auto else None,
+    )
+
+
+def save_llm_config(updates: dict) -> dict[str, Any]:
     """Update the in-memory LLM configuration.
 
     Args:
@@ -35,20 +149,39 @@ def save_llm_config(updates: dict) -> dict:
     Returns:
         The full updated config dict.
     """
-    current = get_llm_config()
-
-    for key in _LLM_CONFIG_DEFAULTS:
-        if key in updates:
-            val = updates[key]
-            # Skip empty api_key (don't overwrite existing key with empty)
-            if key == "api_key" and not val:
-                continue
-            current[key] = val
-
-    _runtime_llm_config.update(current)
-    logger.info(f"LLM config updated (model={current['model']})")
-
-    return current
+    current = _normalise_state(updates if "profiles" in updates else _runtime_llm_config)
+    if "profiles" in updates:
+        current = _normalise_state(updates)
+    else:
+        profile_id = str(updates.get("profile_id") or current["active_profile_id"])
+        profile = current["profiles"].setdefault(
+            profile_id,
+            {
+                "id": profile_id,
+                "name": profile_id,
+                "type": "openai_compatible",
+                "api_key": "",
+                "base_url": "",
+                "model": "",
+                "temperature": 0.3,
+                "max_tokens": 8192,
+                "models": {},
+            },
+        )
+        for key in ("name", "type", "base_url", "model", "temperature", "max_tokens", "models"):
+            if key in updates and updates[key] is not None:
+                profile[key] = updates[key]
+        if updates.get("api_key"):
+            profile["api_key"] = updates["api_key"]
+        if "active_profile_id" in updates and updates["active_profile_id"] in current["profiles"]:
+            current["active_profile_id"] = updates["active_profile_id"]
+        if "routing" in updates:
+            current["routing"] = updates["routing"]
+    _runtime_llm_config.clear()
+    _runtime_llm_config.update(_normalise_state(current))
+    active = get_llm_config()
+    logger.info("LLM config updated (profile={}, model={})", active["profile_id"], active["model"])
+    return get_llm_state()
 
 
 class Settings(BaseSettings):
@@ -127,13 +260,18 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-_runtime_llm_config.update(_LLM_CONFIG_DEFAULTS)
 _runtime_llm_config.update(
-    {
-        "api_key": settings.deepseek_api_key,
-        "base_url": settings.deepseek_base_url,
-        "model": settings.deepseek_model,
-    }
+    _normalise_state(
+        {
+            "active_profile_id": "deepseek",
+            "profiles": default_profiles(
+                deepseek_api_key=settings.deepseek_api_key,
+                deepseek_base_url=settings.deepseek_base_url,
+                deepseek_model=settings.deepseek_model,
+            ),
+            "routing": deepcopy(_LLM_CONFIG_DEFAULTS["routing"]),
+        }
+    )
 )
 
 

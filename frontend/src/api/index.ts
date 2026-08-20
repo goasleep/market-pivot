@@ -373,9 +373,15 @@ export async function getSystemStatus(): Promise<BreakerStatus> {
 export interface LLMModelInfo {
   description: string;
   max_tokens: number;
+  temperature?: number;
+  supports_tools?: boolean;
+  supports_reasoning?: boolean;
 }
 
-export interface LLMConfig {
+export interface LLMProfile {
+  id: string;
+  name: string;
+  type: string;
   api_key_masked: string;
   api_key_set: boolean;
   base_url: string;
@@ -385,7 +391,29 @@ export interface LLMConfig {
   available_models: Record<string, LLMModelInfo>;
 }
 
+export interface LLMConfig {
+  api_key_masked: string;
+  api_key_set: boolean;
+  active_profile_id: string;
+  profiles: Record<string, LLMProfile>;
+  routing: {
+    enabled: boolean;
+    routes: Record<string, { profile_id: string; model: string }>;
+  };
+  base_url: string;
+  model: string;
+  temperature: number;
+  max_tokens: number;
+  available_models: Record<string, LLMModelInfo>;
+}
+
 export interface LLMConfigUpdate {
+  active_profile_id?: string;
+  profile_id?: string;
+  profile_name?: string;
+  provider_type?: string;
+  routing?: LLMConfig["routing"];
+  models?: Record<string, LLMModelInfo>;
   api_key?: string;
   base_url?: string;
   model?: string;

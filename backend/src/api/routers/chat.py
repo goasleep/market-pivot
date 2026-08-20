@@ -28,6 +28,9 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = Field(default=None, description="Client-side conversation identifier")
     asset_type: AssetType | None = Field(default=None, description="Optional stock, ETF, or LOF override")
     task_id: str | None = Field(default=None, description="Client-generated task identifier")
+    llm_profile_id: str | None = Field(default=None, description="Optional LLM profile override")
+    llm_model: str | None = Field(default=None, description="Optional model override within the profile")
+    llm_auto: bool = Field(default=False, description="Use configured intent-based model routing")
 
 
 class ConversationUpdate(BaseModel):
@@ -62,6 +65,9 @@ async def chat_send(req: ChatRequest):
             history=history,
             strategy=req.strategy,
             asset_type=req.asset_type.value if req.asset_type else None,
+            llm_profile_id=req.llm_profile_id,
+            llm_model=req.llm_model,
+            llm_auto=req.llm_auto,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -73,6 +79,9 @@ async def chat_send(req: ChatRequest):
         strategy=req.strategy,
         asset_type=req.asset_type,
         assistant_message_id=assistant_message_id,
+        llm_profile_id=req.llm_profile_id,
+        llm_model=req.llm_model,
+        llm_auto=req.llm_auto,
     )
 
     async def event_generator():

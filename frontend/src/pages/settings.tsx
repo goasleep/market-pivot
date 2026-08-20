@@ -27,11 +27,19 @@ export function SettingsPage() {
 
   // Form fields
   const [apiKey, setApiKey] = useState("");
+  const [profileId, setProfileId] = useState("");
+  const [profileName, setProfileName] = useState("");
+  const [providerType, setProviderType] = useState("openai_compatible");
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
   const [temperature, setTemperature] = useState(0.3);
   const [maxTokens, setMaxTokens] = useState(8192);
   const [showApiKey, setShowApiKey] = useState(false);
+  const [routingEnabled, setRoutingEnabled] = useState(false);
+  const [chatRouteProfile, setChatRouteProfile] = useState("");
+  const [chatRouteModel, setChatRouteModel] = useState("");
+  const [analysisRouteProfile, setAnalysisRouteProfile] = useState("");
+  const [analysisRouteModel, setAnalysisRouteModel] = useState("");
 
   const fetchConfig = async () => {
     setLoading(true);
@@ -39,10 +47,19 @@ export function SettingsPage() {
     try {
       const data = await getLLMConfig();
       setConfig(data);
-      setBaseUrl(data.base_url);
-      setModel(data.model);
-      setTemperature(data.temperature);
-      setMaxTokens(data.max_tokens);
+      const active = data.profiles[data.active_profile_id];
+      setProfileId(data.active_profile_id);
+      setProfileName(active?.name || data.active_profile_id);
+      setProviderType(active?.type || "openai_compatible");
+      setBaseUrl(active?.base_url || data.base_url);
+      setModel(active?.model || data.model);
+      setTemperature(active?.temperature ?? data.temperature);
+      setMaxTokens(active?.max_tokens ?? data.max_tokens);
+      setRoutingEnabled(data.routing?.enabled ?? false);
+      setChatRouteProfile(data.routing?.routes?.chat?.profile_id || data.active_profile_id);
+      setChatRouteModel(data.routing?.routes?.chat?.model || active?.model || data.model);
+      setAnalysisRouteProfile(data.routing?.routes?.analysis?.profile_id || data.active_profile_id);
+      setAnalysisRouteModel(data.routing?.routes?.analysis?.model || active?.model || data.model);
       setApiKey(""); // never pre-fill with actual key
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load config");
@@ -55,16 +72,42 @@ export function SettingsPage() {
     fetchConfig();
   }, []);
 
+  const selectProfile = (id: string) => {
+    const selected = config?.profiles[id];
+    if (!selected) return;
+    setProfileId(id);
+    setProfileName(selected.name);
+    setProviderType(selected.type);
+    setBaseUrl(selected.base_url);
+    setModel(selected.model);
+    setTemperature(selected.temperature);
+    setMaxTokens(selected.max_tokens);
+    setApiKey("");
+  };
+
+  const selectedProfile = config?.profiles[profileId];
+
   const handleSave = async () => {
     setSaving(true);
     setError(null);
     setSuccess(false);
     try {
       const update: Record<string, unknown> = {
+        active_profile_id: profileId,
+        profile_id: profileId,
+        profile_name: profileName,
+        provider_type: providerType,
         base_url: baseUrl,
         model,
         temperature,
         max_tokens: maxTokens,
+        routing: {
+          enabled: routingEnabled,
+          routes: {
+            chat: { profile_id: chatRouteProfile, model: chatRouteModel },
+            analysis: { profile_id: analysisRouteProfile, model: analysisRouteModel },
+          },
+        },
       };
       // Only send api_key if user typed a new one
       if (apiKey.trim()) {
@@ -125,7 +168,7 @@ export function SettingsPage() {
         <CardContent className="space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-sm text-muted-foreground">API Key</span>
-            {config?.api_key_set ? (
+            {selectedProfile?.api_key_set ? (
               <Badge className="bg-green-500/15 text-green-600 hover:bg-green-500/15">
                 Configured
               </Badge>
@@ -133,11 +176,11 @@ export function SettingsPage() {
               <Badge variant="destructive">Not Set</Badge>
             )}
           </div>
-          {config?.api_key_set && (
+          {selectedProfile?.api_key_set && (
             <div className="flex items-center justify-between">
               <span className="text-sm text-muted-foreground">Masked Key</span>
               <code className="text-xs text-muted-foreground">
-                {config.api_key_masked}
+                {selectedProfile.api_key_masked}
               </code>
             </div>
           )}
@@ -154,6 +197,45 @@ export function SettingsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
+          <div className="space-y-2">
+            <Label htmlFor="profile">Provider Profile</Label>
+            <select
+              id="profile"
+              value={profileId}
+              onChange={(e) => selectProfile(e.target.value)}
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+            >
+              {config && Object.values(config.profiles).map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}（{profile.type}）
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              每个 Profile 可以拥有独立的 API Key、Base URL 和模型目录。
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="profile_name">Profile Name</Label>
+            <Input id="profile_name" value={profileName} onChange={(e) => setProfileName(e.target.value)} />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="provider_type">Provider Type</Label>
+            <select
+              id="provider_type"
+              value={providerType}
+              onChange={(e) => setProviderType(e.target.value)}
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+            >
+              <option value="deepseek">DeepSeek Native</option>
+              <option value="openai_compatible">OpenAI Compatible</option>
+            </select>
+          </div>
+
+          <Separator />
+
           {/* API Key */}
           <div className="space-y-2">
             <Label htmlFor="api_key">API Key</Label>
@@ -162,9 +244,9 @@ export function SettingsPage() {
                 id="api_key"
                 type={showApiKey ? "text" : "password"}
                 placeholder={
-                  config?.api_key_set
-                    ? `Current: ${config.api_key_masked} (type new key to replace)`
-                    : "Enter your DeepSeek API key"
+                  selectedProfile?.api_key_set
+                    ? `Current: ${selectedProfile.api_key_masked} (type new key to replace)`
+                    : "Enter your provider API key"
                 }
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
@@ -186,12 +268,12 @@ export function SettingsPage() {
             <p className="text-xs text-muted-foreground">
               Leave empty to keep the existing key. Get your key from{" "}
               <a
-                href="https://platform.deepseek.com/api_keys"
+                href={providerType === "deepseek" ? "https://platform.deepseek.com/api_keys" : "https://platform.openai.com/api-keys"}
                 target="_blank"
                 rel="noreferrer"
                 className="text-primary hover:underline"
               >
-                DeepSeek Platform
+                provider platform
               </a>
               .
             </p>
@@ -218,34 +300,31 @@ export function SettingsPage() {
           {/* Model */}
           <div className="space-y-2">
             <Label htmlFor="model">Model</Label>
-            <select
+            <Input
               id="model"
+              list={`models-${profileId}`}
               value={model}
               onChange={(e) => {
                 const val = e.target.value;
                 setModel(val);
                 // Auto-fill model defaults when switching
-                if (config?.available_models[val]) {
-                  setMaxTokens(config.available_models[val].max_tokens);
+                const models = config?.profiles[profileId]?.available_models;
+                if (models?.[val]) {
+                  setMaxTokens(models[val].max_tokens);
+                  if (models[val].temperature !== undefined) setTemperature(models[val].temperature);
                 }
               }}
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {config?.available_models &&
-                Object.entries(config.available_models).map(
-                  ([key, info]) => (
-                    <option key={key} value={key}>
-                      {key} — {info.description}
-                    </option>
-                  )
-                )}
-              {/* Allow custom model names not in preset */}
-              {model &&
-                config?.available_models &&
-                !(model in config.available_models) && (
-                  <option value={model}>{model} (custom)</option>
-                )}
-            </select>
+              placeholder="输入模型名称，也可从预置列表选择"
+            />
+            <datalist id={`models-${profileId}`}>
+              {config?.profiles[profileId]?.available_models &&
+                Object.entries(config.profiles[profileId].available_models).map(([key, info]) => (
+                  <option key={key} value={key} label={info.description} />
+                ))}
+            </datalist>
+            <p className="text-xs text-muted-foreground">
+              OpenAI-compatible 服务可直接填写服务端实际暴露的模型 ID。
+            </p>
           </div>
 
           {/* Temperature */}
@@ -285,6 +364,70 @@ export function SettingsPage() {
             <p className="text-xs text-muted-foreground">
               Maximum tokens the model can generate per response.
             </p>
+          </div>
+
+          <Separator />
+
+          <div className="space-y-3 rounded-md border p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <Label htmlFor="routing_enabled">Automatic Model Routing</Label>
+                <p className="text-xs text-muted-foreground">按聊天类型选择默认模型；聊天窗口仍可单次覆盖。</p>
+              </div>
+              <input
+                id="routing_enabled"
+                type="checkbox"
+                checked={routingEnabled}
+                onChange={(e) => setRoutingEnabled(e.target.checked)}
+                className="h-4 w-4 accent-primary"
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <Label htmlFor="chat_route">General Chat Model</Label>
+                <select
+                  id="chat_route"
+                  value={`${chatRouteProfile}:${chatRouteModel}`}
+                  onChange={(e) => {
+                    const [profile, ...rest] = e.target.value.split(":");
+                    setChatRouteProfile(profile);
+                    setChatRouteModel(rest.join(":"));
+                  }}
+                  disabled={!routingEnabled}
+                  className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                >
+                  {config && Object.values(config.profiles).flatMap((profile) =>
+                    Object.keys(profile.available_models).map((modelName) => (
+                      <option key={`chat-${profile.id}-${modelName}`} value={`${profile.id}:${modelName}`}>
+                        {profile.name} / {modelName}
+                      </option>
+                    )),
+                  )}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="analysis_route">Analysis Model</Label>
+                <select
+                  id="analysis_route"
+                  value={`${analysisRouteProfile}:${analysisRouteModel}`}
+                  onChange={(e) => {
+                    const [profile, ...rest] = e.target.value.split(":");
+                    setAnalysisRouteProfile(profile);
+                    setAnalysisRouteModel(rest.join(":"));
+                  }}
+                  disabled={!routingEnabled}
+                  className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                >
+                  {config && Object.values(config.profiles).flatMap((profile) =>
+                    Object.keys(profile.available_models).map((modelName) => (
+                      <option key={`analysis-${profile.id}-${modelName}`} value={`${profile.id}:${modelName}`}>
+                        {profile.name} / {modelName}
+                      </option>
+                    )),
+                  )}
+                </select>
+              </div>
+            </div>
           </div>
 
           <Separator />

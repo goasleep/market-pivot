@@ -279,6 +279,9 @@ class ChatStore:
         history: list[dict[str, Any]],
         strategy: str | None = None,
         asset_type: str | None = None,
+        llm_profile_id: str | None = None,
+        llm_model: str | None = None,
+        llm_auto: bool = False,
     ) -> tuple[str, str]:
         await self._ensure_ready()
         user_message_id = f"msg-{uuid4().hex}"
@@ -433,6 +436,9 @@ class ChatStore:
                         "history": history,
                         "strategy": strategy,
                         "asset_type": asset_type,
+                        "llm_profile_id": llm_profile_id,
+                        "llm_model": llm_model,
+                        "llm_auto": llm_auto,
                         "assistant_message_id": assistant_message_id,
                     }
                 ),
