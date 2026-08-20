@@ -61,7 +61,8 @@ def test_report_agent_rejects_non_html_output():
         ReportAgent(FakeReportLLM("这不是 HTML")).generate(TradeDecision(ticker="600000"))
 
 
-def test_analysis_artifacts_are_written_and_retrievable(tmp_path):
+@pytest.mark.asyncio
+async def test_analysis_artifacts_are_written_and_retrievable(tmp_path):
     storage = MemoryArtifactStorage()
     service = ArtifactService(
         db_path=tmp_path / "artifacts.db",
@@ -75,24 +76,25 @@ def test_analysis_artifacts_are_written_and_retrievable(tmp_path):
         reasoning="趋势仍需观察，等待更明确的入场信号。",
     )
 
-    artifacts = service.create_analysis_artifacts(decision, source="test")
+    artifacts = await service.create_analysis_artifacts(decision, source="test")
 
     assert [item["mime_type"] for item in artifacts] == ["text/html"]
     for artifact in artifacts:
-        saved = service.get(artifact["artifact_id"])
+        saved = await service.get(artifact["artifact_id"])
         assert saved is not None
         assert saved["object_key"] in storage.objects
         assert saved["size_bytes"] > 0
         assert artifact["preview_url"].endswith(f"/{artifact['artifact_id']}/preview")
     assert "ReportAgent report" in storage.objects[artifacts[0]["object_key"]].decode()
-    assert len(service.list()) == 1
+    assert len(await service.list()) == 1
 
 
-def test_user_artifacts_support_multiple_text_and_binary_files(tmp_path):
+@pytest.mark.asyncio
+async def test_user_artifacts_support_multiple_text_and_binary_files(tmp_path):
     storage = MemoryArtifactStorage()
     service = ArtifactService(db_path=tmp_path / "artifacts.db", storage=storage)
 
-    artifacts = service.create_user_artifacts(
+    artifacts = await service.create_user_artifacts(
         [
             {"name": "持仓概览", "format": "md", "content": "# 国家队持仓\n\n暂无完整披露。"},
             {"name": "来源", "format": "json", "content": '{"source": "公开披露"}'},
@@ -114,16 +116,16 @@ def test_user_artifacts_support_multiple_text_and_binary_files(tmp_path):
         "application/json",
         "image/png",
     }
-    assert len(service.list()) == 3
+    assert len(await service.list()) == 3
 
-    retried = service.create_user_artifacts(
+    retried = await service.create_user_artifacts(
         [{"name": "持仓概览.md", "format": "md", "content": "# 国家队持仓\n\n暂无完整披露。"}],
         source="chat",
         conversation_id="conversation-test",
         task_id="task-test",
     )
     assert retried[0]["artifact_id"] == artifacts[0]["artifact_id"]
-    assert len(service.list()) == 3
+    assert len(await service.list()) == 3
 
 
 def test_report_renders_source_urls_as_hidden_links():

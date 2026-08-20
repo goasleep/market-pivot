@@ -1,27 +1,20 @@
 """In-process event hub for the Web-native simulation account API."""
 
 import asyncio
-from datetime import datetime, timezone
 from typing import Any
-
-from data.runtime_store import runtime_store
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class SimulationEventHub:
     """Fan out account events to WebSocket subscribers.
 
-    The account state remains persisted in SQLite. This hub only carries live
-    notifications, so reconnecting clients can always recover by fetching the
-    REST account endpoint.
+    The account state remains persisted by the simulation repository. This
+    hub only carries live in-process notifications.
     """
 
     def __init__(self, queue_size: int = 100):
         self.queue_size = queue_size
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+        self._events: dict[str, list[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
 
     async def subscribe(self, account_id: str) -> asyncio.Queue[dict[str, Any]]:
@@ -40,13 +33,10 @@ class SimulationEventHub:
                 self._subscribers.pop(account_id, None)
 
     async def publish(self, account_id: str, event_type: str, data: dict[str, Any]) -> None:
-        event = await runtime_store.append_event(
-            "simulation-account",
-            account_id,
-            event_type,
-            data,
-        )
+        events = self._events.setdefault(account_id, [])
+        event = {"event_id": len(events) + 1, "event": event_type, "type": event_type, "data": data}
         event["account_id"] = account_id
+        events.append(event)
         async with self._lock:
             subscribers = tuple(self._subscribers.get(account_id, ()))
 
@@ -59,13 +49,8 @@ class SimulationEventHub:
             queue.put_nowait(event)
 
     async def list_events(self, account_id: str, after_id: int = 0) -> list[dict[str, Any]]:
-        """Read events produced by any node after the supplied cursor."""
-        events = await runtime_store.list_events(
-            "simulation-account",
-            account_id,
-            after_id,
-        )
-        return [{**event, "account_id": account_id} for event in events]
+        """Read events produced by this process after the supplied cursor."""
+        return [event for event in self._events.get(account_id, []) if event["event_id"] > after_id]
 
 
 simulation_events = SimulationEventHub()

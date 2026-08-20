@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import html
 import json
 from typing import Any
@@ -39,8 +38,7 @@ async def _persist_chat_artifacts(
 ) -> str:
     if not artifacts:
         raise ValueError("至少需要一个 artifact 文件")
-    records = await asyncio.to_thread(
-        artifact_service.create_user_artifacts,
+    records = await artifact_service.create_user_artifacts(
         [item.model_dump(exclude_none=True) for item in artifacts],
         source="chat",
         conversation_id=conversation_id,
@@ -132,8 +130,7 @@ def _legacy_render_line_chart_svg(title: str, points: list[dict[str, Any]]) -> s
 
 def _build_list_artifacts_tool(*, conversation_id: str | None, task_id: str | None) -> StructuredTool:
     async def list_bound_artifacts(limit: int = 50) -> str:
-        records = await asyncio.to_thread(
-            artifact_service.list_for_scope,
+        records = await artifact_service.list_for_scope(
             limit=limit,
             conversation_id=conversation_id,
             task_id=task_id,
@@ -149,7 +146,7 @@ def _build_list_artifacts_tool(*, conversation_id: str | None, task_id: str | No
 
 def _build_read_artifact_tool(*, conversation_id: str | None, task_id: str | None) -> StructuredTool:
     async def read_text_artifact(artifact_id: str, max_chars: int = 20_000) -> str:
-        record = await asyncio.to_thread(artifact_service.read_text, artifact_id, max_chars)
+        record = await artifact_service.read_text(artifact_id, max_chars)
         if record is None:
             raise ValueError("artifact 不存在")
         if task_id and record.get("task_id") != task_id:
@@ -175,8 +172,7 @@ def _build_chart_artifact_tool(*, conversation_id: str | None, task_id: str | No
     ) -> str:
         html_document = _render_line_chart_html(title, points)
         output_name = name if name.lower().endswith((".html", ".htm")) else f"{name.rsplit('.', 1)[0]}.html"
-        records = await asyncio.to_thread(
-            artifact_service.create_user_artifacts,
+        records = await artifact_service.create_user_artifacts(
             [
                 {
                     "name": output_name,

@@ -1,6 +1,5 @@
 """Artifact metadata, preview, and download endpoints."""
 
-import asyncio
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
@@ -14,12 +13,12 @@ router = APIRouter()
 
 @router.get("")
 async def list_artifacts(limit: int = 50):
-    return {"artifacts": artifact_service.list(limit)}
+    return {"artifacts": await artifact_service.list(limit)}
 
 
 @router.get("/{artifact_id}")
 async def get_artifact(artifact_id: str):
-    artifact = artifact_service.get(artifact_id)
+    artifact = await artifact_service.get(artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail="产物不存在")
     return artifact
@@ -27,7 +26,7 @@ async def get_artifact(artifact_id: str):
 
 async def _file_response(artifact_id: str, disposition: str) -> Response:
     try:
-        stored = await asyncio.to_thread(artifact_service.read, artifact_id)
+        stored = await artifact_service.read(artifact_id)
     except ArtifactNotFoundError as exc:
         raise HTTPException(status_code=404, detail="产物文件不存在") from exc
     if stored is None:

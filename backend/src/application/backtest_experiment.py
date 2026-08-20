@@ -12,18 +12,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from langchain.agents.structured_output import ToolStrategy
-
-from agents.deep_agent_runtime import build_deep_agent, deep_agents_enabled, invoke_structured
 from application.backtest_service import run_backtest, run_pool_backtest
 from artifacts.service import artifact_service
 from charts.echarts import ECHARTS_CDN, line_option, render_chart_container
 from config import settings
-from data.orm import BacktestExperimentRecord, build_database
+from data.db_models import BacktestExperimentRecord
+from data.tortoise_db import init_database
 from llm.service import get_llm_service
 from models.schemas import AssetType, PortfolioSpec, StrategySpec
 from strategies.compiler import available_indicators, strategy_from_mapping
-from strategies.skill_manager import list_strategies, register_strategy_spec
+from strategies.skill_manager import register_strategy_spec
 
 STRATEGY_DESIGN_SYSTEM = """你是一个严格的量化策略设计 Agent。请为 A 股股票或场内基金设计可执行的日线策略。
 只允许使用用户提供的目标、日线 OHLCV 数据字段和下方受控指标，不能引用未来数据、实时新闻或当前才知道的财务数据。
@@ -59,34 +57,26 @@ class BacktestExperimentStore:
     """Durable metadata for replaying and auditing a backtest experiment."""
 
     def __init__(self, db_path: str | Path | None = None):
-        self.db_path = str(db_path or settings.database_file_path)
-        self.database = build_database(
-            database_url=settings.database_url if db_path is None else None,
-            db_path=db_path or settings.database_file_path,
+        self.db_url = (
+            f"sqlite://{Path(db_path).expanduser().resolve()}" if db_path is not None else settings.chat_database_url
         )
 
-    def save(self, experiment_id: str, status: str, payload: dict[str, Any]) -> None:
+    async def save(self, experiment_id: str, status: str, payload: dict[str, Any]) -> None:
         timestamp = _now()
-        with self.database.session() as session:
-            row = session.get(BacktestExperimentRecord, experiment_id)
-            if row is None:
-                row = BacktestExperimentRecord(
-                    experiment_id=experiment_id,
-                    status=status,
-                    payload_json=_json(payload),
-                    created_at=timestamp,
-                    updated_at=timestamp,
-                )
-                session.add(row)
-            else:
-                row.status = status
-                row.payload_json = _json(payload)
-                row.updated_at = timestamp
-            session.commit()
+        await init_database(db_url=self.db_url)
+        await BacktestExperimentRecord.update_or_create(
+            experiment_id=experiment_id,
+            defaults={
+                "status": status,
+                "payload_json": _json(payload),
+                "created_at": timestamp,
+                "updated_at": timestamp,
+            },
+        )
 
-    def get(self, experiment_id: str) -> dict[str, Any] | None:
-        with self.database.session() as session:
-            row = session.get(BacktestExperimentRecord, experiment_id)
+    async def get(self, experiment_id: str) -> dict[str, Any] | None:
+        await init_database(db_url=self.db_url)
+        row = await BacktestExperimentRecord.get_or_none(experiment_id=experiment_id)
         if row is None:
             return None
         return {
@@ -108,7 +98,7 @@ async def design_strategy(
     ticker: str | None = None,
     strategy_name: str | None = None,
 ) -> StrategySpec:
-    """Use a Deep Agent to design and validate a bounded strategy definition."""
+    """Use the configured LLM to design and validate a bounded strategy."""
     indicator_contract = json.dumps(available_indicators(), ensure_ascii=False)
     prompt = _json(
         {
@@ -119,26 +109,9 @@ async def design_strategy(
             "available_indicators": json.loads(indicator_contract),
         }
     )
-    service = get_llm_service()
-    if deep_agents_enabled() and hasattr(service, "get_model"):
-        agent = build_deep_agent(
-            tools=[list_strategies],
-            system_prompt=(
-                f"{STRATEGY_DESIGN_SYSTEM}\n"
-                "先使用 write_todos 规划策略设计步骤；如需参考已有策略，可调用 list_trading_strategies。"
-                "最终只返回符合 StrategySpec 的结构化结果。"
-            ),
-            response_format=ToolStrategy(StrategySpec),
-            name="strategy-designer",
-        )
-        designed = await invoke_structured(agent, prompt, StrategySpec)
-        raw = designed.model_dump(mode="json")
-    else:
-        # Keep isolated legacy test doubles and downstream integrations working
-        # while the production path uses Deep Agents.
-        raw = await service.chat_json(prompt, system=STRATEGY_DESIGN_SYSTEM)
-        if not isinstance(raw, dict):
-            raise ValueError("Agent 策略设计结果不是 JSON 对象")
+    raw = await get_llm_service().chat_json(prompt, system=STRATEGY_DESIGN_SYSTEM)
+    if not isinstance(raw, dict):
+        raise ValueError("Agent 策略设计结果不是 JSON 对象")
     raw["source"] = "llm"
     raw.setdefault("asset_types", [asset_type.value])
     raw.setdefault("name", strategy_name or "agent_backtest_strategy")
@@ -155,22 +128,9 @@ async def design_portfolio(
     asset_type: AssetType,
     tickers: list[str],
 ) -> PortfolioSpec:
-    """Use a Deep Agent to design bounded, reproducible portfolio rules."""
+    """Use the configured LLM to design bounded, reproducible portfolio rules."""
     prompt = _json({"objective": objective, "asset_type": asset_type.value, "tickers": tickers})
-    service = get_llm_service()
-    if deep_agents_enabled() and hasattr(service, "get_model"):
-        agent = build_deep_agent(
-            system_prompt=(
-                f"{PORTFOLIO_DESIGN_SYSTEM}\n"
-                "先使用 write_todos 规划组合设计步骤，检查仓位、现金和标的数量约束。"
-                "最终只返回符合 PortfolioSpec 的结构化结果。"
-            ),
-            response_format=ToolStrategy(PortfolioSpec),
-            name="portfolio-designer",
-        )
-        return await invoke_structured(agent, prompt, PortfolioSpec)
-
-    raw = await service.chat_json(prompt, system=PORTFOLIO_DESIGN_SYSTEM)
+    raw = await get_llm_service().chat_json(prompt, system=PORTFOLIO_DESIGN_SYSTEM)
     if not isinstance(raw, dict):
         raise ValueError("Agent 组合配置结果不是 JSON 对象")
     return PortfolioSpec.model_validate(raw)
@@ -639,7 +599,7 @@ async def run_backtest_experiment(
                         "description": description,
                     }
                 )
-    artifacts = artifact_service.create_user_artifacts(
+    artifacts = await artifact_service.create_user_artifacts(
         artifact_inputs,
         source="backtest",
         task_id=experiment_id,
@@ -662,5 +622,5 @@ async def run_backtest_experiment(
         "result": result,
         "artifacts": artifacts,
     }
-    backtest_experiments.save(experiment_id, "completed", payload)
+    await backtest_experiments.save(experiment_id, "completed", payload)
     return payload

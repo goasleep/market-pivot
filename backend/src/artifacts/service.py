@@ -15,13 +15,13 @@ from typing import Any
 from uuid import uuid4
 
 from loguru import logger
-from sqlalchemy import select
 
 from agents.report_agent import ReportAgent
 from artifacts.storage import ArtifactStorage, LocalArtifactStorage, S3ArtifactStorage
 from charts.echarts import ECHARTS_CDN, line_option, render_chart_container, signal_attribution_option
 from config import settings
-from data.orm import ArtifactRecord, build_database
+from data.db_models import ArtifactRecord
+from data.tortoise_db import init_database
 from llm.service import get_llm_service
 from models.schemas import TradeDecision
 
@@ -608,10 +608,8 @@ class ArtifactService:
             )
         )
         self.report_agent = report_agent or ReportAgent()
-        self.db_path = str(db_path or settings.database_file_path)
-        self.database = build_database(
-            database_url=settings.database_url if db_path is None else None,
-            db_path=db_path or settings.database_file_path,
+        self.db_url = (
+            f"sqlite://{Path(db_path).expanduser().resolve()}" if db_path is not None else settings.chat_database_url
         )
 
     def _record(self, row: ArtifactRecord) -> dict[str, Any]:
@@ -635,7 +633,7 @@ class ArtifactService:
         item["download_url"] = f"/api/artifacts/{item['artifact_id']}/download"
         return item
 
-    def _create_bytes(
+    async def _create_bytes(
         self,
         name: str,
         content: bytes,
@@ -671,9 +669,8 @@ class ArtifactService:
             "metadata_json": _json(metadata),
             "created_at": created_at,
         }
-        with self.database.session() as session:
-            session.add(ArtifactRecord(**record))
-            session.commit()
+        await init_database(db_url=self.db_url)
+        await ArtifactRecord.create(**record)
         response = {
             **{key: value for key, value in record.items() if key not in {"metadata_json", "relative_path"}},
             "object_key": object_key,
@@ -683,7 +680,7 @@ class ArtifactService:
         }
         return response
 
-    def _create_file(
+    async def _create_file(
         self,
         name: str,
         content: str,
@@ -695,7 +692,7 @@ class ArtifactService:
         metadata: dict[str, Any],
     ) -> dict[str, Any]:
         """Keep the analysis-report API backed by the generic artifact writer."""
-        return self._create_bytes(
+        return await self._create_bytes(
             name=name,
             content=content.encode("utf-8"),
             mime_type=mime_type,
@@ -733,7 +730,7 @@ class ArtifactService:
             return "file"
         return "data"
 
-    def _find_duplicate(
+    async def _find_duplicate(
         self,
         *,
         name: str,
@@ -744,16 +741,15 @@ class ArtifactService:
         """Make retries idempotent without limiting distinct files per task."""
         if not conversation_id and not task_id:
             return None
-        statement = select(ArtifactRecord).where(ArtifactRecord.name == name, ArtifactRecord.sha256 == sha256)
+        query = ArtifactRecord.filter(name=name, sha256=sha256)
         if task_id:
-            statement = statement.where(ArtifactRecord.task_id == task_id)
+            query = query.filter(task_id=task_id)
         else:
-            statement = statement.where(ArtifactRecord.conversation_id == conversation_id)
-        with self.database.session() as session:
-            row = session.scalar(statement.limit(1))
+            query = query.filter(conversation_id=conversation_id)
+        row = await query.first()
         return self._record(row) if row is not None else None
 
-    def create_user_artifacts(
+    async def create_user_artifacts(
         self,
         artifacts: list[dict[str, Any]],
         *,
@@ -813,7 +809,7 @@ class ArtifactService:
                 raise ValueError(f"artifact {name} 超过 {MAX_ARTIFACT_BYTES // 1024 // 1024} MB 限制")
 
             sha256 = hashlib.sha256(raw).hexdigest()
-            duplicate = self._find_duplicate(
+            duplicate = await self._find_duplicate(
                 name=name,
                 sha256=sha256,
                 conversation_id=conversation_id,
@@ -833,7 +829,7 @@ class ArtifactService:
             if metadata:
                 artifact_metadata.update(metadata)
             created.append(
-                self._create_bytes(
+                await self._create_bytes(
                     name=name,
                     content=raw,
                     mime_type=mime_type,
@@ -848,7 +844,7 @@ class ArtifactService:
             )
         return created
 
-    def create_analysis_artifacts(
+    async def create_analysis_artifacts(
         self,
         decision: TradeDecision,
         market_context: Any | None = None,
@@ -863,7 +859,7 @@ class ArtifactService:
         metadata = dict(report.metadata)
         metadata.setdefault("generated_at", generated_at)
         return [
-            self._create_file(
+            await self._create_file(
                 report.name,
                 report.html,
                 "text/html",
@@ -875,24 +871,24 @@ class ArtifactService:
             ),
         ]
 
-    def get(self, artifact_id: str) -> dict[str, Any] | None:
-        with self.database.session() as session:
-            row = session.get(ArtifactRecord, artifact_id)
+    async def get(self, artifact_id: str) -> dict[str, Any] | None:
+        await init_database(db_url=self.db_url)
+        row = await ArtifactRecord.get_or_none(artifact_id=artifact_id)
         if row is None:
             return None
         return self._record(row)
 
-    def read(self, artifact_id: str) -> tuple[dict[str, Any], bytes] | None:
+    async def read(self, artifact_id: str) -> tuple[dict[str, Any], bytes] | None:
         """Read artifact metadata and bytes from the configured object store."""
-        artifact = self.get(artifact_id)
+        artifact = await self.get(artifact_id)
         if artifact is None:
             return None
         return artifact, self.storage.get(artifact["object_key"])
 
-    def list(self, limit: int = 50) -> list[dict[str, Any]]:
-        return self.list_for_scope(limit=limit)
+    async def list(self, limit: int = 50) -> list[dict[str, Any]]:
+        return await self.list_for_scope(limit=limit)
 
-    def list_for_scope(
+    async def list_for_scope(
         self,
         *,
         limit: int = 50,
@@ -900,20 +896,18 @@ class ArtifactService:
         task_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """List artifacts, optionally restricted to one chat scope."""
-        statement = select(ArtifactRecord)
+        await init_database(db_url=self.db_url)
+        query = ArtifactRecord.all()
         if conversation_id:
-            statement = statement.where(ArtifactRecord.conversation_id == conversation_id)
+            query = query.filter(conversation_id=conversation_id)
         if task_id:
-            statement = statement.where(ArtifactRecord.task_id == task_id)
-        with self.database.session() as session:
-            rows = session.scalars(
-                statement.order_by(ArtifactRecord.created_at.desc()).limit(max(1, min(limit, 200)))
-            ).all()
+            query = query.filter(task_id=task_id)
+        rows = await query.order_by("-created_at").limit(max(1, min(limit, 200)))
         return [self._record(row) for row in rows]
 
-    def read_text(self, artifact_id: str, max_chars: int = 20_000) -> dict[str, Any] | None:
+    async def read_text(self, artifact_id: str, max_chars: int = 20_000) -> dict[str, Any] | None:
         """Read a bounded text artifact for follow-up Agent work."""
-        stored = self.read(artifact_id)
+        stored = await self.read(artifact_id)
         if stored is None:
             return None
         artifact, content = stored

@@ -12,7 +12,6 @@ from loguru import logger
 from application.automation_store import automation_store
 from application.research import research_service
 from config import settings
-from data.runtime_store import runtime_store
 from data.stock_provider import async_get_stock_history, async_get_stock_realtime
 from data.trading_calendar import is_trading_day
 from engine.broker_adapters import (
@@ -48,9 +47,9 @@ class AutomationService:
             self._locks[account_id] = asyncio.Lock()
         return self._locks[account_id]
 
-    def get_task_payload(self, account_id: str) -> dict:
-        simulation_accounts.get_account(account_id)
-        task = automation_store.get_task(account_id)
+    async def get_task_payload(self, account_id: str) -> dict:
+        await simulation_accounts.get_account(account_id)
+        task = await automation_store.get_task(account_id)
         return {
             "account_id": account_id,
             "config": task["config"].model_dump(mode="json"),
@@ -63,10 +62,11 @@ class AutomationService:
         }
 
     async def update_task(self, account_id: str, config: AutomationTaskConfig) -> dict:
-        simulation_accounts.get_account(account_id)
-        await asyncio.to_thread(automation_store.update_task, account_id, config=config)
-        await simulation_events.publish(account_id, "automation.updated", self.get_task_payload(account_id))
-        return self.get_task_payload(account_id)
+        await simulation_accounts.get_account(account_id)
+        await automation_store.update_task(account_id, config=config)
+        payload = await self.get_task_payload(account_id)
+        await simulation_events.publish(account_id, "automation.updated", payload)
+        return payload
 
     async def run_account(
         self,
@@ -82,8 +82,8 @@ class AutomationService:
         """
 
         async with self._lock_for(account_id):
-            account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
-            task = await asyncio.to_thread(automation_store.get_task, account_id)
+            account = await simulation_accounts.get_account(account_id)
+            task = await automation_store.get_task(account_id)
             config: AutomationTaskConfig = task["config"]
             effective_date = run_date or _today()
             if account.status != "active":
@@ -96,25 +96,17 @@ class AutomationService:
                 return await self._skipped_run(account_id, effective_date, trigger, config, "股票池为空")
 
             idempotency_key = f"{account_id}:{effective_date}:{'schedule' if trigger == 'schedule' else trigger}"
-            summary = await asyncio.to_thread(
-                automation_store.create_run,
-                account_id,
-                effective_date,
-                trigger,
-                config,
-                idempotency_key,
-            )
+            summary = await automation_store.create_run(account_id, effective_date, trigger, config, idempotency_key)
             if summary.status not in {"queued"}:
                 return summary
-            claimed = await asyncio.to_thread(
-                automation_store.claim_run,
+            claimed = await automation_store.claim_run(
                 summary.run_id,
                 symbols_total=len(universe),
                 started_at=datetime.now(SHANGHAI).isoformat(),
             )
             if claimed is None:
-                return await asyncio.to_thread(automation_store.get_run, summary.run_id)
-            await asyncio.to_thread(automation_store.update_task, account_id, status="running")
+                return await automation_store.get_run(summary.run_id)
+            await automation_store.update_task(account_id, status="running")
             await simulation_events.publish(
                 account_id,
                 "agent.run.started",
@@ -159,22 +151,11 @@ class AutomationService:
                         False,
                     )
                     orders_count += int(order_id is not None)
-                    audit = await asyncio.to_thread(
-                        automation_store.add_decision,
-                        summary.run_id,
-                        account_id,
-                        decision,
-                        current_price,
-                        risk_status,
-                        risk_reason,
-                        order_id,
+                    audit = await automation_store.add_decision(
+                        summary.run_id, account_id, decision, current_price, risk_status, risk_reason, order_id
                     )
-                    await asyncio.to_thread(
-                        automation_store.add_event,
-                        account_id,
-                        "agent.decision",
-                        audit.model_dump(mode="json"),
-                        summary.run_id,
+                    await automation_store.add_event(
+                        account_id, "agent.decision", audit.model_dump(mode="json"), summary.run_id
                     )
                     await simulation_events.publish(
                         account_id,
@@ -184,8 +165,7 @@ class AutomationService:
                 except Exception as exc:  # one bad symbol must not stop the pool
                     failures.append(f"{ticker}: {exc}")
                     logger.exception("Agent cycle failed for {}", ticker)
-                await asyncio.to_thread(
-                    automation_store.update_run,
+                await automation_store.update_run(
                     summary.run_id,
                     symbols_processed=index,
                     decisions_count=decisions_count,
@@ -193,8 +173,7 @@ class AutomationService:
                 )
 
             error = "; ".join(failures) if failures else None
-            final = await asyncio.to_thread(
-                automation_store.update_run,
+            final = await automation_store.update_run(
                 summary.run_id,
                 status="completed" if decisions_count or not failures else "failed",
                 symbols_processed=len(universe),
@@ -238,17 +217,9 @@ class AutomationService:
         reason: str,
     ) -> AgentRunSummary:
         key = f"{account_id}:{run_date}:{trigger}:skipped:{reason}"
-        summary = await asyncio.to_thread(
-            automation_store.create_run,
-            account_id,
-            run_date,
-            trigger,
-            config,
-            key,
-        )
+        summary = await automation_store.create_run(account_id, run_date, trigger, config, key)
         if summary.status == "queued":
-            summary = await asyncio.to_thread(
-                automation_store.update_run,
+            summary = await automation_store.update_run(
                 summary.run_id,
                 status="skipped",
                 completed_at=datetime.now(SHANGHAI).isoformat(),
@@ -285,9 +256,9 @@ class AutomationService:
             return "approved", "仅记录决策，自动下单未启用", None
         if orders_count >= config.max_orders_per_run:
             return "rejected", "达到本次 Agent 运行的最大订单数", None
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        account = await simulation_accounts.get_account(account_id)
         if config.daily_loss_limit_pct:
-            daily_pnl = await asyncio.to_thread(simulation_accounts.daily_pnl, account_id)
+            daily_pnl = await simulation_accounts.daily_pnl(account_id)
             if daily_pnl <= -account.portfolio.initial_capital * config.daily_loss_limit_pct:
                 return "rejected", "触发单日亏损限额", None
         if decision.decision == Decision.HOLD:
@@ -295,8 +266,7 @@ class AutomationService:
         shares = decision_shares(account.portfolio, account.config, decision, price)
         if shares <= 0:
             return "rejected", "按仓位和 A 股最小交易单位计算后无可交易数量", None
-        order = await asyncio.to_thread(
-            simulation_accounts.create_order,
+        order = await simulation_accounts.create_order(
             account_id,
             decision.ticker,
             decision.decision,
@@ -316,11 +286,11 @@ class AutomationService:
                 broker = get_simulation_broker(account.config.external)
                 await asyncio.to_thread(broker.submit_order, order)
             except SimulationBrokerUnavailableError as exc:
-                await asyncio.to_thread(simulation_accounts.cancel_order, order.order_id)
+                await simulation_accounts.cancel_order(order.order_id)
                 return "rejected", str(exc), order.order_id
             return "approved", "订单已写入东方财富文件单，等待终端回报", order.order_id
         if config.fill_time == "same_close":
-            order = await asyncio.to_thread(simulation_accounts.fill_order, order.order_id, price, trade_date)
+            order = await simulation_accounts.fill_order(order.order_id, price, trade_date)
         return (
             "approved" if order.status in {"pending", "filled"} else "rejected",
             order.reject_reason,
@@ -351,7 +321,7 @@ class AutomationService:
             return "rejected", "服务端 LIVE_TRADING_ENABLED 未开启", None
         if not config.live_armed:
             return "rejected", "该自动化任务尚未 armed 实盘执行", None
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        account = await simulation_accounts.get_account(account_id)
         live_config = account.config.live
         if not live_config.enabled:
             return "rejected", "账户未启用实盘 Adapter", None
@@ -360,7 +330,7 @@ class AutomationService:
         if orders_count >= config.max_orders_per_run:
             return "rejected", "达到本次 Agent 运行的最大订单数", None
         if config.daily_loss_limit_pct:
-            daily_pnl = await asyncio.to_thread(simulation_accounts.daily_pnl, account_id)
+            daily_pnl = await simulation_accounts.daily_pnl(account_id)
             if daily_pnl <= -account.portfolio.initial_capital * config.daily_loss_limit_pct:
                 return "rejected", "触发单日亏损限额", None
         if decision.decision == Decision.HOLD:
@@ -403,17 +373,17 @@ class AutomationService:
             return "pending", result.message or "券商返回未知状态，需要对账", order_id
         try:
             snapshot = await asyncio.to_thread(broker.sync)
-            self._apply_live_snapshot(account_id, snapshot)
+            await self._apply_live_snapshot(account_id, snapshot)
         except Exception:
             logger.warning("Live broker accepted {} but snapshot sync is unavailable", order_id)
         return "approved", result.message or f"实盘订单已提交：{result.status}", order_id
 
     @staticmethod
-    def _apply_live_snapshot(account_id: str, payload: dict) -> bool:
+    async def _apply_live_snapshot(account_id: str, payload: dict) -> bool:
         """Apply only an explicit cash/positions snapshot from the broker."""
         if not isinstance(payload, dict) or "cash" not in payload or "positions" not in payload:
             return False
-        simulation_accounts.apply_live_snapshot(
+        await simulation_accounts.apply_live_snapshot(
             account_id,
             float(payload["cash"]),
             list(payload["positions"]),
@@ -427,14 +397,14 @@ class AutomationService:
         decision_id: str,
         price: float | None = None,
     ):
-        audit = await asyncio.to_thread(automation_store.get_decision, decision_id)
+        audit = await automation_store.get_decision(decision_id)
         if audit.account_id != account_id:
             raise KeyError("Agent decision 不属于该模拟账户")
         if audit.risk_status == "rejected":
             raise ValueError("该 Agent 决策已被风控拦截，不能确认")
         if audit.order_id:
             return audit
-        task = await asyncio.to_thread(automation_store.get_task, account_id)
+        task = await automation_store.get_task(account_id)
         config: AutomationTaskConfig = task["config"]
         fill_price = price or audit.current_price
         if fill_price <= 0:
@@ -452,20 +422,14 @@ class AutomationService:
             0,
             True,
         )
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        account = await simulation_accounts.get_account(account_id)
         uses_external = account.config.external.enabled and account.config.external.provider != "internal"
         if order_id and config.execution_mode != "live" and not uses_external and config.fill_time == "manual":
-            filled_order = await asyncio.to_thread(
-                simulation_accounts.fill_order,
-                order_id,
-                fill_price,
-                _today(),
-            )
+            filled_order = await simulation_accounts.fill_order(order_id, fill_price, _today())
             if filled_order.status != "filled":
                 risk_status = "rejected"
                 risk_reason = filled_order.reject_reason or "手动确认订单未成交"
-        updated = await asyncio.to_thread(
-            automation_store.update_decision,
+        updated = await automation_store.update_decision(
             decision_id,
             current_price=fill_price,
             risk_status=risk_status,
@@ -482,10 +446,10 @@ class AutomationService:
         prices: dict[str, float] | None = None,
         open_prices: dict[str, float] | None = None,
     ) -> dict:
-        task = await asyncio.to_thread(automation_store.get_task, account_id)
+        task = await automation_store.get_task(account_id)
         if task["config"].execution_mode == "live":
             return await self.sync_live_account(account_id)
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        account = await simulation_accounts.get_account(account_id)
         if account.config.external.enabled and account.config.external.provider != "internal":
             return await self.sync_external_account(account_id)
         async with self._lock_for(account_id):
@@ -493,11 +457,11 @@ class AutomationService:
 
     async def sync_external_account(self, account_id: str) -> dict:
         """Read an external paper account and mirror it into the local UI model."""
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        account = await simulation_accounts.get_account(account_id)
         try:
             broker = get_simulation_broker(account.config.external)
             snapshot = await asyncio.to_thread(broker.sync)
-            await asyncio.to_thread(simulation_accounts.apply_external_snapshot, account_id, snapshot)
+            await simulation_accounts.apply_external_snapshot(account_id, snapshot)
         except SimulationBrokerUnavailableError as exc:
             raise ValueError(str(exc)) from exc
         payload = {
@@ -509,27 +473,27 @@ class AutomationService:
             "orders": len(snapshot.get("orders", [])),
             "trades": len(snapshot.get("trades", [])),
         }
-        await asyncio.to_thread(automation_store.add_event, account_id, "external.sync", payload)
+        await automation_store.add_event(account_id, "external.sync", payload)
         await simulation_events.publish(account_id, "external.sync", payload)
         return {**payload, "sync": snapshot}
 
     async def sync_live_account(self, account_id: str) -> dict:
         """Reconcile live broker state without applying paper fills locally."""
-        task = await asyncio.to_thread(automation_store.get_task, account_id)
+        task = await automation_store.get_task(account_id)
         config: AutomationTaskConfig = task["config"]
         if config.execution_mode != "live":
             raise ValueError("该账户当前不是实盘执行模式")
         if not settings.live_trading_enabled:
             raise ValueError("服务端 LIVE_TRADING_ENABLED 未开启")
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        account = await simulation_accounts.get_account(account_id)
         try:
             broker = get_live_broker(account.config.live)
             payload = await asyncio.to_thread(broker.sync)
         except LiveBrokerUnavailableError as exc:
             raise ValueError(str(exc)) from exc
-        mirrored = await asyncio.to_thread(self._apply_live_snapshot, account_id, payload)
+        mirrored = await self._apply_live_snapshot(account_id, payload)
         payload = {**payload, "portfolio_mirrored": mirrored}
-        await asyncio.to_thread(automation_store.add_event, account_id, "live.sync", payload)
+        await automation_store.add_event(account_id, "live.sync", payload)
         await simulation_events.publish(account_id, "live.sync", payload)
         return {"account_id": account_id, "mode": "live", "sync": payload}
 
@@ -542,11 +506,11 @@ class AutomationService:
     ) -> dict:
         """Fill next-open orders and persist a daily mark-to-market snapshot."""
 
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        account = await simulation_accounts.get_account(account_id)
         target_date = settlement_date or _today()
         price_map = {key: float(value) for key, value in (prices or {}).items() if float(value) > 0}
         symbols = {position.ticker for position in account.portfolio.positions}
-        pending_orders = await asyncio.to_thread(simulation_accounts.list_orders, account_id)
+        pending_orders = await simulation_accounts.list_orders(account_id)
         symbols.update(order.ticker for order in pending_orders if order.status == "pending")
         open_price_map: dict[str, float] = dict(open_prices or {})
         missing_symbols = sorted(symbols - price_map.keys())
@@ -574,29 +538,24 @@ class AutomationService:
                     if quote.get("price")
                 }
             )
-        await asyncio.to_thread(simulation_accounts.advance_date, account_id, target_date)
+        await simulation_accounts.advance_date(account_id, target_date)
         fill_map = {**price_map, **open_price_map}
         filled = []
         for order in pending_orders:
             if order.status != "pending" or order.fill_policy != "next_open" or order.ticker not in fill_map:
                 continue
             filled.append(
-                await asyncio.to_thread(
-                    simulation_accounts.fill_order,
-                    order.order_id,
-                    float(fill_map[order.ticker]),
-                    target_date,
-                )
+                await simulation_accounts.fill_order(order.order_id, float(fill_map[order.ticker]), target_date)
             )
-        account = await asyncio.to_thread(simulation_accounts.mark_to_market, account_id, price_map, target_date)
+        account = await simulation_accounts.mark_to_market(account_id, price_map, target_date)
         payload = {
             "account_id": account_id,
             "date": target_date,
             "filled_orders": [order.model_dump(mode="json") for order in filled],
             "total_value": account.portfolio.total_value,
-            "daily_pnl": await asyncio.to_thread(simulation_accounts.daily_pnl, account_id),
+            "daily_pnl": await simulation_accounts.daily_pnl(account_id),
         }
-        await asyncio.to_thread(automation_store.add_event, account_id, "daily.settled", payload)
+        await automation_store.add_event(account_id, "daily.settled", payload)
         await simulation_events.publish(account_id, "daily.settled", payload)
         return payload
 
@@ -615,7 +574,7 @@ class AutomationScheduler:
     async def start(self) -> None:
         if self._task and not self._task.done():
             return
-        await asyncio.to_thread(automation_store.recover_stale_runs)
+        await automation_store.recover_stale_runs()
         self._stopping = asyncio.Event()
         self._task = asyncio.create_task(self._run(), name="agent-automation-scheduler")
 
@@ -637,48 +596,32 @@ class AutomationScheduler:
                 continue
 
     async def tick(self, now: datetime | None = None) -> None:
-        acquired = await runtime_store.acquire_lease("automation-scheduler", 90)
-        if not acquired:
-            return
-        heartbeat = asyncio.create_task(self._renew_scheduler_lease(), name="automation-scheduler-heartbeat")
-        try:
-            current = now or datetime.now(SHANGHAI)
-            for account in await asyncio.to_thread(simulation_accounts.list_accounts):
-                if account.status != "active":
-                    continue
-                task = await asyncio.to_thread(automation_store.get_task, account.account_id)
-                config: AutomationTaskConfig = task["config"]
-                if not config.enabled or current.weekday() not in config.weekdays:
-                    continue
-                if not await asyncio.to_thread(is_trading_day, current.date()):
-                    continue
-                try:
-                    scheduled = time.fromisoformat(config.schedule_time)
-                except ValueError:
-                    logger.warning("Invalid automation schedule for {}: {}", account.account_id, config.schedule_time)
-                    continue
-                scheduled_at = datetime.combine(current.date(), scheduled, tzinfo=SHANGHAI)
-                if current < scheduled_at:
-                    continue
-                if task["last_run_date"] == current.date().isoformat():
-                    continue
-                await self.service.settle_account(account.account_id, current.date().isoformat())
-                await self.service.run_account(
-                    account.account_id,
-                    trigger="schedule",
-                    run_date=current.date().isoformat(),
-                )
-        finally:
-            heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
-            await runtime_store.release_lease("automation-scheduler")
-
-    async def _renew_scheduler_lease(self) -> None:
-        while True:
-            await asyncio.sleep(30)
-            renewed = await runtime_store.renew_lease("automation-scheduler", 90)
-            if not renewed:
-                return
+        current = now or datetime.now(SHANGHAI)
+        for account in await simulation_accounts.list_accounts():
+            if account.status != "active":
+                continue
+            task = await automation_store.get_task(account.account_id)
+            config: AutomationTaskConfig = task["config"]
+            if not config.enabled or current.weekday() not in config.weekdays:
+                continue
+            if not await asyncio.to_thread(is_trading_day, current.date()):
+                continue
+            try:
+                scheduled = time.fromisoformat(config.schedule_time)
+            except ValueError:
+                logger.warning("Invalid automation schedule for {}: {}", account.account_id, config.schedule_time)
+                continue
+            scheduled_at = datetime.combine(current.date(), scheduled, tzinfo=SHANGHAI)
+            if current < scheduled_at:
+                continue
+            if task["last_run_date"] == current.date().isoformat():
+                continue
+            await self.service.settle_account(account.account_id, current.date().isoformat())
+            await self.service.run_account(
+                account.account_id,
+                trigger="schedule",
+                run_date=current.date().isoformat(),
+            )
 
 
 automation_scheduler = AutomationScheduler(automation_service)

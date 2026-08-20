@@ -1,7 +1,5 @@
 """Control and audit API for unattended Agent simulation runs."""
 
-import asyncio
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -25,7 +23,7 @@ class SettlementRequest(BaseModel):
 @router.get("/accounts/{account_id}")
 async def get_automation(account_id: str):
     try:
-        return await asyncio.to_thread(automation_service.get_task_payload, account_id)
+        return await automation_service.get_task_payload(account_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -72,7 +70,7 @@ async def sync_live_account(account_id: str):
 @router.get("/accounts/{account_id}/runs")
 async def list_runs(account_id: str, limit: int = 50):
     try:
-        runs = await asyncio.to_thread(automation_store.list_runs, account_id, limit)
+        runs = await automation_store.list_runs(account_id, limit)
         return {"runs": [run.model_dump(mode="json") for run in runs]}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -81,10 +79,10 @@ async def list_runs(account_id: str, limit: int = 50):
 @router.get("/accounts/{account_id}/runs/{run_id}")
 async def get_run(account_id: str, run_id: str):
     try:
-        run = await asyncio.to_thread(automation_store.get_run, run_id)
+        run = await automation_store.get_run(run_id)
         if run.account_id != account_id:
             raise HTTPException(status_code=404, detail="Agent run 不属于该模拟账户")
-        decisions = await asyncio.to_thread(automation_store.list_decisions, account_id, run_id, 1000)
+        decisions = await automation_store.list_decisions(account_id, run_id, 1000)
         return {
             "run": run.model_dump(mode="json"),
             "decisions": [decision.model_dump(mode="json") for decision in decisions],
@@ -97,7 +95,7 @@ async def get_run(account_id: str, run_id: str):
 
 @router.get("/accounts/{account_id}/decisions")
 async def list_decisions(account_id: str, run_id: str | None = None, limit: int = 100):
-    decisions = await asyncio.to_thread(automation_store.list_decisions, account_id, run_id, limit)
+    decisions = await automation_store.list_decisions(account_id, run_id, limit)
     return {"decisions": [decision.model_dump(mode="json") for decision in decisions]}
 
 
@@ -114,4 +112,4 @@ async def confirm_decision(account_id: str, decision_id: str, price: float | Non
 
 @router.get("/accounts/{account_id}/events")
 async def list_events(account_id: str, limit: int = 100):
-    return {"events": await asyncio.to_thread(automation_store.list_events, account_id, limit)}
+    return {"events": await automation_store.list_events(account_id, limit)}

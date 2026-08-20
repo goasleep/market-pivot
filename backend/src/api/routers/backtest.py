@@ -75,7 +75,7 @@ async def run_backtest_experiment_api(req: BacktestExperimentRequest):
 
 @router.get("/experiments/{experiment_id}")
 async def get_backtest_experiment(experiment_id: str):
-    result = backtest_experiments.get(experiment_id)
+    result = await backtest_experiments.get(experiment_id)
     if result is None:
         raise HTTPException(status_code=404, detail="回测实验不存在")
     return result

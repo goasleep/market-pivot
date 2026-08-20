@@ -116,7 +116,7 @@ def _payload(account, orders=None, daily_pnl: float = 0.0) -> dict:
 
 
 async def _account_payload(account_id: str = "default", refresh_quotes: bool = False) -> dict:
-    account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+    account = await simulation_accounts.get_account(account_id)
     if refresh_quotes and account.portfolio.positions:
         quotes = await asyncio.gather(
             *(_quote(position.ticker, position.asset_type) for position in account.portfolio.positions)
@@ -127,14 +127,9 @@ async def _account_payload(account_id: str = "default", refresh_quotes: bool = F
             if quote.get("price") or position.current_price
         }
         if prices:
-            account = await asyncio.to_thread(
-                simulation_accounts.mark_to_market,
-                account_id,
-                prices,
-                date.today().isoformat(),
-            )
-    orders = await asyncio.to_thread(simulation_accounts.list_orders, account_id)
-    daily_pnl = await asyncio.to_thread(simulation_accounts.daily_pnl, account_id)
+            account = await simulation_accounts.mark_to_market(account_id, prices, date.today().isoformat())
+    orders = await simulation_accounts.list_orders(account_id)
+    daily_pnl = await simulation_accounts.daily_pnl(account_id)
     return _payload(account, orders, daily_pnl)
 
 
@@ -155,7 +150,7 @@ async def get_portfolio(account_id: str = "default", refresh_quotes: bool = Fals
 @router.post("/accounts")
 async def create_account(req: CreateAccountRequest):
     try:
-        account = await asyncio.to_thread(simulation_accounts.create_account, req.account_id, req.config)
+        account = await simulation_accounts.create_account(req.account_id, req.config)
         return _payload(account, [])
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -163,9 +158,9 @@ async def create_account(req: CreateAccountRequest):
 
 @router.get("/accounts")
 async def list_accounts():
-    accounts = await asyncio.to_thread(simulation_accounts.list_accounts)
+    accounts = await simulation_accounts.list_accounts()
     daily_pnls = await asyncio.gather(
-        *(asyncio.to_thread(simulation_accounts.daily_pnl, account.account_id) for account in accounts)
+        *(simulation_accounts.daily_pnl(account.account_id) for account in accounts)
     )
     return {"accounts": [_payload(account, daily_pnl=daily_pnl) for account, daily_pnl in zip(accounts, daily_pnls)]}
 
@@ -179,7 +174,7 @@ async def get_account(account_id: str, refresh_quotes: bool = False):
 async def stream_account(account_id: str, websocket: WebSocket):
     """Push simulation account events to the web frontend."""
     try:
-        await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        await simulation_accounts.get_account(account_id)
     except KeyError:
         await websocket.close(code=4404, reason="模拟账户不存在")
         return
@@ -223,7 +218,7 @@ async def stream_account(account_id: str, websocket: WebSocket):
 @router.put("/accounts/{account_id}/config")
 async def update_config(account_id: str, req: ConfigRequest):
     try:
-        account = await asyncio.to_thread(simulation_accounts.update_config, account_id, req.config)
+        account = await simulation_accounts.update_config(account_id, req.config)
         payload = await _account_payload(account.account_id)
         await _publish_account_update(account.account_id, data={"reason": "config_updated"})
         return payload
@@ -234,7 +229,7 @@ async def update_config(account_id: str, req: ConfigRequest):
 @router.put("/accounts/{account_id}/external")
 async def update_external_config(account_id: str, req: ExternalSimulationConfig):
     try:
-        account = await asyncio.to_thread(simulation_accounts.update_external_config, account_id, req)
+        account = await simulation_accounts.update_external_config(account_id, req)
         payload = await _account_payload(account.account_id)
         await _publish_account_update(
             account.account_id,
@@ -250,7 +245,7 @@ async def update_external_config(account_id: str, req: ExternalSimulationConfig)
 async def update_live_config(account_id: str, req: LiveTradingConfig):
     """Update live broker configuration; token is retained when omitted."""
     try:
-        account = await asyncio.to_thread(simulation_accounts.update_live_config, account_id, req)
+        account = await simulation_accounts.update_live_config(account_id, req)
         payload = await _account_payload(account.account_id)
         await _publish_account_update(
             account.account_id,
@@ -265,7 +260,7 @@ async def update_live_config(account_id: str, req: LiveTradingConfig):
 @router.get("/accounts/{account_id}/broker")
 async def get_broker_status(account_id: str):
     try:
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        account = await simulation_accounts.get_account(account_id)
         return broker_status(account.config.external)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -275,7 +270,7 @@ async def get_broker_status(account_id: str):
 async def validate_broker(account_id: str):
     """Validate the configured external broker without opening a connection."""
     try:
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        account = await simulation_accounts.get_account(account_id)
         return broker_status(account.config.external)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -285,10 +280,10 @@ async def validate_broker(account_id: str):
 async def sync_broker(account_id: str):
     """Read the configured external simulation output files into the local mirror."""
     try:
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        account = await simulation_accounts.get_account(account_id)
         broker = get_simulation_broker(account.config.external)
         snapshot = await asyncio.to_thread(broker.sync)
-        await asyncio.to_thread(simulation_accounts.apply_external_snapshot, account_id, snapshot)
+        await simulation_accounts.apply_external_snapshot(account_id, snapshot)
         payload = await _account_payload(account_id)
         await _publish_account_update(
             account_id,
@@ -305,7 +300,7 @@ async def sync_broker(account_id: str):
 @router.post("/accounts/{account_id}/status")
 async def update_status(account_id: str, req: StatusRequest):
     try:
-        account = await asyncio.to_thread(simulation_accounts.set_status, account_id, req.status)
+        account = await simulation_accounts.set_status(account_id, req.status)
         payload = await _account_payload(account.account_id)
         await _publish_account_update(account.account_id, data={"status": account.status})
         return payload
@@ -316,7 +311,7 @@ async def update_status(account_id: str, req: StatusRequest):
 @router.post("/accounts/{account_id}/reset")
 async def reset_account(account_id: str):
     try:
-        account = await asyncio.to_thread(simulation_accounts.reset_account, account_id)
+        account = await simulation_accounts.reset_account(account_id)
         payload = await _account_payload(account.account_id)
         await _publish_account_update(account.account_id, event_type="account.reset", data={})
         return payload
@@ -333,9 +328,8 @@ async def reset_default_account(account_id: str = "default"):
 async def create_order(account_id: str, req: OrderRequest):
     try:
         submitted_date = req.trade_date or date.today().isoformat()
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
-        order = await asyncio.to_thread(
-            simulation_accounts.create_order,
+        account = await simulation_accounts.get_account(account_id)
+        order = await simulation_accounts.create_order(
             account_id,
             req.ticker,
             req.side,
@@ -350,7 +344,7 @@ async def create_order(account_id: str, req: OrderRequest):
                 broker = get_simulation_broker(account.config.external)
                 await asyncio.to_thread(broker.submit_order, order)
             except SimulationBrokerUnavailableError as exc:
-                await asyncio.to_thread(simulation_accounts.cancel_order, order.order_id)
+                await simulation_accounts.cancel_order(order.order_id)
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             await _publish_account_update(
                 account_id,
@@ -364,9 +358,9 @@ async def create_order(account_id: str, req: OrderRequest):
                 quote = await _quote(order.ticker, order.asset_type)
                 fill_price = float(quote.get("price", 0) or 0)
             if fill_price <= 0:
-                await asyncio.to_thread(simulation_accounts.cancel_order, order.order_id)
+                await simulation_accounts.cancel_order(order.order_id)
                 raise HTTPException(status_code=400, detail="无法取得可执行价格")
-            order = await asyncio.to_thread(simulation_accounts.fill_order, order.order_id, fill_price, submitted_date)
+            order = await simulation_accounts.fill_order(order.order_id, fill_price, submitted_date)
         await _publish_account_update(
             account_id,
             event_type="order.updated",
@@ -383,21 +377,21 @@ async def create_order(account_id: str, req: OrderRequest):
 
 @router.get("/accounts/{account_id}/orders")
 async def list_orders(account_id: str):
-    orders = await asyncio.to_thread(simulation_accounts.list_orders, account_id)
+    orders = await simulation_accounts.list_orders(account_id)
     return {"orders": [order.model_dump(mode="json") for order in orders]}
 
 
 @router.post("/accounts/{account_id}/orders/{order_id}/cancel")
 async def cancel_order(account_id: str, order_id: str):
     try:
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
-        orders = await asyncio.to_thread(simulation_accounts.list_orders, account_id)
+        account = await simulation_accounts.get_account(account_id)
+        orders = await simulation_accounts.list_orders(account_id)
         if not any(item.order_id == order_id for item in orders):
             raise HTTPException(status_code=404, detail="订单不属于该模拟账户")
         if account.config.external.enabled and account.config.external.provider != "internal":
             broker = get_simulation_broker(account.config.external)
             await asyncio.to_thread(broker.cancel_order, order_id)
-        order = await asyncio.to_thread(simulation_accounts.cancel_order, order_id)
+        order = await simulation_accounts.cancel_order(order_id)
         await _publish_account_update(
             account_id,
             event_type="order.updated",
@@ -415,15 +409,10 @@ async def cancel_order(account_id: str, order_id: str):
 @router.post("/accounts/{account_id}/orders/{order_id}/fill")
 async def fill_order(account_id: str, order_id: str, req: FillRequest):
     try:
-        orders = await asyncio.to_thread(simulation_accounts.list_orders, account_id)
+        orders = await simulation_accounts.list_orders(account_id)
         if not any(item.order_id == order_id for item in orders):
             raise HTTPException(status_code=404, detail="订单不属于该模拟账户")
-        order = await asyncio.to_thread(
-            simulation_accounts.fill_order,
-            order_id,
-            req.price,
-            req.trade_date,
-        )
+        order = await simulation_accounts.fill_order(order_id, req.price, req.trade_date)
         await _publish_account_update(
             account_id,
             event_type="order.updated",
@@ -440,7 +429,7 @@ async def fill_order(account_id: str, order_id: str, req: FillRequest):
 async def mark_account(account_id: str, req: MarkRequest):
     prices = dict(req.prices)
     if not prices:
-        account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+        account = await simulation_accounts.get_account(account_id)
         quotes = await asyncio.gather(
             *(_quote(position.ticker, position.asset_type) for position in account.portfolio.positions)
         )
@@ -450,9 +439,9 @@ async def mark_account(account_id: str, req: MarkRequest):
             if quote.get("price")
         }
     snapshot_date = req.trade_date or date.today().isoformat()
-    account = await asyncio.to_thread(simulation_accounts.mark_to_market, account_id, prices, snapshot_date)
+    account = await simulation_accounts.mark_to_market(account_id, prices, snapshot_date)
     filled_orders = []
-    for order in await asyncio.to_thread(simulation_accounts.list_orders, account_id):
+    for order in await simulation_accounts.list_orders(account_id):
         if order.status != "pending" or order.ticker not in prices:
             continue
         price = prices[order.ticker]
@@ -461,7 +450,7 @@ async def mark_account(account_id: str, req: MarkRequest):
         ) or (order.side == Decision.SELL and price >= (order.limit_price or 0))
         if should_fill:
             filled_orders.append(
-                await asyncio.to_thread(simulation_accounts.fill_order, order.order_id, price, snapshot_date)
+                await simulation_accounts.fill_order(order.order_id, price, snapshot_date)
             )
     payload = await _account_payload(account_id)
     for order in filled_orders:
@@ -480,9 +469,5 @@ async def mark_account(account_id: str, req: MarkRequest):
 
 @router.get("/accounts/{account_id}/snapshots")
 async def list_snapshots(account_id: str, limit: int = 100):
-    snapshots = await asyncio.to_thread(
-        simulation_accounts.list_snapshots,
-        account_id,
-        max(1, min(limit, 5000)),
-    )
+    snapshots = await simulation_accounts.list_snapshots(account_id, max(1, min(limit, 5000)))
     return {"snapshots": [snapshot.model_dump(mode="json") for snapshot in snapshots]}

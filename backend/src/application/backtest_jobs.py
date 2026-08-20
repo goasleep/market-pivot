@@ -1,16 +1,14 @@
-"""SQLite-backed background jobs for long-running backtests."""
+"""In-process background jobs for long-running demo backtests."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
 from application.backtest_service import run_backtest, run_pool_backtest
-from data.runtime_store import runtime_store
 
 
 @dataclass
@@ -26,134 +24,71 @@ class BacktestJob:
 
 
 class BacktestJobManager:
-    def __init__(self, store=None):
-        self.store = store or runtime_store
+    """Keep jobs local to the process; durable experiment results use Tortoise."""
+
+    def __init__(self):
+        self._jobs: dict[str, BacktestJob] = {}
+        self._events: dict[str, list[dict[str, Any]]] = {}
         self._tasks: dict[str, asyncio.Task] = {}
-        self._objects: dict[str, BacktestJob] = {}
         self._lock = asyncio.Lock()
-        self._worker: asyncio.Task | None = None
-        self._stopping = asyncio.Event()
 
     async def start(self) -> None:
-        if self._worker and not self._worker.done():
-            return
-        self._stopping = asyncio.Event()
-        self._worker = asyncio.create_task(self._poll(), name="backtest-job-worker")
+        return None
 
     async def stop(self) -> None:
-        self._stopping.set()
-        if self._worker:
-            await self._worker
-        self._worker = None
-        for task in tuple(self._tasks.values()):
+        tasks = tuple(self._tasks.values())
+        for task in tasks:
             if not task.done():
                 task.cancel()
-        if self._tasks:
-            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
 
     async def submit(self, params: dict[str, Any]) -> BacktestJob:
         job_id = f"bt-{uuid4().hex[:16]}"
-        await self.store.create_job(job_id, "backtest", params)
-        job = self._from_record(await self.store.get_job(job_id))
-        self._objects[job_id] = job
-        await self._start_job(job_id)
-        job.task = self._tasks.get(job_id)
+        job = BacktestJob(job_id=job_id, params=dict(params))
+        self._jobs[job_id] = job
+        self._events[job_id] = []
+        task = asyncio.create_task(self._run(job), name=f"backtest-{job_id}")
+        self._tasks[job_id] = task
+        job.task = task
         return job
 
     async def get(self, job_id: str) -> BacktestJob:
-        return self._from_record(await self.store.get_job(job_id))
+        try:
+            return self._jobs[job_id]
+        except KeyError as exc:
+            raise KeyError(f"回测任务不存在: {job_id}") from exc
 
-    async def _start_job(self, job_id: str) -> None:
-        async with self._lock:
-            existing = self._tasks.get(job_id)
-            if existing and not existing.done():
-                return
-            claimed = await self.store.claim_job(job_id)
-            if claimed is None:
-                return
-            task = asyncio.create_task(self._run(job_id), name=f"backtest-{job_id}")
-            self._tasks[job_id] = task
+    async def _publish(self, job: BacktestJob, event_type: str, data: dict[str, Any]) -> None:
+        events = self._events[job.job_id]
+        events.append({"event_id": len(events) + 1, "event": event_type, "data": data})
 
-    async def _poll(self) -> None:
-        while not self._stopping.is_set():
-            try:
-                for record in await self.store.list_jobs("backtest", limit=100):
-                    if record["status"] in {"queued", "running"}:
-                        await self._start_job(record["job_id"])
-            except Exception:
-                # A temporary SQLite lock must not terminate the worker loop.
-                pass
-            try:
-                await asyncio.wait_for(self._stopping.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                continue
-
-    async def _run(self, job_id: str) -> None:
-        record = await self.store.get_job(job_id)
-        params = dict(record["params"])
-        progress = list(record["progress"])
-
-        heartbeat = asyncio.create_task(self._heartbeat(job_id), name=f"backtest-heartbeat-{job_id}")
+    async def _run(self, job: BacktestJob) -> None:
+        job.status = "running"
 
         async def callback(stage: str, message: str):
             event = {"stage": stage, "message": message}
-            progress.append(event)
-            local_job = self._objects.get(job_id)
-            if local_job:
-                local_job.status = "running"
-                local_job.progress.append(event)
-            await self.store.update_job(job_id, progress_json=json.dumps(progress, ensure_ascii=False))
-            await self.store.append_event("backtest", job_id, "progress", event)
+            job.progress.append(event)
+            await self._publish(job, "progress", event)
 
         try:
+            params = dict(job.params)
             params.pop("mode", None)
             runner = run_pool_backtest if params.get("tickers") or params.get("portfolio_spec") else run_backtest
-            result = await runner(**params, progress_callback=callback)
-            await self.store.update_job(
-                job_id,
-                status="completed",
-                result_json=json.dumps(result, ensure_ascii=False, default=str),
-                owner_id=None,
-                lease_expires_at=None,
-            )
-            local_job = self._objects.get(job_id)
-            if local_job:
-                local_job.status = "completed"
-                local_job.result = result
-            await self.store.append_event("backtest", job_id, "complete", result)
+            job.result = await runner(**params, progress_callback=callback)
+            job.status = "completed"
+            await self._publish(job, "complete", job.result)
         except asyncio.CancelledError:
-            # Process shutdown must release the job for another node instead
-            # of turning a still-valid backtest into a terminal cancellation.
-            await self.store.update_job(job_id, status="queued", owner_id=None, lease_expires_at=None)
-            local_job = self._objects.get(job_id)
-            if local_job:
-                local_job.status = "queued"
-            await self.store.append_event("backtest", job_id, "requeued", {})
+            job.status = "cancelled"
+            await self._publish(job, "cancelled", {})
             raise
         except Exception as exc:  # pragma: no cover - exercised through API failures
-            await self.store.update_job(
-                job_id,
-                status="failed",
-                error=str(exc),
-                owner_id=None,
-                lease_expires_at=None,
-            )
-            local_job = self._objects.get(job_id)
-            if local_job:
-                local_job.status = "failed"
-                local_job.error = str(exc)
-            await self.store.append_event("backtest", job_id, "error", {"error": str(exc)})
+            job.status = "failed"
+            job.error = str(exc)
+            await self._publish(job, "error", {"error": str(exc)})
         finally:
-            heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
-            self._tasks.pop(job_id, None)
-
-    async def _heartbeat(self, job_id: str) -> None:
-        while True:
-            await asyncio.sleep(30)
-            if not await self.store.heartbeat_job(job_id):
-                return
+            self._tasks.pop(job.job_id, None)
 
     @staticmethod
     def serialise(job: BacktestJob) -> dict[str, Any]:
@@ -167,30 +102,17 @@ class BacktestJobManager:
             "created_at": job.created_at,
         }
 
-    @staticmethod
-    def _from_record(record: dict[str, Any]) -> BacktestJob:
-        return BacktestJob(
-            job_id=record["job_id"],
-            params=record["params"],
-            status=record["status"],
-            progress=record["progress"],
-            result=record["result"],
-            error=record["error"],
-            created_at=record["created_at"],
-        )
-
     async def stream(self, job_id: str) -> AsyncIterator[dict[str, Any]]:
-        await self.store.get_job(job_id)
+        await self.get(job_id)
         cursor = 0
         while True:
-            events = await self.store.list_events("backtest", job_id, after_id=cursor)
-            for event in events:
-                cursor = int(event["event_id"])
-                yield {"event": event["type"], "data": event["data"]}
-            job = await self.store.get_job(job_id)
-            if job["status"] in {"completed", "failed", "cancelled"} and not events:
+            job = await self.get(job_id)
+            for event in self._events[job_id][cursor:]:
+                cursor = event["event_id"]
+                yield {"event": event["event"], "data": event["data"]}
+            if job.status in {"completed", "failed", "cancelled"} and cursor >= len(self._events[job_id]):
                 break
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.1)
 
 
 backtest_jobs = BacktestJobManager()

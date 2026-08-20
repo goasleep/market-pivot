@@ -198,7 +198,7 @@ async def test_experiment_persists_a_replayable_payload_and_report_artifacts(mon
     import application.backtest_experiment as experiment_module
 
     class FakeArtifactService:
-        def create_user_artifacts(self, artifacts, **kwargs):
+        async def create_user_artifacts(self, artifacts, **kwargs):
             assert kwargs["source"] == "backtest"
             assert kwargs["task_id"].startswith("bt-exp-")
             return [{"artifact_id": f"artifact-{index}", "name": item["name"]} for index, item in enumerate(artifacts)]
@@ -248,7 +248,7 @@ async def test_experiment_persists_a_replayable_payload_and_report_artifacts(mon
     assert payload["status"] == "completed"
     assert len(payload["artifacts"]) == 5
     assert any("历史数据快照" in item["name"] for item in payload["artifacts"])
-    saved = experiment_module.backtest_experiments.get(payload["experiment_id"])
+    saved = await experiment_module.backtest_experiments.get(payload["experiment_id"])
     assert saved is not None
     assert saved["result"]["final_value"] == 101000
 
@@ -258,7 +258,7 @@ async def test_portfolio_experiment_persists_portfolio_artifacts(monkeypatch, tm
     import application.backtest_experiment as experiment_module
 
     class FakeArtifactService:
-        def create_user_artifacts(self, artifacts, **_kwargs):
+        async def create_user_artifacts(self, artifacts, **_kwargs):
             return [{"artifact_id": f"artifact-{index}", "name": item["name"]} for index, item in enumerate(artifacts)]
 
     async def fake_run_pool(**_kwargs):

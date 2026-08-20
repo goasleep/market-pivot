@@ -7,7 +7,6 @@ here prevents each caller from growing its own slightly different pipeline.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, AsyncIterator
 
 from artifacts.service import artifact_service
@@ -212,8 +211,7 @@ class ResearchService:
         task_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Create report files through the dedicated ReportAgent."""
-        return await asyncio.to_thread(
-            artifact_service.create_analysis_artifacts,
+        return await artifact_service.create_analysis_artifacts(
             decision,
             market_context,
             source=source,

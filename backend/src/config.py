@@ -1,18 +1,12 @@
 """Configuration management for A-Share Agent backend."""
 
-import json
 import os
 from pathlib import Path
 
 from loguru import logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from data.database import SQLiteDatabase
-
-# --- LLM config persistence (ORM-backed, hot-reloadable) ---
-
-_LEGACY_LLM_CONFIG_PATH = Path(__file__).parent.parent / "data" / "llm_config.json"
-_LLM_SETTINGS_KEY = "llm_config"
+# --- LLM config defaults (runtime state is loaded by the application startup) ---
 
 _LLM_CONFIG_DEFAULTS = {
     "api_key": "",
@@ -23,31 +17,16 @@ _LLM_CONFIG_DEFAULTS = {
 }
 
 
-def _load_llm_config() -> dict:
-    """Load LLM config from the configured ORM database, then env/defaults."""
-    # Start with env defaults
-    config = dict(_LLM_CONFIG_DEFAULTS)
-    config["api_key"] = settings.deepseek_api_key
-    config["base_url"] = settings.deepseek_base_url
-    config["model"] = settings.deepseek_model
-
-    # Override with the persisted database setting
-    persisted = database.get_setting(_LLM_SETTINGS_KEY)
-    if isinstance(persisted, dict):
-        for key in _LLM_CONFIG_DEFAULTS:
-            if key in persisted:
-                config[key] = persisted[key]
-
-    return config
+_runtime_llm_config: dict = {}
 
 
 def get_llm_config() -> dict:
-    """Get current LLM configuration (hot-reads from the ORM database)."""
-    return _load_llm_config()
+    """Get the hot-reloadable in-memory LLM configuration."""
+    return dict(_runtime_llm_config)
 
 
 def save_llm_config(updates: dict) -> dict:
-    """Update and persist LLM configuration.
+    """Update the in-memory LLM configuration.
 
     Args:
         updates: Partial dict of config keys to update.
@@ -56,7 +35,7 @@ def save_llm_config(updates: dict) -> dict:
     Returns:
         The full updated config dict.
     """
-    current = _load_llm_config()
+    current = get_llm_config()
 
     for key in _LLM_CONFIG_DEFAULTS:
         if key in updates:
@@ -66,9 +45,8 @@ def save_llm_config(updates: dict) -> dict:
                 continue
             current[key] = val
 
-    # Persist alongside the data cache in the configured database
-    database.set_setting(_LLM_SETTINGS_KEY, current)
-    logger.info(f"LLM config saved to database (model={current['model']})")
+    _runtime_llm_config.update(current)
+    logger.info(f"LLM config updated (model={current['model']})")
 
     return current
 
@@ -97,7 +75,7 @@ class Settings(BaseSettings):
     # PostgreSQL runtime backend for durable multi-node deployments.
     database_path: str = "./data/cache.db"
     data_cache_path: str | None = None  # backwards-compatible legacy environment variable
-    database_url: str | None = None  # optional Tortoise URL for chat persistence
+    database_url: str | None = None  # optional Tortoise URL for shared persistence
 
     # S3-compatible artifact storage.  The backend proxies preview/download
     # requests, so objects do not need to be public.
@@ -149,29 +127,14 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-database = SQLiteDatabase(settings.database_file_path, database_url=settings.database_url)
-
-
-def _migrate_legacy_llm_config() -> None:
-    """Import the old JSON config once, then remove the legacy file."""
-    if settings.database_url:
-        return
-    if database.get_setting(_LLM_SETTINGS_KEY) is not None or not _LEGACY_LLM_CONFIG_PATH.exists():
-        return
-
-    try:
-        legacy = json.loads(_LEGACY_LLM_CONFIG_PATH.read_text(encoding="utf-8"))
-        if not isinstance(legacy, dict):
-            return
-        migrated = {key: legacy[key] for key in _LLM_CONFIG_DEFAULTS if key in legacy}
-        database.set_setting(_LLM_SETTINGS_KEY, migrated)
-        _LEGACY_LLM_CONFIG_PATH.unlink()
-        logger.info("Migrated LLM config from JSON into the local database")
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning(f"Failed to migrate legacy LLM config: {exc}")
-
-
-_migrate_legacy_llm_config()
+_runtime_llm_config.update(_LLM_CONFIG_DEFAULTS)
+_runtime_llm_config.update(
+    {
+        "api_key": settings.deepseek_api_key,
+        "base_url": settings.deepseek_base_url,
+        "model": settings.deepseek_model,
+    }
+)
 
 
 def configure_langsmith() -> None:

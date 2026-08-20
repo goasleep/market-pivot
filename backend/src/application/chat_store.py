@@ -23,6 +23,7 @@ from data.chat_models import (
     ChatTaskInteraction,
     ChatTaskState,
 )
+from data.tortoise_db import close_database, init_database
 
 
 def _now() -> str:
@@ -65,32 +66,15 @@ class ChatStore:
     async def init(self) -> None:
         if self._initialized:
             return
-        if Tortoise.is_inited():
-            if self._active_db_url != self.db_url:
-                raise RuntimeError("另一个数据库连接已经初始化，请先关闭当前连接")
-            self._initialized = True
-            return
-
-        await Tortoise.init(
-            db_url=self.db_url,
-            modules={"models": ["data.chat_models"]},
-            # FastAPI runs lifespan and request handlers in different asyncio
-            # tasks; the fallback keeps the initialized connection visible to
-            # both tasks while preserving Tortoise's normal context behavior.
-            _enable_global_fallback=True,
-        )
-        await Tortoise.generate_schemas(safe=True)
+        await init_database(db_url=self.db_url)
         await self._ensure_legacy_tables()
         await self._ensure_search_indexes()
         await self._recover_interrupted_tasks()
         await self._rebuild_search_index()
-        self._active_db_url = self.db_url
         self._initialized = True
 
     async def close(self) -> None:
-        if Tortoise.is_inited():
-            await Tortoise.close_connections()
-        self._active_db_url = None
+        await close_database()
         self._initialized = False
         self._sqlite_fts5_enabled = False
 

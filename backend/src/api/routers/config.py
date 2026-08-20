@@ -4,13 +4,12 @@ Allows the frontend to read and update LLM settings (API key, model, etc.)
 at runtime. Changes are persisted to the shared SQLite database and take effect immediately.
 """
 
-import asyncio
-
 from fastapi import APIRouter
 from loguru import logger
 from pydantic import BaseModel
 
-from config import get_llm_config, save_llm_config
+from config import get_llm_config
+from data.settings_store import update_llm_config
 from llm import MODEL_CONFIGS
 
 router = APIRouter()
@@ -44,7 +43,7 @@ class LLMConfigUpdate(BaseModel):
 @router.get("/llm", response_model=LLMConfigResponse)
 async def get_llm_settings():
     """Get current LLM configuration (API key masked)."""
-    cfg = await asyncio.to_thread(get_llm_config)
+    cfg = get_llm_config()
     return LLMConfigResponse(
         api_key_masked=_mask_key(cfg["api_key"]),
         api_key_set=bool(cfg["api_key"]),
@@ -77,7 +76,7 @@ async def update_llm_settings(update: LLMConfigUpdate):
     if not updates:
         return await get_llm_settings()
 
-    cfg = await asyncio.to_thread(save_llm_config, updates)
+    cfg = await update_llm_config(updates)
     logger.info(f"LLM config updated via API: model={cfg['model']}, base_url={cfg['base_url']}")
 
     return LLMConfigResponse(

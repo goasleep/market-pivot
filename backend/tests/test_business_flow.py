@@ -125,21 +125,22 @@ async def test_pool_backtest_uses_one_agent_portfolio_without_live_enrichment(mo
     assert len(result["data_snapshots"]) == 2
 
 
-def test_simulation_account_enforces_t_plus_one_and_persists(tmp_path):
+@pytest.mark.asyncio
+async def test_simulation_account_enforces_t_plus_one_and_persists(tmp_path):
     service = SimulationAccountService(tmp_path / "simulation.db")
-    buy = service.create_order("default", "000001", Decision.BUY, 100, submitted_date="2026-08-01")
-    buy = service.fill_order(buy.order_id, 10.0, "2026-08-01")
+    buy = await service.create_order("default", "000001", Decision.BUY, 100, submitted_date="2026-08-01")
+    buy = await service.fill_order(buy.order_id, 10.0, "2026-08-01")
     assert buy.status == "filled"
 
-    sell_same_day = service.create_order("default", "000001", Decision.SELL, 100, submitted_date="2026-08-01")
-    sell_same_day = service.fill_order(sell_same_day.order_id, 11.0, "2026-08-01")
+    sell_same_day = await service.create_order("default", "000001", Decision.SELL, 100, submitted_date="2026-08-01")
+    sell_same_day = await service.fill_order(sell_same_day.order_id, 11.0, "2026-08-01")
     assert sell_same_day.status == "rejected"
 
-    service.advance_date("default", "2026-08-02")
-    sell_next_day = service.create_order("default", "000001", Decision.SELL, 100, submitted_date="2026-08-02")
-    sell_next_day = service.fill_order(sell_next_day.order_id, 11.0, "2026-08-02")
+    await service.advance_date("default", "2026-08-02")
+    sell_next_day = await service.create_order("default", "000001", Decision.SELL, 100, submitted_date="2026-08-02")
+    sell_next_day = await service.fill_order(sell_next_day.order_id, 11.0, "2026-08-02")
     assert sell_next_day.status == "filled"
-    assert service.get_account("default").portfolio.total_value > 1_000_000
+    assert (await service.get_account("default")).portfolio.total_value > 1_000_000
 
 
 @pytest.mark.asyncio

@@ -8,18 +8,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
-from agents.deep_agent_runtime import deep_agent_checkpointer
 from api.routers import artifacts, automation, backtest, chat, config, health, market, portfolio
 from application.automation import automation_scheduler
 from application.backtest_jobs import backtest_jobs
 from application.chat_service import chat_store, chat_task_manager
-from data.runtime_store import runtime_store
+from data.settings_store import load_llm_config
+from data.tortoise_db import close_database, init_database
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    await runtime_store.start()
-    await deep_agent_checkpointer.start()
+    await init_database()
+    await load_llm_config()
     await chat_store.init()
     await chat_task_manager.start_worker()
     await backtest_jobs.start()
@@ -31,8 +31,7 @@ async def lifespan(_app: FastAPI):
         await backtest_jobs.stop()
         await chat_task_manager.stop_worker()
         await chat_store.close()
-        await deep_agent_checkpointer.close()
-        await runtime_store.close()
+        await close_database()
 
 app = FastAPI(
     title="A-Share Agent API",

@@ -26,7 +26,6 @@ import pandas as pd
 from loguru import logger
 
 from config import settings
-from data.database import SQLiteDatabase
 
 # ---------------------------------------------------------------------------
 # Circuit Breaker
@@ -131,16 +130,19 @@ class CircuitBreaker:
 
 
 class DataCache:
-    """ORM-backed cache with TTL support and failure caching."""
+    """Process-local cache with TTL support and failure caching.
+
+    Market data is an optimization rather than business state. Keeping it
+    in-memory removes database coupling from the synchronous AkShare adapter;
+    durable application state is handled exclusively by Tortoise repositories.
+    """
 
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
-        configured_path = str(settings.database_file_path)
-        database_url = settings.database_url if self.db_path == configured_path else None
-        self._database = SQLiteDatabase(db_path, database_url=database_url)
+        self._entries: dict[str, tuple[str, float]] = {}
 
     def get(self, key: str, ttl: int = 3600) -> Any | None:
-        row = self._database.get_cache(key)
+        row = self._entries.get(key)
         if row is None:
             return None
         value_str, timestamp = row
@@ -150,16 +152,16 @@ class DataCache:
 
     def get_stale(self, key: str) -> Any | None:
         """Read an expired cache entry for an immutable, fully historical query."""
-        row = self._database.get_cache(key)
+        row = self._entries.get(key)
         if row is None:
             return None
         return json.loads(row[0])
 
     def set(self, key: str, value: Any):
-        self._database.set_cache(key, value)
+        self._entries[key] = (json.dumps(value, ensure_ascii=False, default=str), time.time())
 
     def clear(self):
-        self._database.clear_cache()
+        self._entries.clear()
 
 
 # ---------------------------------------------------------------------------

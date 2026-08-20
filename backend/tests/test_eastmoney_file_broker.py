@@ -115,12 +115,13 @@ def test_file_broker_sync_reads_account_files(tmp_path):
     assert snapshot["trades"][0]["external_id"] == "exec-1"
 
 
-def test_external_snapshot_updates_local_account_and_orders(tmp_path):
+@pytest.mark.asyncio
+async def test_external_snapshot_updates_local_account_and_orders(tmp_path):
     service = SimulationAccountService(tmp_path / "simulation.db")
-    service.update_external_config("default", _config(tmp_path / "scan", tmp_path / "push"))
-    order = service.create_order("default", "600000", Decision.BUY, 1000, submitted_date="2026-08-18")
+    await service.update_external_config("default", _config(tmp_path / "scan", tmp_path / "push"))
+    order = await service.create_order("default", "600000", Decision.BUY, 1000, submitted_date="2026-08-18")
 
-    service.apply_external_snapshot(
+    await service.apply_external_snapshot(
         "default",
         {
             "as_of": "2026-08-18",
@@ -157,10 +158,11 @@ def test_external_snapshot_updates_local_account_and_orders(tmp_path):
         },
     )
 
-    assert service.get_account("default").portfolio.cash == 88000
-    assert service.get_account("default").portfolio.positions[0].ticker == "600000"
-    assert service.list_orders("default")[0].status == "filled"
-    assert service.get_account("default").portfolio.trades[0].external_id == "exec-1"
+    account = await service.get_account("default")
+    assert account.portfolio.cash == 88000
+    assert account.portfolio.positions[0].ticker == "600000"
+    assert (await service.list_orders("default"))[0].status == "filled"
+    assert account.portfolio.trades[0].external_id == "exec-1"
 
 
 @pytest.mark.asyncio
@@ -168,7 +170,7 @@ async def test_portfolio_order_routes_to_file_broker(monkeypatch, tmp_path):
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir()
     service = SimulationAccountService(tmp_path / "simulation.db")
-    service.update_external_config("default", _config(scan_dir, tmp_path / "push"))
+    await service.update_external_config("default", _config(scan_dir, tmp_path / "push"))
     monkeypatch.setattr(portfolio_router, "simulation_accounts", service)
 
     result = await portfolio_router.create_order(
@@ -182,5 +184,5 @@ async def test_portfolio_order_routes_to_file_broker(monkeypatch, tmp_path):
     )
 
     assert result["status"] == "pending"
-    assert service.list_orders("default")[0].status == "pending"
+    assert (await service.list_orders("default"))[0].status == "pending"
     assert len(list(scan_dir.glob("*.order.csv"))) == 1

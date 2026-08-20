@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 
@@ -36,7 +35,7 @@ def _simulation_summary(account: Any) -> dict[str, Any]:
 @tool
 async def get_simulation_portfolio(account_id: str = "default") -> str:
     """查询纸面交易模拟盘账户、现金、持仓和收益；绝不连接实盘。"""
-    account = await asyncio.to_thread(simulation_accounts.get_account, account_id)
+    account = await simulation_accounts.get_account(account_id)
     return _dump(
         {
             "ok": True,
@@ -50,7 +49,7 @@ async def get_simulation_portfolio(account_id: str = "default") -> str:
 @tool
 async def get_simulation_orders(account_id: str = "default") -> str:
     """查询纸面交易模拟盘的订单状态；绝不连接实盘。"""
-    orders = await asyncio.to_thread(simulation_accounts.list_orders, account_id)
+    orders = await simulation_accounts.list_orders(account_id)
     return _dump(
         {
             "ok": True,
@@ -73,8 +72,7 @@ async def submit_simulation_order(
     limit_price: float | None = None,
 ) -> str:
     """创建一笔待成交的纸面交易订单；只有用户明确要求下单时调用。"""
-    order = await asyncio.to_thread(
-        simulation_accounts.create_order,
+    order = await simulation_accounts.create_order(
         account_id,
         ticker,
         Decision(side),
@@ -101,7 +99,7 @@ async def submit_simulation_order(
 @tool
 async def cancel_simulation_order(order_id: str) -> str:
     """取消一笔尚未成交的纸面交易订单；绝不操作实盘。"""
-    order = await asyncio.to_thread(simulation_accounts.cancel_order, order_id)
+    order = await simulation_accounts.cancel_order(order_id)
     return _dump(
         {
             "ok": True,
