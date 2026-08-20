@@ -508,6 +508,12 @@ class ChatStore:
         )
         return [{"id": str(row["sequence"]), "event": row["event"], "data": row["data"]} for row in rows]
 
+    async def latest_event_sequence(self, task_id: str) -> int:
+        """Return the last durable event so a resumed stream can skip its history."""
+        await self._ensure_ready()
+        event = await ChatTaskEvent.filter(task_id=task_id).order_by("-sequence").first()
+        return event.sequence if event else 0
+
     async def request_cancel(self, task_id: str) -> str | None:
         await self._ensure_ready()
         task = await ChatTask.filter(task_id=task_id).first()

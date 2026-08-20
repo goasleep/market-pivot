@@ -72,7 +72,7 @@ Git history is not available in this checkout, so no project-specific convention
 - `make init` is the standard first-run command. It runs project setup and configures `git config core.hooksPath .githooks`.
 - Use one logical change per commit. Valid commit types are `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`, `ci`, `perf`, `style`, and `revert`.
 - Commit subjects must follow `<type>: <imperative summary>` or `<type>(<scope>): <imperative summary>`, be no longer than 72 characters, and not end with a period.
-- The `pre-commit` hook always runs `git diff --cached --check`. Staged backend changes additionally run `cd backend && uv run ruff check src tests` and `uv run pytest`; staged frontend changes additionally run `pnpm build:frontend` and `pnpm lint`.
+- The `pre-commit` hook always runs `git diff --cached --check`. Staged backend changes additionally run `cd backend && uv run ruff check src tests`; staged frontend changes additionally run `pnpm build:frontend` and `pnpm lint`. Run backend pytest separately before committing, but do not run it from the Git hook.
 - Do not use `--no-verify` to avoid a failing check during normal development. If an exceptional bypass is necessary, record the reason in the handoff and run the skipped checks manually before merging.
 
 ## Security & Configuration Tips

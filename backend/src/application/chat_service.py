@@ -444,6 +444,7 @@ class ChatTaskManager:
         interaction = await self.store.get_interaction(interaction_id)
         if interaction is None or interaction["task_id"] != task_id:
             raise KeyError("交互请求不属于该聊天任务")
+        last_event_id = await self.store.latest_event_sequence(task_id)
         answered = await self.store.answer_interaction(interaction_id, option_id)
         state = await self.store.get_task_state(task_id)
         if state is None:
@@ -462,7 +463,12 @@ class ChatTaskManager:
             llm_auto=bool(state.get("llm_auto", False)),
         )
         await self.start(task_input, answered)
-        return {"task_id": task_id, "status": "running", "interaction": answered}
+        return {
+            "task_id": task_id,
+            "status": "running",
+            "interaction": answered,
+            "last_event_id": last_event_id,
+        }
 
     @staticmethod
     def _task_input_from_state(state: dict[str, Any]) -> ChatTaskInput:

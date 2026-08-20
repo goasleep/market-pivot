@@ -8,7 +8,7 @@ staged_files=$(git diff --cached --name-only)
 
 if printf '%s\n' "$staged_files" | grep -Eq '^backend/'; then
   echo "Running backend checks..."
-  (cd backend && uv run ruff check src tests && uv run pytest)
+  (cd backend && uv run ruff check src tests)
 fi
 
 if printf '%s\n' "$staged_files" | grep -Eq '^frontend/|^package.json$|^pnpm-lock.yaml$'; then

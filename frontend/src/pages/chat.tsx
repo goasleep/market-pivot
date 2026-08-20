@@ -103,6 +103,7 @@ export function ChatPage() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
   const activeTaskIdRef = useRef<string | null>(null);
+  const taskEventCursorRef = useRef<Record<string, number>>({});
 
   const activeConversation = useMemo(
     () =>
@@ -502,7 +503,7 @@ export function ChatPage() {
         updatedAt: new Date().toISOString(),
       }));
 
-      let lastEventId = "";
+      let lastEventId = taskEventCursorRef.current[taskId] || 0;
       let taskStatus: string | null = null;
 
       try {
@@ -547,6 +548,7 @@ export function ChatPage() {
           if (!reader) throw new Error("没有收到流式响应");
           const decoder = new TextDecoder();
           let buffer = "";
+          let pendingEventId: number | null = null;
           while (!abortController.signal.aborted) {
             const { done, value } = await reader.read();
             if (done) break;
@@ -556,13 +558,19 @@ export function ChatPage() {
             for (const rawLine of lines) {
               const line = rawLine.trimEnd();
               if (line.startsWith("id:")) {
-                lastEventId = line.slice(3).trim();
+                const parsedEventId = Number(line.slice(3).trim());
+                pendingEventId = Number.isFinite(parsedEventId) ? parsedEventId : null;
                 continue;
               }
               if (!line.startsWith("data:")) continue;
+              if (pendingEventId !== null && pendingEventId <= lastEventId) continue;
               try {
                 const data = JSON.parse(line.slice(5).trim()) as Record<string, unknown>;
                 appendStreamData(data);
+                if (pendingEventId !== null) {
+                  lastEventId = pendingEventId;
+                  taskEventCursorRef.current[taskId] = pendingEventId;
+                }
               } catch {
                 // Ignore incomplete SSE frames.
               }
@@ -623,7 +631,7 @@ export function ChatPage() {
             await waitForReconnect(Math.min(250 * 2 ** reconnectAttempt, 3000), abortController.signal);
             const response = await fetch(`/api/chat/tasks/${encodeURIComponent(taskId)}/stream`, {
               signal: abortController.signal,
-              headers: lastEventId ? { "Last-Event-ID": lastEventId } : undefined,
+              headers: lastEventId ? { "Last-Event-ID": String(lastEventId) } : undefined,
             });
             if (!response.ok) throw new Error(`流式重连失败（${response.status}）`);
             await consumeStream(response);
@@ -721,7 +729,7 @@ export function ChatPage() {
     const reconnectController = new AbortController();
     abortControllerRef.current = reconnectController;
     let disposed = false;
-    let lastEventId = "";
+    let lastEventId = taskEventCursorRef.current[resumedTaskId] || 0;
 
     const waitBeforeReconnect = () =>
       new Promise<void>((resolve) => window.setTimeout(resolve, 1000));
@@ -734,7 +742,7 @@ export function ChatPage() {
             `/api/chat/tasks/${encodeURIComponent(resumedTaskId)}/stream`,
             {
               signal: reconnectController.signal,
-              headers: lastEventId ? { "Last-Event-ID": lastEventId } : undefined,
+              headers: lastEventId ? { "Last-Event-ID": String(lastEventId) } : undefined,
             },
           );
           if (response.status === 404) {
@@ -746,7 +754,7 @@ export function ChatPage() {
           if (!reader) throw new Error("重连没有收到流式响应");
           const decoder = new TextDecoder();
           let buffer = "";
-          let currentEventId = lastEventId;
+          let pendingEventId: number | null = null;
           while (!disposed && !reconnectController.signal.aborted) {
             const { done, value } = await reader.read();
             if (done) break;
@@ -755,10 +763,12 @@ export function ChatPage() {
             buffer = lines.pop() || "";
             for (const line of lines) {
               if (line.startsWith("id:")) {
-                currentEventId = line.slice(3).trim();
+                const parsedEventId = Number(line.slice(3).trim());
+                pendingEventId = Number.isFinite(parsedEventId) ? parsedEventId : null;
                 continue;
               }
               if (!line.startsWith("data:")) continue;
+              if (pendingEventId !== null && pendingEventId <= lastEventId) continue;
               try {
                 const data = JSON.parse(line.slice(5).trim());
                 if (data.text !== undefined) {
@@ -799,12 +809,15 @@ export function ChatPage() {
                     data.references as ChatReference[],
                   );
                 }
+                if (pendingEventId !== null) {
+                  lastEventId = pendingEventId;
+                  taskEventCursorRef.current[resumedTaskId] = pendingEventId;
+                }
               } catch {
                 // Ignore incomplete SSE frames.
               }
             }
           }
-          lastEventId = currentEventId;
           const taskResponse = await fetch(
             `/api/chat/tasks/${encodeURIComponent(resumedTaskId)}`,
             { signal: reconnectController.signal },
@@ -910,6 +923,16 @@ export function ChatPage() {
         },
       );
       if (!response.ok) return;
+      const result = (await response.json()) as { last_event_id?: number };
+      if (
+        typeof result.last_event_id === "number" &&
+        Number.isFinite(result.last_event_id)
+      ) {
+        taskEventCursorRef.current[interaction.task_id] = Math.max(
+          taskEventCursorRef.current[interaction.task_id] || 0,
+          result.last_event_id,
+        );
+      }
       updateConversation(activeConversation.conversationId, (item) => ({
         ...item,
         messages: item.messages.map((message) =>

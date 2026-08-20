@@ -15,6 +15,7 @@ Enhancements over basic version:
 
 import asyncio
 import json
+import math
 import random
 import threading
 import time
@@ -194,6 +195,11 @@ BACKOFF_MAX = 10.0
 RANDOM_SLEEP_MIN = 0.3
 RANDOM_SLEEP_MAX = 1.5
 UPSTREAM_TIMEOUT_SECONDS = 12.0
+ETF_NAV_PAGE_SIZE = 20
+ETF_NAV_URL = "https://api.fund.eastmoney.com/f10/lsjz"
+ETF_NAV_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; A-Share-Agent/1.0)",
+}
 
 
 def _random_sleep():
@@ -263,6 +269,101 @@ def _format_ticker(ticker: str) -> str:
     if ticker.lower().startswith(("sh", "sz")):
         ticker = ticker[2:]
     return ticker.zfill(6)
+
+
+def _fetch_etf_history_sina(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Fetch ETF OHLCV from Sina with an explicit request timeout.
+
+    AkShare's Sina adapter does not expose a timeout and therefore cannot be
+    used directly inside the provider's bounded retry loop.  Reuse its public
+    response decoder, but keep the network request under our own timeout.
+    """
+    import py_mini_racer
+    import requests
+    from akshare.stock.cons import hk_js_decode
+
+    market = "sh" if ticker.startswith(("5", "6", "9")) else "sz"
+    url = f"https://finance.sina.com.cn/realstock/company/{market}{ticker}/hisdata_klc2/klc_kl.js"
+    response = requests.get(url, timeout=UPSTREAM_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    encoded = response.text.split("=", 1)[1].split(";", 1)[0].replace('"', "")
+    js_code = py_mini_racer.MiniRacer()
+    js_code.eval(hk_js_decode)
+    rows = js_code.call("d", encoded)
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    for column in ("open", "high", "low", "close", "volume"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame[frame["date"].notna()].copy()
+    frame["date"] = frame["date"].dt.strftime("%Y-%m-%d")
+    frame = frame[(frame["date"] >= _date_string(start_date)) & (frame["date"] <= _date_string(end_date))]
+    return frame.sort_values("date").reset_index(drop=True)
+
+
+def _date_string(value: str) -> str:
+    """Normalize a YYYYMMDD/ISO date into the provider's canonical form."""
+    normalized = str(value).replace("-", "")
+    return f"{normalized[:4]}-{normalized[4:6]}-{normalized[6:8]}"
+
+
+def _fetch_etf_nav_history(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Fetch ETF NAV pages and preserve the upstream JSON field names.
+
+    AkShare 1.18.x assumes each NAV row has 13 fields, while Eastmoney now
+    returns 14 fields.  Reading the JSON keys directly avoids that brittle
+    positional schema and also gives every page a bounded HTTP timeout.
+    """
+    import requests
+
+    params = {
+        "fundCode": ticker,
+        "pageIndex": 1,
+        "pageSize": ETF_NAV_PAGE_SIZE,
+        "startDate": _date_string(start_date),
+        "endDate": _date_string(end_date),
+        "_": round(time.time() * 1000),
+    }
+    response = requests.get(
+        ETF_NAV_URL,
+        params=params,
+        headers={**ETF_NAV_HEADERS, "Referer": f"https://fundf10.eastmoney.com/jjjz_{ticker}.html"},
+        timeout=UPSTREAM_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("Data") or {}
+    total_count = int(payload.get("TotalCount") or data.get("TotalCount") or 0)
+    if total_count <= 0:
+        return pd.DataFrame()
+
+    rows: list[dict[str, Any]] = list(data.get("LSJZList") or [])
+    total_pages = math.ceil(total_count / ETF_NAV_PAGE_SIZE)
+    for page in range(2, total_pages + 1):
+        page_params = {**params, "pageIndex": page}
+        page_response = requests.get(
+            ETF_NAV_URL,
+            params=page_params,
+            headers={**ETF_NAV_HEADERS, "Referer": f"https://fundf10.eastmoney.com/jjjz_{ticker}.html"},
+            timeout=UPSTREAM_TIMEOUT_SECONDS,
+        )
+        page_response.raise_for_status()
+        page_data = page_response.json().get("Data") or {}
+        rows.extend(page_data.get("LSJZList") or [])
+
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    return frame.rename(
+        columns={
+            "FSRQ": "净值日期",
+            "DWJZ": "单位净值",
+            "LJJZ": "累计净值",
+            "JZZZL": "日增长率",
+        }
+    )
 
 
 def get_stock_history(
@@ -650,13 +751,29 @@ def get_fund_history(
         import akshare as ak
 
         endpoint = getattr(ak, endpoint_name)
-        return endpoint(
-            symbol=ticker,
-            period="daily",
-            start_date=start_date,
-            end_date=end_date,
-            adjust=adjust,
-        )
+        try:
+            frame = endpoint(
+                symbol=ticker,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+            )
+            if not frame.empty:
+                return frame
+            if asset_type != "etf":
+                return frame
+            raise ValueError(f"{asset_type} history returned no rows")
+        except Exception as primary_exc:
+            if asset_type != "etf":
+                raise
+            logger.warning(
+                f"ETF history primary source failed for {ticker}, trying Sina fallback: {primary_exc}"
+            )
+            fallback = _fetch_etf_history_sina(ticker, start_date, end_date)
+            if fallback.empty:
+                raise primary_exc
+            return fallback
 
     try:
         df = _retry_with_backoff(_fetch, breaker, f"{asset_type}_history:{ticker}")
@@ -716,11 +833,7 @@ def get_fund_nav_history(
         import akshare as ak
 
         if asset_type == "etf":
-            return ak.fund_etf_fund_info_em(
-                fund=ticker,
-                start_date=start_date,
-                end_date=end_date,
-            )
+            return _fetch_etf_nav_history(ticker, start_date, end_date)
         return ak.fund_open_fund_info_em(
             symbol=ticker,
             indicator="单位净值走势",

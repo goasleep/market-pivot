@@ -116,8 +116,18 @@ async def test_chat_task_pauses_and_resumes_after_interaction(store, monkeypatch
     interaction = json.loads(interaction_events[-1]["data"])["interaction"]
     assert (await store.get_task("task-pause"))["status"] == "waiting_user"
 
-    await manager.respond("task-pause", interaction["interaction_id"], "quote")
-    resumed_events = [event async for event in manager.subscribe("task-pause")]
+    response = await manager.respond("task-pause", interaction["interaction_id"], "quote")
+    last_paused_event_id = max(int(event["id"]) for event in paused_events)
+    assert response["last_event_id"] == last_paused_event_id
+    resumed_events = [
+        event
+        async for event in manager.subscribe(
+            "task-pause",
+            after_sequence=response["last_event_id"],
+        )
+    ]
+    assert all(int(event["id"]) > last_paused_event_id for event in resumed_events)
+    assert not any(event["event"] == "interaction_required" for event in resumed_events)
     assert any(event["event"] == "done" for event in resumed_events)
     conversation = await store.get_conversation("conversation-pause")
     assert conversation is not None
