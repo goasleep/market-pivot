@@ -359,24 +359,31 @@ class AutomationService:
         )
         try:
             broker = get_live_broker(live_config)
-            result = await asyncio.to_thread(broker.submit_order, intent)
         except LiveBrokerUnavailableError as exc:
             return "rejected", str(exc), None
-        except Exception as exc:  # A network failure may occur after broker acceptance.
-            logger.exception("Live broker submission outcome is unknown for {}", client_order_id)
-            return "pending", f"实盘提交结果未知，需要对账：{exc}", client_order_id
 
-        order_id = result.broker_order_id or result.client_order_id
-        if result.status == "rejected":
-            return "rejected", result.message or "券商拒绝订单", order_id
-        if result.status == "unknown":
-            return "pending", result.message or "券商返回未知状态，需要对账", order_id
         try:
-            snapshot = await asyncio.to_thread(broker.sync)
-            await self._apply_live_snapshot(account_id, snapshot)
-        except Exception:
-            logger.warning("Live broker accepted {} but snapshot sync is unavailable", order_id)
-        return "approved", result.message or f"实盘订单已提交：{result.status}", order_id
+            try:
+                result = await broker.submit_order(intent)
+            except LiveBrokerUnavailableError as exc:
+                return "rejected", str(exc), None
+            except Exception as exc:  # A network failure may occur after broker acceptance.
+                logger.exception("Live broker submission outcome is unknown for {}", client_order_id)
+                return "pending", f"实盘提交结果未知，需要对账：{exc}", client_order_id
+
+            order_id = result.broker_order_id or result.client_order_id
+            if result.status == "rejected":
+                return "rejected", result.message or "券商拒绝订单", order_id
+            if result.status == "unknown":
+                return "pending", result.message or "券商返回未知状态，需要对账", order_id
+            try:
+                snapshot = await broker.sync()
+                await self._apply_live_snapshot(account_id, snapshot)
+            except Exception:
+                logger.warning("Live broker accepted {} but snapshot sync is unavailable", order_id)
+            return "approved", result.message or f"实盘订单已提交：{result.status}", order_id
+        finally:
+            await broker.close()
 
     @staticmethod
     async def _apply_live_snapshot(account_id: str, payload: dict) -> bool:
@@ -488,9 +495,12 @@ class AutomationService:
         account = await simulation_accounts.get_account(account_id)
         try:
             broker = get_live_broker(account.config.live)
-            payload = await asyncio.to_thread(broker.sync)
         except LiveBrokerUnavailableError as exc:
             raise ValueError(str(exc)) from exc
+        try:
+            payload = await broker.sync()
+        finally:
+            await broker.close()
         mirrored = await self._apply_live_snapshot(account_id, payload)
         payload = {**payload, "portfolio_mirrored": mirrored}
         await automation_store.add_event(account_id, "live.sync", payload)

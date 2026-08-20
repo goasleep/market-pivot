@@ -47,8 +47,8 @@ def _normalise_results(payload: dict[str, Any], limit: int) -> list[dict[str, An
     return results
 
 
-def search_web(query: str, *, num_results: int = 8, tbs: str | None = None) -> dict[str, Any]:
-    """Search Google through Serper and return source-aware organic results."""
+async def async_search_web(query: str, *, num_results: int = 8, tbs: str | None = None) -> dict[str, Any]:
+    """Search Google through Serper without blocking the event loop."""
     query = query.strip()
     limit = max(1, min(int(num_results), 10))
     if not query:
@@ -75,8 +75,8 @@ def search_web(query: str, *, num_results: int = 8, tbs: str | None = None) -> d
 
     endpoint = f"{settings.serper_base_url.rstrip('/')}/search"
     try:
-        with httpx.Client(timeout=_TIMEOUT_SECONDS) as client:
-            response = client.post(
+        async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+            response = await client.post(
                 endpoint,
                 headers={"X-API-KEY": settings.serper_api_key.strip(), "Content-Type": "application/json"},
                 json=payload,
@@ -103,9 +103,16 @@ def search_web(query: str, *, num_results: int = 8, tbs: str | None = None) -> d
         }
 
 
-async def async_search_web(query: str, *, num_results: int = 8, tbs: str | None = None) -> dict[str, Any]:
-    """Async wrapper for callers that must not block the event loop."""
-    return await asyncio.to_thread(search_web, query, num_results=num_results, tbs=tbs)
+def search_web(query: str, *, num_results: int = 8, tbs: str | None = None) -> dict[str, Any]:
+    """Synchronous compatibility entry point for non-FastAPI callers.
+
+    FastAPI and agent code should use :func:`async_search_web`.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_search_web(query, num_results=num_results, tbs=tbs))
+    raise RuntimeError("请在异步调用方中使用 async_search_web")
 
 
 async def async_search_web_parallel(

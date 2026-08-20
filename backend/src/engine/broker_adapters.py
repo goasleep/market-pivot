@@ -38,13 +38,16 @@ class SimulationBroker(Protocol):
 class LiveBroker(Protocol):
     """Provider-neutral contract for a reviewed live trading gateway."""
 
-    def submit_order(self, intent: LiveOrderIntent) -> LiveOrderResult:
+    async def submit_order(self, intent: LiveOrderIntent) -> LiveOrderResult:
         ...
 
-    def cancel_order(self, broker_order_id: str) -> LiveOrderResult:
+    async def cancel_order(self, broker_order_id: str) -> LiveOrderResult:
         ...
 
-    def sync(self) -> dict[str, Any]:
+    async def sync(self) -> dict[str, Any]:
+        ...
+
+    async def close(self) -> None:
         ...
 
 
@@ -77,14 +80,14 @@ class CustomHttpLiveBroker:
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if config.token:
             headers["Authorization"] = f"Bearer {config.token}"
-        self.client = httpx.Client(
+        self.client = httpx.AsyncClient(
             base_url=config.endpoint.rstrip("/"),
             headers=headers,
             timeout=10.0,
         )
 
-    def submit_order(self, intent: LiveOrderIntent) -> LiveOrderResult:
-        response = self.client.post("/orders", json=intent.model_dump(mode="json"))
+    async def submit_order(self, intent: LiveOrderIntent) -> LiveOrderResult:
+        response = await self.client.post("/orders", json=intent.model_dump(mode="json"))
         response.raise_for_status()
         payload = response.json()
         return LiveOrderResult(
@@ -96,8 +99,8 @@ class CustomHttpLiveBroker:
             fill_price=payload.get("fill_price"),
         )
 
-    def cancel_order(self, broker_order_id: str) -> LiveOrderResult:
-        response = self.client.delete(f"/orders/{broker_order_id}")
+    async def cancel_order(self, broker_order_id: str) -> LiveOrderResult:
+        response = await self.client.delete(f"/orders/{broker_order_id}")
         response.raise_for_status()
         payload = response.json()
         return LiveOrderResult(
@@ -107,14 +110,14 @@ class CustomHttpLiveBroker:
             message=payload.get("message", ""),
         )
 
-    def sync(self) -> dict[str, Any]:
-        response = self.client.get("/sync", params={"account_id": self.config.account_id})
+    async def sync(self) -> dict[str, Any]:
+        response = await self.client.get("/sync", params={"account_id": self.config.account_id})
         response.raise_for_status()
         payload = response.json()
         return payload if isinstance(payload, dict) else {"data": payload}
 
-    def close(self) -> None:
-        self.client.close()
+    async def close(self) -> None:
+        await self.client.aclose()
 
 
 class FailClosedLiveBroker:
@@ -126,14 +129,17 @@ class FailClosedLiveBroker:
     def _raise(self) -> None:
         raise LiveBrokerUnavailableError(self.reason)
 
-    def submit_order(self, intent: LiveOrderIntent) -> LiveOrderResult:
+    async def submit_order(self, intent: LiveOrderIntent) -> LiveOrderResult:
         self._raise()
 
-    def cancel_order(self, broker_order_id: str) -> LiveOrderResult:
+    async def cancel_order(self, broker_order_id: str) -> LiveOrderResult:
         self._raise()
 
-    def sync(self) -> dict[str, Any]:
+    async def sync(self) -> dict[str, Any]:
         self._raise()
+
+    async def close(self) -> None:
+        return None
 
 
 def get_live_broker(config: LiveTradingConfig) -> LiveBroker:

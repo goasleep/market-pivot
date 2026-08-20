@@ -49,8 +49,8 @@ def _normalise_results(payload: dict[str, Any], limit: int) -> list[dict[str, An
     return results
 
 
-def search_web_anysearch(query: str, *, num_results: int = 8) -> dict[str, Any]:
-    """Search the web through AnySearch's unified search API."""
+async def async_search_web_anysearch(query: str, *, num_results: int = 8) -> dict[str, Any]:
+    """Search the web through AnySearch without blocking the event loop."""
     query = query.strip()
     limit = max(1, min(int(num_results), 20))
     if not query:
@@ -77,8 +77,8 @@ def search_web_anysearch(query: str, *, num_results: int = 8) -> dict[str, Any]:
 
     endpoint = f"{settings.anysearch_base_url.rstrip('/')}/v1/search"
     try:
-        with httpx.Client(timeout=_TIMEOUT_SECONDS) as client:
-            response = client.post(endpoint, headers=headers, json=payload)
+        async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+            response = await client.post(endpoint, headers=headers, json=payload)
             response.raise_for_status()
             raw = response.json()
         if not isinstance(raw, dict):
@@ -105,6 +105,13 @@ def search_web_anysearch(query: str, *, num_results: int = 8) -> dict[str, Any]:
         }
 
 
-async def async_search_web_anysearch(query: str, *, num_results: int = 8) -> dict[str, Any]:
-    """Async wrapper for the blocking AnySearch client."""
-    return await asyncio.to_thread(search_web_anysearch, query, num_results=num_results)
+def search_web_anysearch(query: str, *, num_results: int = 8) -> dict[str, Any]:
+    """Synchronous compatibility entry point for non-FastAPI callers.
+
+    FastAPI and agent code should use :func:`async_search_web_anysearch`.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_search_web_anysearch(query, num_results=num_results))
+    raise RuntimeError("请在异步调用方中使用 async_search_web_anysearch")

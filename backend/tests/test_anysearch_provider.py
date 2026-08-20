@@ -26,17 +26,17 @@ def test_anysearch_provider_posts_documented_request_and_normalises_response(mon
         def __init__(self, **kwargs):
             captured["timeout"] = kwargs["timeout"]
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type, exc, tb):
             return None
 
-        def post(self, endpoint, *, headers, json):
+        async def post(self, endpoint, *, headers, json):
             captured.update({"endpoint": endpoint, "headers": headers, "json": json})
             return FakeResponse()
 
-    monkeypatch.setattr(anysearch_provider.httpx, "Client", FakeClient)
+    monkeypatch.setattr(anysearch_provider.httpx, "AsyncClient", FakeClient)
     monkeypatch.setattr(anysearch_provider.settings, "anysearch_api_key", "test-key")
     monkeypatch.setattr(anysearch_provider.settings, "anysearch_base_url", "https://api.example")
     monkeypatch.setattr(anysearch_provider.settings, "anysearch_zone", "cn")
