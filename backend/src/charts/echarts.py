@@ -12,7 +12,7 @@ import json
 import re
 from typing import Any
 
-ECHARTS_VERSION = "5.6.0"
+ECHARTS_VERSION = "6.1.0"
 ECHARTS_CDN = f"https://cdn.jsdelivr.net/npm/echarts@{ECHARTS_VERSION}/dist/echarts.min.js"
 
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { Archive, CalendarDays, ExternalLink, FileText, Layers3, RefreshCw, Search } from "lucide-react";
 import { getArtifacts } from "@/api";
 import type { Artifact } from "@/types";

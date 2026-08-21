@@ -253,7 +253,7 @@ export function PortfolioPage() {
 
       <Card>
         <CardHeader><CardTitle className="text-base">模拟净值曲线</CardTitle><CardDescription>日结算快照；没有快照时说明尚未执行日结算。</CardDescription></CardHeader>
-        <CardContent>{snapshots.length === 0 ? <p className="text-sm text-muted-foreground">暂无日级净值数据</p> : <ResponsiveContainer width="100%" height={240}><LineChart data={[...snapshots].reverse()}><XAxis dataKey="date" fontSize={11} /><YAxis fontSize={11} domain={["auto", "auto"]} /><Tooltip formatter={(value: number) => `¥${value.toLocaleString()}`} /><Line type="monotone" dataKey="total_value" stroke="hsl(var(--chart-1))" strokeWidth={2} dot={false} /></LineChart></ResponsiveContainer>}</CardContent>
+        <CardContent>{snapshots.length === 0 ? <p className="text-sm text-muted-foreground">暂无日级净值数据</p> : <ResponsiveContainer width="100%" height={240}><LineChart data={[...snapshots].reverse()}><XAxis dataKey="date" fontSize={11} /><YAxis fontSize={11} domain={["auto", "auto"]} /><Tooltip formatter={(value) => `¥${Number(value ?? 0).toLocaleString()}`} /><Line type="monotone" dataKey="total_value" stroke="hsl(var(--chart-1))" strokeWidth={2} dot={false} /></LineChart></ResponsiveContainer>}</CardContent>
       </Card>
 
       <Card>

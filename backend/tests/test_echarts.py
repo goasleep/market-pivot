@@ -1,6 +1,6 @@
 import pytest
 
-from charts.echarts import line_option, render_chart_container, render_chart_document
+from charts.echarts import ECHARTS_VERSION, line_option, render_chart_container, render_chart_document
 from tools.artifacts import _render_line_chart_html
 
 
@@ -16,6 +16,8 @@ def test_echarts_line_chart_uses_canvas_and_not_hand_built_svg():
     document = render_chart_document("走势", chart)
 
     assert "echarts.init" in document
+    assert ECHARTS_VERSION == "6.1.0"
+    assert f"echarts@{ECHARTS_VERSION}" in document
     assert 'renderer: "canvas"' in document
     assert "<svg" not in document
     assert "2026-08-12" in document

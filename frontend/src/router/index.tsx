@@ -1,4 +1,4 @@
-import { createBrowserRouter, Outlet, NavLink } from "react-router-dom";
+import { createBrowserRouter, Outlet, NavLink } from "react-router";
 import { LayoutDashboard, Wallet, MessageSquare, Settings, Bot, Sparkles, Archive } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { DashboardPage } from "@/pages/dashboard";
