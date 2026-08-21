@@ -6,9 +6,9 @@ A 股 AI Agent 模拟交易系统 — 基于多智能体协作的回测 + 纸上
 
 ## 技术栈
 
-- **后端**：Python 3.11+ / FastAPI / LangGraph / DeepSeek API / AkShare / AnySearch / Serper / DDGS
+- **后端**：Python 3.11+ / FastAPI / LangGraph / DeepSeek 原生及 OpenAI-compatible LLM / AkShare / AnySearch / Serper / DDGS
 - **前端**：React / Vite / TailwindCSS / shadcn/ui
-- **Monorepo**：pnpm workspaces
+- **依赖管理**：前端使用 pnpm，后端使用 uv 独立管理
 
 ## 核心功能
 
@@ -39,11 +39,11 @@ A 股 AI Agent 模拟交易系统 — 基于多智能体协作的回测 + 纸上
 
 ### 前置要求
 
-- Node.js >= 20
-- pnpm >= 9
+- Node.js >= 20.19
+- pnpm >= 10
 - Python >= 3.11
 - uv (Python 包管理器)
-- DeepSeek API Key
+- 至少一个可用的 LLM Provider API Key（DeepSeek 或 OpenAI-compatible）
 
 ### 安装
 
@@ -60,8 +60,16 @@ uv sync
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入 DeepSeek API Key；生成研究报告时还需要 S3 兼容对象存储配置
+# 编辑 .env，至少配置一个 LLM API Key
 ```
+
+系统默认提供 DeepSeek 原生和 OpenAI-compatible 两类 Provider Profile。`.env` 中的
+`OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 是所有 LLM Profile 共用的连接配置，且只从环境变量读取，
+不会写入数据库。`OPENAI_BASE_URL` 默认是 `https://api.openai.com/v1`；使用其他 OpenAI-compatible
+服务时，在 `.env` 中修改它。前端 **Settings** 页面只保存 Provider Type、模型名称和路由等非敏感配置。
+修改 `.env` 中的 Key 或 Base URL 后需要重启后端。
+适配器由 Provider Type 显式决定，不根据模型名称推断；OpenAI-compatible Profile 中的 DeepSeek 模型仍走兼容接口。
+生成研究报告时还需要配置 S3 兼容对象存储。
 
 联网搜索配置：
 
@@ -239,7 +247,7 @@ a-share-agent/
 │   │   ├── data/            # 数据源封装 (AkShare)
 │   │   ├── artifacts/        # 研究报告生成、索引与对象存储
 │   │   ├── application/      # 对话、研究与任务服务
-│   │   ├── llm/             # DeepSeek LLM 适配器
+│   │   ├── llm/             # Provider-neutral LLM 服务及 Provider 适配器
 │   │   ├── engine/          # 回测 + 模拟交易引擎
 │   │   ├── graph/           # LangGraph 工作流
 │   │   └── models/          # 数据模型
