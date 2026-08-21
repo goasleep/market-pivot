@@ -13,6 +13,11 @@ from llm_runtime import current_llm_profile
 
 # --- LLM config defaults (runtime state is loaded by the application startup) ---
 
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+_REPOSITORY_ROOT = _BACKEND_ROOT.parent
+_ENV_FILES = (_REPOSITORY_ROOT / ".env", _BACKEND_ROOT / ".env")
+_DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
 _LLM_CONFIG_DEFAULTS = {
     "active_profile_id": "deepseek",
     "profiles": {},
@@ -30,71 +35,79 @@ _LLM_CONFIG_DEFAULTS = {
 _runtime_llm_config: dict[str, Any] = {}
 
 
-def _normalise_state(raw: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Migrate the old flat DeepSeek config into the profile format."""
-    value = raw if isinstance(raw, dict) else {}
-    if isinstance(value.get("profiles"), dict) and value["profiles"]:
-        state = deepcopy(value)
-    else:
-        legacy = value
-        profiles = default_profiles(
-            deepseek_api_key=str(legacy.get("api_key", settings.deepseek_api_key) or ""),
-            deepseek_base_url=str(legacy.get("base_url", settings.deepseek_base_url) or ""),
-            deepseek_model=str(legacy.get("model", settings.deepseek_model) or ""),
-        )
-        if "temperature" in legacy:
-            profiles["deepseek"]["temperature"] = legacy["temperature"]
-        if "max_tokens" in legacy:
-            profiles["deepseek"]["max_tokens"] = legacy["max_tokens"]
-        state = {
-            "active_profile_id": "deepseek",
-            "profiles": profiles,
-            "routing": deepcopy(_LLM_CONFIG_DEFAULTS["routing"]),
-        }
+def _default_llm_state() -> dict[str, Any]:
+    return {
+        "active_profile_id": "deepseek",
+        "profiles": default_profiles(deepseek_model=settings.deepseek_model),
+        "routing": deepcopy(_LLM_CONFIG_DEFAULTS["routing"]),
+    }
 
-    state.setdefault("active_profile_id", "deepseek")
-    state.setdefault("routing", deepcopy(_LLM_CONFIG_DEFAULTS["routing"]))
-    routing = state["routing"]
+
+def _normalise_state(raw: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Validate and fill the current profile-based LLM state."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("profiles"), dict) or not raw["profiles"]:
+        return _default_llm_state()
+
+    raw_profiles = raw["profiles"]
+    profiles: dict[str, dict[str, Any]] = {}
+    for profile_id, value in raw_profiles.items():
+        if not isinstance(value, dict):
+            continue
+        profile = {
+            "id": str(value.get("id") or profile_id),
+            "name": str(value.get("name") or profile_id),
+            "type": str(value.get("type") or "openai_compatible"),
+            "model": str(value.get("model") or ""),
+            "temperature": float(value.get("temperature", 0.3)),
+            "max_tokens": int(value.get("max_tokens", 8192)),
+        }
+        profiles[str(profile_id)] = profile
+
+    if not profiles:
+        return _default_llm_state()
+
+    routing = deepcopy(raw.get("routing"))
     if not isinstance(routing, dict):
         routing = deepcopy(_LLM_CONFIG_DEFAULTS["routing"])
-        state["routing"] = routing
     routing.setdefault("enabled", False)
-    routing.setdefault("routes", {})
+    if not isinstance(routing.get("routes"), dict):
+        routing["routes"] = {}
     for route, target in _LLM_CONFIG_DEFAULTS["routing"]["routes"].items():
         routing["routes"].setdefault(route, deepcopy(target))
 
-    profiles = state["profiles"]
-    for profile_id, profile in list(profiles.items()):
-        if not isinstance(profile, dict):
-            del profiles[profile_id]
-            continue
-        profile.setdefault("id", profile_id)
-        profile.setdefault("name", profile_id)
-        profile.setdefault("type", "openai_compatible")
-        profile.setdefault("api_key", "")
-        profile.setdefault("base_url", "")
-        profile.setdefault("model", "")
-        profile.setdefault("temperature", 0.3)
-        profile.setdefault("max_tokens", 8192)
-        profile.setdefault("models", {})
-        if not isinstance(profile["models"], dict):
-            profile["models"] = {}
-        for model, info in profile["models"].items():
-            if isinstance(info, dict):
-                info.setdefault("max_tokens", profile["max_tokens"])
-                info.setdefault("temperature", profile["temperature"])
-                info.setdefault("description", "Configured model")
-                info.setdefault("supports_tools", True)
-                info.setdefault("supports_reasoning", False)
-
-    if state["active_profile_id"] not in profiles:
-        state["active_profile_id"] = next(iter(profiles), "deepseek")
-    return state
+    active_profile_id = str(raw.get("active_profile_id") or "")
+    if active_profile_id not in profiles:
+        active_profile_id = next(iter(profiles))
+    return {
+        "active_profile_id": active_profile_id,
+        "profiles": profiles,
+        "routing": routing,
+    }
 
 
 def get_llm_state() -> dict[str, Any]:
-    """Get the complete hot-reloadable profile configuration."""
+    """Get the complete secret-free, hot-reloadable profile configuration."""
     return deepcopy(_runtime_llm_config)
+
+
+def _read_api_key() -> str:
+    """Resolve the shared LLM key from OPENAI_API_KEY."""
+    value = os.getenv("OPENAI_API_KEY")
+    if value is not None:
+        return value.strip()
+    return settings.openai_api_key.strip()
+
+
+def llm_api_key_is_set() -> bool:
+    """Return whether OPENAI_API_KEY has a value."""
+    return bool(_read_api_key())
+
+
+def get_llm_base_url() -> str:
+    """Resolve the shared LLM endpoint from OPENAI_BASE_URL."""
+    value = os.getenv("OPENAI_BASE_URL")
+    configured = value if value is not None else settings.openai_base_url
+    return configured.strip() or _DEFAULT_OPENAI_BASE_URL
 
 
 def get_llm_config(
@@ -121,6 +134,8 @@ def get_llm_config(
     profile["temperature"] = info.get("temperature", profile.get("temperature", 0.3))
     profile["max_tokens"] = info.get("max_tokens", profile.get("max_tokens", 8192))
     profile["model_info"] = info
+    profile["api_key"] = _read_api_key()
+    profile["base_url"] = get_llm_base_url()
     return profile
 
 
@@ -143,16 +158,15 @@ def save_llm_config(updates: dict) -> dict[str, Any]:
     """Update the in-memory LLM configuration.
 
     Args:
-        updates: Partial dict of config keys to update.
-                  api_key="" or api_key=None means "keep existing".
+        updates: Partial dict of non-secret profile settings to update.
 
     Returns:
         The full updated config dict.
     """
-    current = _normalise_state(updates if "profiles" in updates else _runtime_llm_config)
     if "profiles" in updates:
         current = _normalise_state(updates)
     else:
+        current = _normalise_state(_runtime_llm_config)
         profile_id = str(updates.get("profile_id") or current["active_profile_id"])
         profile = current["profiles"].setdefault(
             profile_id,
@@ -160,19 +174,14 @@ def save_llm_config(updates: dict) -> dict[str, Any]:
                 "id": profile_id,
                 "name": profile_id,
                 "type": "openai_compatible",
-                "api_key": "",
-                "base_url": "",
                 "model": "",
                 "temperature": 0.3,
                 "max_tokens": 8192,
-                "models": {},
             },
         )
-        for key in ("name", "type", "base_url", "model", "temperature", "max_tokens", "models"):
+        for key in ("name", "type", "model", "temperature", "max_tokens"):
             if key in updates and updates[key] is not None:
                 profile[key] = updates[key]
-        if updates.get("api_key"):
-            profile["api_key"] = updates["api_key"]
         if "active_profile_id" in updates and updates["active_profile_id"] in current["profiles"]:
             current["active_profile_id"] = updates["active_profile_id"]
         if "routing" in updates:
@@ -186,15 +195,17 @@ def save_llm_config(updates: dict) -> dict[str, Any]:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILES,
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
-    # DeepSeek API
-    deepseek_api_key: str = ""
-    deepseek_base_url: str = "https://api.deepseek.com/v1"
+    # DeepSeek profile defaults.
     deepseek_model: str = "deepseek-v4-flash"
+
+    # Shared environment-owned connection settings for every LLM profile.
+    openai_api_key: str = ""
+    openai_base_url: str = _DEFAULT_OPENAI_BASE_URL
 
     # Server
     host: str = "0.0.0.0"
@@ -207,7 +218,6 @@ class Settings(BaseSettings):
     # Local SQLite database for single-node mode. DATABASE_URL selects the
     # PostgreSQL runtime backend for durable multi-node deployments.
     database_path: str = "./data/cache.db"
-    data_cache_path: str | None = None  # backwards-compatible legacy environment variable
     database_url: str | None = None  # optional Tortoise URL for shared persistence
 
     # S3-compatible artifact storage.  The backend proxies preview/download
@@ -248,7 +258,7 @@ class Settings(BaseSettings):
 
     @property
     def database_file_path(self) -> Path:
-        p = Path(self.data_cache_path or self.database_path)
+        p = Path(self.database_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -260,19 +270,7 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-_runtime_llm_config.update(
-    _normalise_state(
-        {
-            "active_profile_id": "deepseek",
-            "profiles": default_profiles(
-                deepseek_api_key=settings.deepseek_api_key,
-                deepseek_base_url=settings.deepseek_base_url,
-                deepseek_model=settings.deepseek_model,
-            ),
-            "routing": deepcopy(_LLM_CONFIG_DEFAULTS["routing"]),
-        }
-    )
-)
+_runtime_llm_config.update(_default_llm_state())
 
 
 def configure_langsmith() -> None:
@@ -281,7 +279,6 @@ def configure_langsmith() -> None:
         return
 
     os.environ["LANGSMITH_TRACING"] = "true"
-    os.environ["LANGCHAIN_TRACING_V2"] = "true"  # compatibility with older LangChain releases
     os.environ["LANGSMITH_API_KEY"] = settings.langsmith_api_key
     os.environ["LANGSMITH_PROJECT"] = settings.langsmith_project
     os.environ["LANGCHAIN_PROJECT"] = settings.langsmith_project

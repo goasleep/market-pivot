@@ -118,7 +118,7 @@ export function ChatPage() {
       .then((data) => {
         setLlmConfig(data);
         setLlmProfileId(data.active_profile_id);
-        setLlmModel(data.profiles[data.active_profile_id]?.model || data.model);
+        setLlmModel(data.profiles[data.active_profile_id]?.model || "");
       })
       .catch(() => {
         // The backend still has a default model if settings are unavailable.

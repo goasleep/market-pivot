@@ -13,6 +13,14 @@ from data.tortoise_db import init_database
 LLM_SETTINGS_KEY = "llm_config"
 
 
+async def _persist_config(config: dict[str, Any]) -> None:
+    payload = json.dumps(config, ensure_ascii=False)
+    await AppSetting.update_or_create(
+        defaults={"value": payload, "updated_at": time.time()},
+        key=LLM_SETTINGS_KEY,
+    )
+
+
 async def load_llm_config() -> dict[str, Any]:
     await init_database()
     row = await AppSetting.get_or_none(key=LLM_SETTINGS_KEY)
@@ -22,7 +30,7 @@ async def load_llm_config() -> dict[str, Any]:
         persisted = json.loads(row.value)
     except json.JSONDecodeError:
         persisted = {}
-    if not isinstance(persisted, dict):
+    if not isinstance(persisted, dict) or not isinstance(persisted.get("profiles"), dict):
         return get_llm_state()
     return save_llm_config(persisted)
 
@@ -30,9 +38,5 @@ async def load_llm_config() -> dict[str, Any]:
 async def update_llm_config(updates: dict[str, Any]) -> dict[str, Any]:
     await init_database()
     config = save_llm_config(updates)
-    payload = json.dumps(config, ensure_ascii=False)
-    await AppSetting.update_or_create(
-        defaults={"value": payload, "updated_at": time.time()},
-        key=LLM_SETTINGS_KEY,
-    )
+    await _persist_config(config)
     return config

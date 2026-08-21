@@ -11,12 +11,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { getLLMConfig, updateLLMConfig, type LLMConfig } from "@/api";
 import {
-  getLLMConfig,
-  updateLLMConfig,
-  type LLMConfig,
-} from "@/api";
-import { Settings, Save, Loader2, CheckCircle2, AlertCircle, Eye, EyeOff } from "lucide-react";
+  Settings,
+  Save,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+} from "lucide-react";
 
 export function SettingsPage() {
   const [config, setConfig] = useState<LLMConfig | null>(null);
@@ -26,15 +28,12 @@ export function SettingsPage() {
   const [success, setSuccess] = useState(false);
 
   // Form fields
-  const [apiKey, setApiKey] = useState("");
   const [profileId, setProfileId] = useState("");
   const [profileName, setProfileName] = useState("");
   const [providerType, setProviderType] = useState("openai_compatible");
-  const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
   const [temperature, setTemperature] = useState(0.3);
   const [maxTokens, setMaxTokens] = useState(8192);
-  const [showApiKey, setShowApiKey] = useState(false);
   const [routingEnabled, setRoutingEnabled] = useState(false);
   const [chatRouteProfile, setChatRouteProfile] = useState("");
   const [chatRouteModel, setChatRouteModel] = useState("");
@@ -51,16 +50,22 @@ export function SettingsPage() {
       setProfileId(data.active_profile_id);
       setProfileName(active?.name || data.active_profile_id);
       setProviderType(active?.type || "openai_compatible");
-      setBaseUrl(active?.base_url || data.base_url);
-      setModel(active?.model || data.model);
-      setTemperature(active?.temperature ?? data.temperature);
-      setMaxTokens(active?.max_tokens ?? data.max_tokens);
+      setModel(active?.model || "");
+      setTemperature(active?.temperature ?? 0.3);
+      setMaxTokens(active?.max_tokens ?? 8192);
       setRoutingEnabled(data.routing?.enabled ?? false);
-      setChatRouteProfile(data.routing?.routes?.chat?.profile_id || data.active_profile_id);
-      setChatRouteModel(data.routing?.routes?.chat?.model || active?.model || data.model);
-      setAnalysisRouteProfile(data.routing?.routes?.analysis?.profile_id || data.active_profile_id);
-      setAnalysisRouteModel(data.routing?.routes?.analysis?.model || active?.model || data.model);
-      setApiKey(""); // never pre-fill with actual key
+      setChatRouteProfile(
+        data.routing?.routes?.chat?.profile_id || data.active_profile_id,
+      );
+      setChatRouteModel(
+        data.routing?.routes?.chat?.model || active?.model || "",
+      );
+      setAnalysisRouteProfile(
+        data.routing?.routes?.analysis?.profile_id || data.active_profile_id,
+      );
+      setAnalysisRouteModel(
+        data.routing?.routes?.analysis?.model || active?.model || "",
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load config");
     } finally {
@@ -78,14 +83,10 @@ export function SettingsPage() {
     setProfileId(id);
     setProfileName(selected.name);
     setProviderType(selected.type);
-    setBaseUrl(selected.base_url);
     setModel(selected.model);
     setTemperature(selected.temperature);
     setMaxTokens(selected.max_tokens);
-    setApiKey("");
   };
-
-  const selectedProfile = config?.profiles[profileId];
 
   const handleSave = async () => {
     setSaving(true);
@@ -97,7 +98,6 @@ export function SettingsPage() {
         profile_id: profileId,
         profile_name: profileName,
         provider_type: providerType,
-        base_url: baseUrl,
         model,
         temperature,
         max_tokens: maxTokens,
@@ -105,18 +105,15 @@ export function SettingsPage() {
           enabled: routingEnabled,
           routes: {
             chat: { profile_id: chatRouteProfile, model: chatRouteModel },
-            analysis: { profile_id: analysisRouteProfile, model: analysisRouteModel },
+            analysis: {
+              profile_id: analysisRouteProfile,
+              model: analysisRouteModel,
+            },
           },
         },
       };
-      // Only send api_key if user typed a new one
-      if (apiKey.trim()) {
-        update.api_key = apiKey.trim();
-      }
-
       const data = await updateLLMConfig(update);
       setConfig(data);
-      setApiKey("");
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
     } catch (e) {
@@ -168,7 +165,7 @@ export function SettingsPage() {
         <CardContent className="space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-sm text-muted-foreground">API Key</span>
-            {selectedProfile?.api_key_set ? (
+            {config?.api_key_set ? (
               <Badge className="bg-green-500/15 text-green-600 hover:bg-green-500/15">
                 Configured
               </Badge>
@@ -176,14 +173,28 @@ export function SettingsPage() {
               <Badge variant="destructive">Not Set</Badge>
             )}
           </div>
-          {selectedProfile?.api_key_set && (
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-muted-foreground">Masked Key</span>
-              <code className="text-xs text-muted-foreground">
-                {selectedProfile.api_key_masked}
-              </code>
-            </div>
-          )}
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-muted-foreground">
+              API Key Variable
+            </span>
+            <code className="text-xs text-muted-foreground">
+              OPENAI_API_KEY
+            </code>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-sm text-muted-foreground">Base URL</span>
+            <code className="truncate text-xs text-muted-foreground">
+              {config?.base_url}
+            </code>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-muted-foreground">
+              Base URL Variable
+            </span>
+            <code className="text-xs text-muted-foreground">
+              OPENAI_BASE_URL
+            </code>
+          </div>
         </CardContent>
       </Card>
 
@@ -192,8 +203,8 @@ export function SettingsPage() {
         <CardHeader>
           <CardTitle className="text-base">Model Configuration</CardTitle>
           <CardDescription>
-            Settings are saved to a local config file and hot-reloaded without
-            server restart.
+            Model settings are saved to the application database. Connection
+            settings come only from environment variables.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
@@ -205,20 +216,26 @@ export function SettingsPage() {
               onChange={(e) => selectProfile(e.target.value)}
               className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
             >
-              {config && Object.values(config.profiles).map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.name}（{profile.type}）
-                </option>
-              ))}
+              {config &&
+                Object.values(config.profiles).map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name}（{profile.type}）
+                  </option>
+                ))}
             </select>
             <p className="text-xs text-muted-foreground">
-              每个 Profile 可以拥有独立的 API Key、Base URL 和模型目录。
+              所有 Profile 共用 OPENAI_API_KEY 和 OPENAI_BASE_URL，并分别配置
+              Provider Type 和所选模型。
             </p>
           </div>
 
           <div className="space-y-2">
             <Label htmlFor="profile_name">Profile Name</Label>
-            <Input id="profile_name" value={profileName} onChange={(e) => setProfileName(e.target.value)} />
+            <Input
+              id="profile_name"
+              value={profileName}
+              onChange={(e) => setProfileName(e.target.value)}
+            />
           </div>
 
           <div className="space-y-2">
@@ -236,64 +253,30 @@ export function SettingsPage() {
 
           <Separator />
 
-          {/* API Key */}
+          {/* Shared connection environment variables */}
           <div className="space-y-2">
-            <Label htmlFor="api_key">API Key</Label>
-            <div className="flex gap-2">
-              <Input
-                id="api_key"
-                type={showApiKey ? "text" : "password"}
-                placeholder={
-                  selectedProfile?.api_key_set
-                    ? `Current: ${selectedProfile.api_key_masked} (type new key to replace)`
-                    : "Enter your provider API key"
-                }
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                className="flex-1"
-              />
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() => setShowApiKey(!showApiKey)}
-                type="button"
-              >
-                {showApiKey ? (
-                  <EyeOff className="h-4 w-4" />
-                ) : (
-                  <Eye className="h-4 w-4" />
-                )}
-              </Button>
+            <Label>Connection Environment Variables</Label>
+            <div className="space-y-1 rounded-md border bg-muted px-3 py-2 text-sm">
+              <code className="block">OPENAI_API_KEY</code>
+              <code className="block">OPENAI_BASE_URL</code>
             </div>
             <p className="text-xs text-muted-foreground">
-              Leave empty to keep the existing key. Get your key from{" "}
-              <a
-                href={providerType === "deepseek" ? "https://platform.deepseek.com/api_keys" : "https://platform.openai.com/api-keys"}
-                target="_blank"
-                rel="noreferrer"
-                className="text-primary hover:underline"
-              >
-                provider platform
-              </a>
-              .
+              All providers use these environment variables. Set them before
+              starting the backend; neither value is persisted here.
             </p>
           </div>
 
           <Separator />
 
-          {/* Base URL */}
+          {/* Read-only Base URL */}
           <div className="space-y-2">
-            <Label htmlFor="base_url">Base URL</Label>
-            <Input
-              id="base_url"
-              type="text"
-              placeholder="https://api.deepseek.com/v1"
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-            />
+            <Label>Effective Base URL</Label>
+            <code className="block overflow-x-auto rounded-md border bg-muted px-3 py-2 text-sm">
+              {config?.base_url}
+            </code>
             <p className="text-xs text-muted-foreground">
-              OpenAI-compatible endpoint. Change this to use a proxy or
-              self-hosted endpoint.
+              Read from OPENAI_BASE_URL. Update the environment variable and
+              restart the backend to use a proxy or self-hosted endpoint.
             </p>
           </div>
 
@@ -311,16 +294,19 @@ export function SettingsPage() {
                 const models = config?.profiles[profileId]?.available_models;
                 if (models?.[val]) {
                   setMaxTokens(models[val].max_tokens);
-                  if (models[val].temperature !== undefined) setTemperature(models[val].temperature);
+                  if (models[val].temperature !== undefined)
+                    setTemperature(models[val].temperature);
                 }
               }}
               placeholder="输入模型名称，也可从预置列表选择"
             />
             <datalist id={`models-${profileId}`}>
               {config?.profiles[profileId]?.available_models &&
-                Object.entries(config.profiles[profileId].available_models).map(([key, info]) => (
-                  <option key={key} value={key} label={info.description} />
-                ))}
+                Object.entries(config.profiles[profileId].available_models).map(
+                  ([key, info]) => (
+                    <option key={key} value={key} label={info.description} />
+                  ),
+                )}
             </datalist>
             <p className="text-xs text-muted-foreground">
               OpenAI-compatible 服务可直接填写服务端实际暴露的模型 ID。
@@ -356,7 +342,7 @@ export function SettingsPage() {
               id="max_tokens"
               type="number"
               min="256"
-              max="65536"
+              max="128000"
               step="256"
               value={maxTokens}
               onChange={(e) => setMaxTokens(parseInt(e.target.value) || 8192)}
@@ -372,7 +358,9 @@ export function SettingsPage() {
             <div className="flex items-center justify-between">
               <div>
                 <Label htmlFor="routing_enabled">Automatic Model Routing</Label>
-                <p className="text-xs text-muted-foreground">按聊天类型选择默认模型；聊天窗口仍可单次覆盖。</p>
+                <p className="text-xs text-muted-foreground">
+                  按聊天类型选择默认模型；聊天窗口仍可单次覆盖。
+                </p>
               </div>
               <input
                 id="routing_enabled"
@@ -396,13 +384,17 @@ export function SettingsPage() {
                   disabled={!routingEnabled}
                   className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-xs"
                 >
-                  {config && Object.values(config.profiles).flatMap((profile) =>
-                    Object.keys(profile.available_models).map((modelName) => (
-                      <option key={`chat-${profile.id}-${modelName}`} value={`${profile.id}:${modelName}`}>
-                        {profile.name} / {modelName}
-                      </option>
-                    )),
-                  )}
+                  {config &&
+                    Object.values(config.profiles).flatMap((profile) =>
+                      Object.keys(profile.available_models).map((modelName) => (
+                        <option
+                          key={`chat-${profile.id}-${modelName}`}
+                          value={`${profile.id}:${modelName}`}
+                        >
+                          {profile.name} / {modelName}
+                        </option>
+                      )),
+                    )}
                 </select>
               </div>
               <div className="space-y-1">
@@ -418,13 +410,17 @@ export function SettingsPage() {
                   disabled={!routingEnabled}
                   className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-xs"
                 >
-                  {config && Object.values(config.profiles).flatMap((profile) =>
-                    Object.keys(profile.available_models).map((modelName) => (
-                      <option key={`analysis-${profile.id}-${modelName}`} value={`${profile.id}:${modelName}`}>
-                        {profile.name} / {modelName}
-                      </option>
-                    )),
-                  )}
+                  {config &&
+                    Object.values(config.profiles).flatMap((profile) =>
+                      Object.keys(profile.available_models).map((modelName) => (
+                        <option
+                          key={`analysis-${profile.id}-${modelName}`}
+                          value={`${profile.id}:${modelName}`}
+                        >
+                          {profile.name} / {modelName}
+                        </option>
+                      )),
+                    )}
                 </select>
               </div>
             </div>

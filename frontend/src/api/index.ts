@@ -382,9 +382,6 @@ export interface LLMProfile {
   id: string;
   name: string;
   type: string;
-  api_key_masked: string;
-  api_key_set: boolean;
-  base_url: string;
   model: string;
   temperature: number;
   max_tokens: number;
@@ -392,7 +389,6 @@ export interface LLMProfile {
 }
 
 export interface LLMConfig {
-  api_key_masked: string;
   api_key_set: boolean;
   active_profile_id: string;
   profiles: Record<string, LLMProfile>;
@@ -401,10 +397,6 @@ export interface LLMConfig {
     routes: Record<string, { profile_id: string; model: string }>;
   };
   base_url: string;
-  model: string;
-  temperature: number;
-  max_tokens: number;
-  available_models: Record<string, LLMModelInfo>;
 }
 
 export interface LLMConfigUpdate {
@@ -413,9 +405,6 @@ export interface LLMConfigUpdate {
   profile_name?: string;
   provider_type?: string;
   routing?: LLMConfig["routing"];
-  models?: Record<string, LLMModelInfo>;
-  api_key?: string;
-  base_url?: string;
   model?: string;
   temperature?: number;
   max_tokens?: number;
