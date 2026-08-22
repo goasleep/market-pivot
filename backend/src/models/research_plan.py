@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from models.schemas import AssetType
+from models.strategy_research import TaskContract
 
 ResearchDepth = Literal["quick", "standard", "deep"]
 ResearchStepKind = Literal[
@@ -59,6 +60,7 @@ class ResearchPlan(BaseModel):
     tickers: list[str]
     as_of_date: str
     depth: ResearchDepth
+    task_contract: TaskContract | None = None
     revision: int = Field(default=1, ge=1)
     steps: tuple[ResearchStep, ...]
 

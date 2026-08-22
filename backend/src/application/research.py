@@ -8,7 +8,6 @@ here prevents each caller from growing its own slightly different pipeline.
 from __future__ import annotations
 
 from typing import Any, AsyncIterator
-from uuid import uuid4
 
 from artifacts.service import artifact_service
 from graph.checkpointing import checkpoint_manager
@@ -85,12 +84,13 @@ class ResearchService:
         )
 
     @staticmethod
-    def _invoke_options(config: dict[str, Any] | None) -> dict[str, Any]:
-        """Keep run metadata attached; fall back for minimal test doubles."""
-        if checkpoint_manager.saver is None:
-            return {"config": config} if config else {}
-        thread_id = str((config or {}).get("configurable", {}).get("thread_id") or f"analysis-{uuid4().hex}")
-        return {"config": checkpoint_manager.graph_config(thread_id, config)}
+    def _invoke_options(config: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        """Resolve invocation options and whether this is an interactive run."""
+        thread_id = str((config or {}).get("configurable", {}).get("thread_id") or "")
+        checkpointed = bool(checkpoint_manager.saver is not None and thread_id)
+        if checkpointed:
+            return {"config": checkpoint_manager.graph_config(thread_id, config)}, True
+        return ({"config": config} if config else {}), False
 
     async def run_state(
         self,
@@ -104,8 +104,8 @@ class ResearchService:
         ``workflow_override`` is intentionally narrow and exists for backtest
         doubles and isolated tests; production callers use the shared graph.
         """
-        runner = workflow_override or get_workflow()
-        options = self._invoke_options(trace_config)
+        options, checkpointed = self._invoke_options(trace_config)
+        runner = workflow_override or get_workflow(checkpointed=checkpointed)
         try:
             return await runner.ainvoke(state, **options)
         except TypeError as exc:
@@ -121,8 +121,8 @@ class ResearchService:
         workflow_override: Any | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream canonical workflow updates with an accumulated state."""
-        runner = workflow_override or get_workflow()
-        options = self._invoke_options(trace_config)
+        options, checkpointed = self._invoke_options(trace_config)
+        runner = workflow_override or get_workflow(checkpointed=checkpointed)
         accumulated = dict(state)
         try:
             updates = runner.astream(state, stream_mode="updates", **options)

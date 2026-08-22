@@ -18,6 +18,25 @@ def test_stock_agent_routes_fund_and_follow_up_context():
     assert follow_up.ticker == "510300"
 
 
+def test_stock_agent_infers_exchange_traded_fund_from_ticker_prefix():
+    agent = StockAgent()
+
+    assert agent.prepare("回测 510300").asset_type == AssetType.ETF
+    assert agent.prepare("分析 159915").asset_type == AssetType.ETF
+    assert agent.prepare("查看 166009").asset_type == AssetType.LOF
+    assert agent.prepare("分析股票 510300").asset_type == AssetType.STOCK
+
+
+def test_backtest_takes_precedence_over_comparison_wording():
+    agent = StockAgent()
+    request = agent.prepare("给 510300 执行几个策略回测，并对比盈利情况")
+
+    resolved, interaction = agent.resolve_intent(request)
+
+    assert interaction is None
+    assert resolved.intent.value == "backtest"
+
+
 def test_stock_agent_routes_lof():
     request = StockAgent().resolve("查看 LOF 166009 历史走势")
     assert request.asset_type == AssetType.LOF

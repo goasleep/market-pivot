@@ -194,15 +194,19 @@ def build_workflow(checkpointer: Any | None = None):
     return graph.compile(checkpointer=checkpointer)
 
 
-# Compiled workflow singleton
+# Background callers (backtests and scheduled simulation runs) deliberately use
+# an uncheckpointed graph.  Their durable audit state lives in the application
+# database; writing one LangGraph thread per symbol/date would create a large,
+# non-resumable checkpoint leak.
 workflow = build_workflow()
+interactive_workflow = build_workflow()
 
 
 def configure_workflow(checkpointer: Any | None) -> None:
-    """Recompile the shared research graph with the application saver."""
-    global workflow
-    workflow = build_workflow(checkpointer)
+    """Recompile only the interactive graph with the application saver."""
+    global interactive_workflow
+    interactive_workflow = build_workflow(checkpointer)
 
 
-def get_workflow():
-    return workflow
+def get_workflow(*, checkpointed: bool = False):
+    return interactive_workflow if checkpointed else workflow

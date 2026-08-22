@@ -154,6 +154,7 @@ class TradingEngine:
             amount=amount,
             commission=commission,
             tax=0.0,
+            transfer_fee=transfer_fee,
         )
         self.portfolio.trades.append(trade)
         logger.info(f"BUY {ticker} {shares}@{execution_price:.2f} cost={total_cost:.2f} cash={self.portfolio.cash:.2f}")
@@ -218,6 +219,7 @@ class TradingEngine:
             amount=amount,
             commission=commission,
             tax=stamp_tax,
+            transfer_fee=transfer_fee,
         )
         self.portfolio.trades.append(trade)
         logger.info(

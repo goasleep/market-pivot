@@ -10,8 +10,16 @@ import agents.stock_agent as stock_agent_module
 import graph.research_plan as research_graph
 from agents.stock_agent import AssetAgentRequest, AssetIntent, StockAgent
 from application.research_plan import _plan_snapshot
-from graph.research_plan import ResearchPlanContext, _fallback_steps, build_research_plan_graph, classify_depth
-from models.research_plan import ResearchPlan
+from graph.research_plan import (
+    ResearchPlanContext,
+    _call_tool,
+    _execute_step,
+    _fallback_steps,
+    build_research_plan_graph,
+    classify_depth,
+    derive_task_contract,
+)
+from models.research_plan import ResearchPlan, ResearchStep
 from models.schemas import AssetType
 
 
@@ -49,6 +57,101 @@ def test_depth_classifier_and_fallback_budgets():
     assert 4 <= len(standard) <= 8
     assert 9 <= len(deep_etf) <= 16
     assert "fund_nav" in {step["kind"] for step in deep_etf}
+
+
+def test_multi_strategy_prompt_gets_machine_checkable_completion_contract():
+    contract = derive_task_contract(
+        {
+            "intent": "backtest",
+            "message": "请给510300执行不同的几个量化策略并回测，对比盈利情况",
+        }
+    )
+
+    assert contract.operation == "strategy_comparison"
+    assert contract.comparison_axis == "strategy"
+    assert contract.minimum_strategy_count == 7
+    assert contract.required_benchmark == "buy_hold"
+    assert contract.minimum_history_years == 5
+    assert {"equity_curves", "drawdown_curves", "out_of_sample", "stability"} <= set(
+        contract.required_outputs
+    )
+
+
+@pytest.mark.asyncio
+async def test_research_plan_uses_shared_long_running_tool_timeout(monkeypatch):
+    captured: dict[str, int] = {}
+
+    @tool
+    async def run_fund_or_stock_analysis(ticker: str, asset_type: str = "stock") -> str:
+        """Run comprehensive analysis."""
+        return json.dumps({"ticker": ticker, "asset_type": asset_type})
+
+    original_wait_for = asyncio.wait_for
+
+    async def capture_wait_for(awaitable, timeout):
+        captured["timeout"] = timeout
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(research_graph.asyncio, "wait_for", capture_wait_for)
+    context = ResearchPlanContext(tools={run_fund_or_stock_analysis.name: run_fund_or_stock_analysis})
+
+    await _call_tool(
+        context,
+        "run_fund_or_stock_analysis",
+        {"ticker": "510300", "asset_type": "etf"},
+    )
+
+    assert captured["timeout"] == research_graph.tool_timeout_seconds("run_fund_or_stock_analysis") == 900
+
+
+@pytest.mark.asyncio
+async def test_multi_strategy_request_uses_strategy_comparison_backtest_tool():
+    captured = {}
+
+    @tool
+    async def compare_strategy_backtests(
+        ticker: str,
+        start_date: str,
+        end_date: str,
+        asset_type: str = "stock",
+        objective: str = "",
+    ) -> str:
+        """Compare strategies."""
+        captured.update(
+            {
+                "ticker": ticker,
+                "start_date": start_date,
+                "end_date": end_date,
+                "asset_type": asset_type,
+                "objective": objective,
+            }
+        )
+        return json.dumps({"data_type": "strategy_backtest_comparison"})
+
+    step = ResearchStep.model_validate(_step("backtest", "backtest"))
+    state = {
+        "request": {
+            "message": "给510300执行不同的几个量化策略并回测，对比盈利情况",
+            "intent": "backtest",
+            "tickers": ["510300"],
+            "asset_type": "etf",
+            "as_of_date": "2026-08-21",
+        },
+        "plan": _plan([_step("backtest", "backtest")]),
+        "step_results": {},
+    }
+    context = ResearchPlanContext(tools={compare_strategy_backtests.name: compare_strategy_backtests})
+
+    result = await _execute_step(step, state, context)
+
+    assert result["data_type"] == "strategy_backtest_comparison"
+    assert captured == {
+        "ticker": "510300",
+        "start_date": "2016-08-21",
+        "end_date": "2026-08-21",
+        "asset_type": "etf",
+        "objective": "给510300执行不同的几个量化策略并回测，对比盈利情况",
+    }
 
 
 @pytest.mark.parametrize(

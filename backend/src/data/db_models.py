@@ -120,6 +120,40 @@ class BacktestExperimentRecord(Model):
         table = "backtest_experiments"
 
 
+class StrategyDeploymentRecord(Model):
+    deployment_id = fields.CharField(max_length=128, primary_key=True)
+    deployment_key = fields.CharField(max_length=512, unique=True)
+    experiment_id = fields.CharField(max_length=128, db_index=True)
+    account_id = fields.CharField(max_length=64, db_index=True)
+    status = fields.CharField(max_length=32)
+    strategy_name = fields.CharField(max_length=160)
+    strategy_version = fields.CharField(max_length=64)
+    strategy_sha256 = fields.CharField(max_length=64)
+    strategy_spec_json = fields.TextField()
+    portfolio_spec_json = fields.TextField(null=True)
+    universe_json = fields.TextField()
+    asset_type = fields.CharField(max_length=32)
+    execution_json = fields.TextField()
+    created_at = fields.CharField(max_length=64)
+    updated_at = fields.CharField(max_length=64)
+    activated_at = fields.CharField(max_length=64, null=True)
+    archived_at = fields.CharField(max_length=64, null=True)
+
+    class Meta:
+        table = "strategy_deployments"
+
+
+class ResearchStrategyCandidateRecord(Model):
+    candidate_id = fields.CharField(max_length=128, primary_key=True)
+    status = fields.CharField(max_length=32, db_index=True)
+    payload_json = fields.TextField()
+    created_at = fields.CharField(max_length=64)
+    updated_at = fields.CharField(max_length=64)
+
+    class Meta:
+        table = "research_strategy_candidates"
+
+
 class ArtifactRecord(Model):
     artifact_id = fields.CharField(max_length=128, primary_key=True)
     name = fields.CharField(max_length=512)
@@ -150,5 +184,7 @@ __models__ = [
     AgentDecisionRecord,
     AutomationEventRecord,
     BacktestExperimentRecord,
+    StrategyDeploymentRecord,
+    ResearchStrategyCandidateRecord,
     ArtifactRecord,
 ]

@@ -56,6 +56,8 @@ line-ending = "auto"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 filterwarnings = [
     # The application uses one event loop for its ORM lifecycle. Tests exercise
     # the same repositories from isolated pytest/asyncio.run loops, which is an

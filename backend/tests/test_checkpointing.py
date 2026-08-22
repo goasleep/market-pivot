@@ -11,6 +11,7 @@ from langgraph.graph import START, StateGraph
 
 import graph.agent_loop as agent_loop
 import graph.checkpointing as checkpointing
+from application.research import ResearchService
 from graph.checkpointing import CheckpointManager, _psycopg_url
 
 
@@ -19,6 +20,19 @@ def test_checkpoint_graph_config_and_postgres_url_normalization():
     assert config["configurable"] == {"tenant": "local", "thread_id": "task-1"}
     assert config["recursion_limit"] == 120
     assert _psycopg_url("postgresql+asyncpg://user:pass@db/app") == "postgresql://user:pass@db/app"
+
+
+def test_background_research_does_not_allocate_checkpoints(monkeypatch):
+    monkeypatch.setattr(checkpointing.checkpoint_manager, "saver", object())
+    options, checkpointed = ResearchService._invoke_options({"tags": ["automation"]})
+    assert options == {"config": {"tags": ["automation"]}}
+    assert checkpointed is False
+
+    options, checkpointed = ResearchService._invoke_options(
+        {"configurable": {"thread_id": "chat-task"}, "tags": ["chat"]}
+    )
+    assert options["config"]["configurable"]["thread_id"] == "chat-task"
+    assert checkpointed is True
 
 
 @pytest.mark.asyncio

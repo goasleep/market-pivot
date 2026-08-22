@@ -15,6 +15,9 @@ SUPPORTED_INDICATORS = frozenset(
         "ma",
         "ema",
         "price_vs_ma_pct",
+        "ma_spread_pct",
+        "bollinger_zscore",
+        "rolling_breakout_pct",
         "volume_ratio",
         "rsi",
         "atr",
@@ -32,6 +35,25 @@ def available_indicators() -> list[dict[str, Any]]:
         {"name": "ema", "source": "close", "requires": ["close"], "default_window": 20},
         {
             "name": "price_vs_ma_pct",
+            "source": "close",
+            "requires": ["close"],
+            "default_window": 20,
+        },
+        {
+            "name": "ma_spread_pct",
+            "source": "close",
+            "requires": ["close"],
+            "default_window": None,
+            "params": {"fast_window": 5, "slow_window": 20},
+        },
+        {
+            "name": "bollinger_zscore",
+            "source": "close",
+            "requires": ["close"],
+            "default_window": 20,
+        },
+        {
+            "name": "rolling_breakout_pct",
             "source": "close",
             "requires": ["close"],
             "default_window": 20,
@@ -187,7 +209,7 @@ def strategy_from_mapping(data: dict[str, Any], *, source: str | None = None) ->
     return spec
 
 
-def _indicator_definition(specs: list[IndicatorSpec], name: str) -> tuple[str, int | None]:
+def _indicator_definition(specs: list[IndicatorSpec], name: str) -> tuple[str, int | None, dict[str, Any]]:
     normalized = name.strip().lower()
     for spec in specs:
         if normalized in {spec.name.lower(), (spec.alias or "").lower()}:
@@ -198,10 +220,10 @@ def _indicator_definition(specs: list[IndicatorSpec], name: str) -> tuple[str, i
                     configured_window = int(raw_window)
                 except (TypeError, ValueError):
                     configured_window = None
-            return spec.name.lower(), configured_window
+            return spec.name.lower(), configured_window, dict(spec.params)
     if normalized.startswith(("ma", "ema")) and normalized[2:].isdigit():
-        return normalized[:2], int(normalized[2:])
-    return normalized, None
+        return normalized[:2], int(normalized[2:]), {}
+    return normalized, None, {}
 
 
 def _indicator(
@@ -210,7 +232,7 @@ def _indicator(
     window: int | None,
     indicator_specs: list[IndicatorSpec] | None = None,
 ) -> float | None:
-    canonical, configured_window = _indicator_definition(indicator_specs or [], name)
+    canonical, configured_window, params = _indicator_definition(indicator_specs or [], name)
     window = window or configured_window
     if history.empty or "close" not in history:
         return None
@@ -236,6 +258,27 @@ def _indicator(
             return None
         average = close.rolling(periods).mean().iloc[-1]
         return float((close.iloc[-1] / average - 1) * 100) if average else None
+    if canonical == "ma_spread_pct":
+        fast = int(params.get("fast_window", 5))
+        slow = int(params.get("slow_window", window or 20))
+        if fast < 1 or slow <= fast or len(close) < slow:
+            return None
+        fast_value = close.rolling(fast).mean().iloc[-1]
+        slow_value = close.rolling(slow).mean().iloc[-1]
+        return float((fast_value / slow_value - 1) * 100) if slow_value else None
+    if canonical == "bollinger_zscore":
+        periods = window or 20
+        if len(close) < periods:
+            return None
+        sample = close.tail(periods)
+        deviation = sample.std(ddof=0)
+        return float((close.iloc[-1] - sample.mean()) / deviation) if deviation else 0.0
+    if canonical == "rolling_breakout_pct":
+        periods = window or 20
+        if len(close) <= periods:
+            return None
+        prior_high = close.iloc[-periods - 1 : -1].max()
+        return float((close.iloc[-1] / prior_high - 1) * 100) if prior_high else None
     if canonical == "volume_ratio":
         if "volume" not in history or len(history) < (window or 20):
             return None
@@ -349,12 +392,25 @@ def evaluate_strategy(spec: StrategySpec, history: pd.DataFrame, *, asset_type: 
 
     results = evaluate_conditions(spec.entry_conditions)
     exit_results = evaluate_conditions(spec.exit_conditions)
-    matched = bool(results) and all(item["matched"] for item in results)
-    exit_matched = bool(exit_results) and all(item["matched"] for item in exit_results)
+
+    def combine(condition_results: list[dict[str, Any]], logic: str) -> bool:
+        if not condition_results:
+            return False
+        matches = (item["matched"] for item in condition_results)
+        return any(matches) if logic == "any" else all(matches)
+
+    matched = combine(results, spec.entry_condition_logic)
+    exit_matched = combine(exit_results, spec.exit_condition_logic)
     return {
         "matched": matched,
         "exit_matched": exit_matched,
-        "reason": "all_entry_conditions_matched" if matched else "entry_conditions_not_matched",
+        "entry_condition_logic": spec.entry_condition_logic,
+        "exit_condition_logic": spec.exit_condition_logic,
+        "reason": (
+            f"{spec.entry_condition_logic}_entry_conditions_matched"
+            if matched
+            else "entry_conditions_not_matched"
+        ),
         "conditions": results,
         "exit_conditions": exit_results,
     }

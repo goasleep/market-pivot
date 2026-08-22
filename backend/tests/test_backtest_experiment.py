@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 from data.backtest_data import BacktestDataError, prepare_backtest_data
-from models.schemas import AssetType
+from models.schemas import AssetType, Decision
 from strategies.compiler import available_indicators, evaluate_strategy, strategy_from_mapping
 
 
@@ -31,7 +31,7 @@ def test_experiment_html_report_embeds_echarts_for_equity_and_drawdown():
                 {"date": "2026-01-02", "value": 105000},
                 {"date": "2026-01-03", "value": 102000},
             ],
-            "trades": [{"date": "2026-01-02", "action": "buy"}],
+            "trades": [{"date": "2026-01-02", "action": Decision.BUY}],
         },
     )
 
@@ -39,6 +39,7 @@ def test_experiment_html_report_embeds_echarts_for_equity_and_drawdown():
     assert 'id="experiment-equity-chart"' in report
     assert 'id="experiment-drawdown-chart"' in report
     assert '"markPoint"' in report
+    assert '"value":"买"' in report
     assert "echarts.init" in report
 
 
@@ -60,6 +61,51 @@ def test_indicator_contract_and_extended_indicators_are_deterministic():
     result = evaluate_strategy(spec, _history(), asset_type=AssetType.ETF)
     assert result["matched"] is True
     assert result["conditions"][0]["value"] is not None
+
+
+def test_entry_conditions_default_to_all_and_exit_conditions_default_to_any():
+    spec = strategy_from_mapping(
+        {
+            "name": "condition_logic",
+            "asset_types": ["etf"],
+            "entry_conditions": [
+                {"indicator": "close", "operator": "gt", "value": 10},
+                {"indicator": "close", "operator": "gt", "value": 100},
+            ],
+            "exit_conditions": [
+                {"indicator": "close", "operator": "lt", "value": 11},
+                {"indicator": "rsi", "operator": "gte", "value": 78, "window": 3},
+            ],
+        },
+        source="llm",
+    )
+
+    result = evaluate_strategy(spec, _history(), asset_type=AssetType.ETF)
+
+    assert result["matched"] is False
+    assert result["exit_matched"] is True
+    assert result["entry_condition_logic"] == "all"
+    assert result["exit_condition_logic"] == "any"
+
+
+def test_condition_logic_can_explicitly_require_all_exit_conditions():
+    spec = strategy_from_mapping(
+        {
+            "name": "strict_exit_logic",
+            "asset_types": ["etf"],
+            "exit_condition_logic": "all",
+            "exit_conditions": [
+                {"indicator": "close", "operator": "lt", "value": 11},
+                {"indicator": "close", "operator": "gt", "value": 100},
+            ],
+        },
+        source="llm",
+    )
+
+    result = evaluate_strategy(spec, _history(), asset_type=AssetType.ETF)
+
+    assert result["exit_matched"] is False
+    assert result["exit_condition_logic"] == "all"
 
 
 def test_unknown_indicator_is_rejected_before_backtest():
@@ -176,6 +222,22 @@ def test_backtest_data_manifest_is_content_addressed_and_rejects_bad_ohlc():
     assert len(frame) == 5
     assert len(manifest["sha256"]) == 64
     assert manifest["quality"]["status"] == "valid"
+
+    _, sourced_manifest = prepare_backtest_data(
+        _history(),
+        ticker="510300",
+        asset_type="etf",
+        start_date="2026-01-01",
+        end_date="2026-01-05",
+        source="sina",
+        source_metadata={
+            "source_id": "sina",
+            "source_name": "新浪财经",
+            "fallback": True,
+        },
+    )
+    assert sourced_manifest["source"] == "sina"
+    assert sourced_manifest["source_metadata"]["fallback"] is True
 
     invalid = _history()
     invalid.loc[0, "high"] = 9

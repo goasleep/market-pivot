@@ -30,19 +30,18 @@ from engine.portfolio_allocator import (
     rebalance_portfolio,
     target_weights,
 )
+from engine.strategy_runtime import decision_from_strategy
 from engine.trading_engine import TimeAwareTradingEngine, decision_shares
 from graph.workflow import get_workflow
 from models.schemas import (
     AssetType,
     Decision,
     PortfolioSpec,
-    PriceEvidence,
     SimulationAccountConfig,
     StrategySpec,
     TradeDecision,
-    TradePlan,
 )
-from strategies.compiler import evaluate_strategy, strategy_from_mapping
+from strategies.compiler import strategy_from_mapping
 
 # Kept as a module alias for existing test doubles and callers that patch the
 # workflow. Production invocation is routed through ResearchService below.
@@ -63,6 +62,8 @@ async def run_backtest(
     asset_type: AssetType | str = AssetType.STOCK,
     strategy_spec: dict | None = None,
     capture_data: bool = False,
+    prepared_data: tuple[pd.DataFrame, dict[str, Any]] | None = None,
+    account_config: SimulationAccountConfig | dict[str, Any] | None = None,
 ) -> dict:
     """Run backtest over historical data.
 
@@ -80,11 +81,7 @@ async def run_backtest(
         Dict with backtest results
     """
     asset_type = AssetType(asset_type)
-    executable_spec = (
-        strategy_from_mapping(strategy_spec, source="llm")
-        if strategy_spec
-        else None
-    )
+    executable_spec = strategy_from_mapping(strategy_spec, source="llm") if strategy_spec else None
     logger.info(f"Backtest {asset_type.value}:{ticker} {start_date} -> {end_date}")
 
     if decision_interval < 1:
@@ -92,34 +89,24 @@ async def run_backtest(
     if fill_time not in {"next_open", "same_close"}:
         raise ValueError("fill_time must be next_open or same_close")
 
-    # 1. Fetch historical data
-    if progress_callback:
-        await progress_callback("data_fetch", f"Fetching history for {ticker}...")
-
-    if asset_type == AssetType.STOCK:
-        df = await async_get_stock_history(ticker, start_date=start_date, end_date=end_date)
+    # 1. Fetch historical data once. Multi-strategy research passes the same
+    # immutable prepared frame to every strategy so comparisons cannot drift.
+    if prepared_data is None:
+        if progress_callback:
+            await progress_callback("data_fetch", f"Fetching history for {ticker}...")
+        try:
+            df, data_snapshot = await prepare_single_backtest_data(
+                ticker=ticker,
+                start_date=start_date,
+                end_date=end_date,
+                asset_type=asset_type,
+            )
+        except BacktestDataError as exc:
+            logger.warning("Backtest data rejected for {}: {}", ticker, exc)
+            return _empty_result(ticker, start_date, end_date, initial_capital, error=str(exc))
     else:
-        df = await async_get_fund_history(
-            ticker,
-            asset_type=asset_type.value,
-            start_date=start_date,
-            end_date=end_date,
-        )
-    if df.empty or len(df) < 5:
-        return _empty_result(ticker, start_date, end_date, initial_capital)
-
-    try:
-        df, data_snapshot = prepare_backtest_data(
-            df,
-            ticker=ticker,
-            asset_type=asset_type.value,
-            start_date=start_date,
-            end_date=end_date,
-            adjustment="qfq" if asset_type == AssetType.STOCK else "provider_default",
-        )
-    except BacktestDataError as exc:
-        logger.warning("Backtest data rejected for {}: {}", ticker, exc)
-        return _empty_result(ticker, start_date, end_date, initial_capital, error=str(exc))
+        df, data_snapshot = prepared_data
+        df = df.copy(deep=False)
 
     # Filter to date range
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
@@ -129,10 +116,14 @@ async def run_backtest(
     logger.info(f"Backtest period: {len(trading_dates)} trading days")
 
     # 2. Initialize engine
-    engine = TimeAwareTradingEngine(
-        initial_capital=initial_capital,
-        rules=SimulationAccountConfig(initial_cash=initial_capital, asset_type=asset_type),
+    rules = (
+        account_config
+        if isinstance(account_config, SimulationAccountConfig)
+        else SimulationAccountConfig.model_validate(account_config)
+        if account_config is not None
+        else SimulationAccountConfig(initial_cash=initial_capital, asset_type=asset_type)
     )
+    engine = TimeAwareTradingEngine(initial_capital=initial_capital, rules=rules)
     engine.set_available_dates(trading_dates)
 
     # Set initial position if provided
@@ -142,6 +133,7 @@ async def run_backtest(
 
     # 3. Iterate over trading days
     equity_curve = []
+    signal_curve: list[dict[str, Any]] = []
     day_count = 0
     pending_decision = None
 
@@ -165,24 +157,6 @@ async def run_backtest(
                 )
 
             try:
-                context = await build_market_context(
-                    ticker,
-                    asset_type=asset_type,
-                    as_of_date=current_date,
-                    current_price=current_price,
-                    history_df=df.iloc[: i + 1],
-                    include_live_enrichment=False,
-                )
-                state = {
-                    "ticker": ticker,
-                    "asset_type": asset_type.value,
-                    "current_price": current_price,
-                    "as_of_date": current_date,
-                    "is_backtest": True,
-                    "strategy_name": strategy_name,
-                    "market_context": context,
-                    "progress": [],
-                }
                 if executable_spec:
                     decision = _decision_from_strategy(
                         executable_spec,
@@ -193,6 +167,24 @@ async def run_backtest(
                         has_position=bool(engine._find_position(ticker)),
                     )
                 else:
+                    context = await build_market_context(
+                        ticker,
+                        asset_type=asset_type,
+                        as_of_date=current_date,
+                        current_price=current_price,
+                        history_df=df.iloc[: i + 1],
+                        include_live_enrichment=False,
+                    )
+                    state = {
+                        "ticker": ticker,
+                        "asset_type": asset_type.value,
+                        "current_price": current_price,
+                        "as_of_date": current_date,
+                        "is_backtest": True,
+                        "strategy_name": strategy_name,
+                        "market_context": context,
+                        "progress": [],
+                    }
                     result = await research_service.run_state(
                         state,
                         trace_config=research_service.build_trace_config(
@@ -223,8 +215,23 @@ async def run_backtest(
             {
                 "date": current_date,
                 "value": round(engine.portfolio.total_value, 2),
+                "cash": round(engine.portfolio.cash, 2),
+                "market_value": round(engine.portfolio.total_value - engine.portfolio.cash, 2),
+                "exposure": round(
+                    (engine.portfolio.total_value - engine.portfolio.cash) / engine.portfolio.total_value,
+                    8,
+                )
+                if engine.portfolio.total_value
+                else 0.0,
             }
         )
+        target_position = int(bool(engine._find_position(ticker)))
+        if pending_decision is not None:
+            if pending_decision.decision == Decision.BUY:
+                target_position = 1
+            elif pending_decision.decision == Decision.SELL:
+                target_position = 0
+        signal_curve.append({"date": current_date, "target_position": target_position})
 
         day_count += 1
 
@@ -248,16 +255,57 @@ async def run_backtest(
         "total_return": metrics["total_return"],
         "max_drawdown": metrics["max_drawdown"],
         "sharpe_ratio": metrics.get("sharpe_ratio"),
+        "annualized_return": metrics.get("annualized_return"),
+        "annualized_volatility": metrics.get("annualized_volatility"),
+        "sortino_ratio": metrics.get("sortino_ratio"),
+        "calmar_ratio": metrics.get("calmar_ratio"),
         "win_rate": metrics["win_rate"],
+        "profit_factor": metrics.get("profit_factor"),
+        "exposure": metrics.get("exposure"),
+        "turnover": metrics.get("turnover"),
         "realized_pnl": metrics["realized_pnl"],
         "total_fees": metrics["total_fees"],
         "total_trades": len(engine.portfolio.trades),
         "equity_curve": equity_curve,
-        "trades": [t.model_dump() for t in engine.portfolio.trades],
+        "signal_curve": signal_curve,
+        "trades": [t.model_dump(mode="json") for t in engine.portfolio.trades],
     }
     if capture_data:
         payload["_data_snapshot_rows"] = df.to_dict(orient="records")
     return payload
+
+
+async def prepare_single_backtest_data(
+    *,
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    asset_type: AssetType | str,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Fetch and content-address one input frame for deterministic replay."""
+    kind = AssetType(asset_type)
+    if kind == AssetType.STOCK:
+        frame = await async_get_stock_history(ticker, start_date=start_date, end_date=end_date)
+    else:
+        frame = await async_get_fund_history(
+            ticker,
+            asset_type=kind.value,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    if frame.empty or len(frame) < 5:
+        raise BacktestDataError(f"{ticker} 历史数据为空或不足 5 行")
+    source_metadata = dict(frame.attrs.get("source_metadata") or {})
+    return prepare_backtest_data(
+        frame,
+        ticker=ticker,
+        asset_type=kind.value,
+        start_date=start_date,
+        end_date=end_date,
+        source=str(source_metadata.get("source_id") or "akshare"),
+        source_metadata=source_metadata,
+        adjustment="qfq" if kind == AssetType.STOCK else "provider_default",
+    )
 
 
 async def run_pool_backtest(
@@ -298,10 +346,7 @@ async def run_pool_backtest(
     if fill_time not in {"next_open", "same_close"}:
         raise ValueError("fill_time must be next_open or same_close")
     symbols = list(
-        dict.fromkeys(
-            ticker.strip().lower().removeprefix("sh").removeprefix("sz").zfill(6)
-            for ticker in tickers
-        )
+        dict.fromkeys(ticker.strip().lower().removeprefix("sh").removeprefix("sz").zfill(6) for ticker in tickers)
     )
     if progress_callback:
         await progress_callback("data_fetch", f"Fetching history for {len(symbols)} symbols...")
@@ -504,16 +549,14 @@ async def run_pool_backtest(
         "total_fees": metrics["total_fees"],
         "total_trades": len(engine.portfolio.trades),
         "equity_curve": equity_curve,
-        "trades": [trade.model_dump() for trade in engine.portfolio.trades],
+        "trades": [trade.model_dump(mode="json") for trade in engine.portfolio.trades],
     }
     if portfolio is not None:
         payload["portfolio_history"] = portfolio_history
         payload["target_weights_history"] = target_weights_history
         payload["symbol_metrics"] = _symbol_metrics(valid, engine)
     if capture_data:
-        payload["_data_snapshot_rows"] = {
-            symbol: frame.to_dict(orient="records") for symbol, frame in valid.items()
-        }
+        payload["_data_snapshot_rows"] = {symbol: frame.to_dict(orient="records") for symbol, frame in valid.items()}
     return payload
 
 
@@ -559,45 +602,16 @@ def _decision_from_strategy(
     current_price: float,
     has_position: bool,
 ) -> TradeDecision:
-    """Turn a validated LLM/user strategy spec into a deterministic decision."""
-    evaluation = evaluate_strategy(spec, history, asset_type=asset_type)
-    if has_position and evaluation.get("exit_matched"):
-        return TradeDecision(
-            ticker=ticker,
-            asset_type=asset_type,
-            decision=Decision.SELL,
-            reasoning=f"策略 {spec.name} 的退出条件全部满足。",
-        )
-    if has_position or not evaluation.get("matched"):
-        return TradeDecision(ticker=ticker, asset_type=asset_type, decision=Decision.HOLD)
-    stop = current_price * (1 - (spec.stop_loss_pct or 0.08))
-    target = current_price * (1 + (spec.take_profit_pct or 0.16))
-    as_of = str(history.iloc[-1].get("date", "")) if not history.empty else ""
-    evidence = [
-        PriceEvidence(
-            metric="close",
-            value=current_price,
-            source="strategy/backtest_history",
-            as_of=as_of,
-            calculation="当前收盘价作为结构化策略入场基准",
-        )
-    ]
-    return TradeDecision(
-        ticker=ticker,
+    """Backward-compatible wrapper around the shared deterministic runtime."""
+    decision, _ = decision_from_strategy(
+        spec,
+        history,
         asset_type=asset_type,
-        decision=Decision.BUY,
-        reasoning=f"策略 {spec.name} 的入场条件全部满足。",
-        plan=TradePlan(
-            entry_price=current_price,
-            stop_loss=stop,
-            take_profit=target,
-            position_size=spec.position_size_pct,
-            entry_explanation="使用回测当日收盘价作为入场基准。",
-            stop_loss_explanation=f"按入场价下方 {spec.stop_loss_pct or 0.08:.1%} 设置止损。",
-            take_profit_explanation=f"按入场价上方 {spec.take_profit_pct or 0.16:.1%} 设置止盈。",
-            price_evidence=evidence,
-        ),
+        ticker=ticker,
+        current_price=current_price,
+        has_position=has_position,
     )
+    return decision
 
 
 def _calc_metrics(equity_curve: list[dict], trades: list, initial_capital: float) -> dict:
@@ -609,6 +623,13 @@ def _calc_metrics(equity_curve: list[dict], trades: list, initial_capital: float
             "win_rate": 0,
             "realized_pnl": 0,
             "total_fees": 0,
+            "annualized_return": None,
+            "annualized_volatility": None,
+            "sortino_ratio": None,
+            "calmar_ratio": None,
+            "profit_factor": None,
+            "exposure": 0,
+            "turnover": 0,
         }
 
     values = [e["value"] for e in equity_curve]
@@ -626,6 +647,7 @@ def _calc_metrics(equity_curve: list[dict], trades: list, initial_capital: float
             max_dd = dd
 
     # Sharpe ratio (daily, annualized)
+    returns = np.array([], dtype=float)
     if len(values) > 2:
         returns = np.diff(values) / np.array(values[:-1])
         if returns.std() > 0:
@@ -638,21 +660,32 @@ def _calc_metrics(equity_curve: list[dict], trades: list, initial_capital: float
     # FIFO realized P&L, including transaction costs and partial sells.
     buy_lots: dict[str, deque[tuple[int, float, float]]] = {}
     realized_pnl = 0.0
+    gross_profit = 0.0
+    gross_loss = 0.0
     winning_sells = 0
     sell_count = 0
     total_fees = 0.0
     for t in trades:
         d = t if isinstance(t, dict) else t.model_dump()
-        total_fees += float(d.get("commission", 0)) + float(d.get("tax", 0))
+        total_fees += (
+            float(d.get("commission", 0))
+            + float(d.get("tax", 0))
+            + float(d.get("transfer_fee", 0))
+        )
         if d["action"] == "buy":
             buy_lots.setdefault(d["ticker"], deque()).append(
-                (int(d["shares"]), float(d["price"]), float(d.get("commission", 0)))
+                (
+                    int(d["shares"]),
+                    float(d["price"]),
+                    float(d.get("commission", 0)) + float(d.get("transfer_fee", 0)),
+                )
             )
         elif d["action"] == "sell":
             remaining = int(d["shares"])
             sell_price = float(d["price"])
             sell_commission = float(d.get("commission", 0))
             sell_tax = float(d.get("tax", 0))
+            sell_transfer_fee = float(d.get("transfer_fee", 0))
             cost_basis = 0.0
             matched = 0
             lots = buy_lots.get(d["ticker"], deque())
@@ -671,18 +704,43 @@ def _calc_metrics(equity_curve: list[dict], trades: list, initial_capital: float
                         lot_commission * (lot_shares - used) / lot_shares,
                     )
             if matched:
-                pnl = matched * sell_price - cost_basis - sell_commission - sell_tax
+                pnl = matched * sell_price - cost_basis - sell_commission - sell_tax - sell_transfer_fee
                 realized_pnl += pnl
+                gross_profit += max(pnl, 0)
+                gross_loss += max(-pnl, 0)
                 sell_count += 1
                 winning_sells += int(pnl > 0)
 
     win_rate = winning_sells / sell_count if sell_count else 0.0
 
+    years = max(len(values) / 252, 1 / 252)
+    annualized_return = (final_value / initial_capital) ** (1 / years) - 1 if final_value > 0 else -1.0
+    annualized_volatility = float(returns.std() * np.sqrt(252)) if returns.size else 0.0
+    downside = returns[returns < 0]
+    sortino = (
+        float(np.sqrt(252) * returns.mean() / downside.std())
+        if returns.size and downside.size > 1 and downside.std() > 0
+        else None
+    )
+    calmar = annualized_return / max_dd if max_dd > 0 else None
+    exposure_values = [float(item.get("exposure", 0)) for item in equity_curve]
+    exposure = float(np.mean(exposure_values)) if exposure_values else 0.0
+    traded_notional = sum(float((t if isinstance(t, dict) else t.model_dump()).get("amount", 0)) for t in trades)
+    average_equity = float(np.mean(values)) if values else initial_capital
+    turnover = traded_notional / average_equity if average_equity else 0.0
+
     return {
         "total_return": round(total_return, 6),
+        "annualized_return": round(float(annualized_return), 6),
+        "annualized_volatility": round(annualized_volatility, 6),
         "max_drawdown": round(max_dd, 6),
         "sharpe_ratio": round(float(sharpe), 4) if sharpe else None,
+        "sortino_ratio": round(sortino, 4) if sortino is not None else None,
+        "calmar_ratio": round(float(calmar), 4) if calmar is not None else None,
         "win_rate": round(win_rate, 4),
+        "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 0 else None,
+        "exposure": round(exposure, 6),
+        "turnover": round(turnover, 6),
         "realized_pnl": round(realized_pnl, 2),
         "total_fees": round(total_fees, 2),
     }
@@ -697,7 +755,7 @@ def _should_rebalance(day_count: int, frequency: str) -> bool:
 
 def _symbol_metrics(frames: dict[str, pd.DataFrame], engine: TimeAwareTradingEngine) -> list[dict]:
     """Summarise per-symbol attribution inputs for the portfolio report."""
-    trades = [trade.model_dump() for trade in engine.portfolio.trades]
+    trades = [trade.model_dump(mode="json") for trade in engine.portfolio.trades]
     positions = {position.ticker: position for position in engine.portfolio.positions}
     metrics = []
     for ticker, frame in frames.items():

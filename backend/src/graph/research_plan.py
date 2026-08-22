@@ -17,6 +17,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Send
 from loguru import logger
 
+from graph.agent_loop import tool_timeout_seconds
 from llm.service import get_llm_service
 from models.research_plan import (
     EvidenceRef,
@@ -27,6 +28,7 @@ from models.research_plan import (
     StepResult,
 )
 from models.schemas import AssetType
+from models.strategy_research import TaskContract, strategy_comparison_contract
 
 
 def merge_step_results(left: dict[str, dict[str, Any]], right: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -46,6 +48,7 @@ class ResearchPlanState(TypedDict, total=False):
     tool_calls: Annotated[int, operator.add]
     needs_replan: bool
     final_response: str
+    task_contract: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,7 @@ async def scope_research(state: ResearchPlanState) -> dict[str, Any]:
     depth = classify_depth(state["request"])
     budget = DEPTH_BUDGETS[depth]
     deadline = datetime.now(timezone.utc) + timedelta(seconds=budget.deadline_seconds)
+    contract = derive_task_contract(state["request"])
     return {
         "depth": depth,
         "budget": budget.model_dump(mode="json"),
@@ -87,7 +91,38 @@ async def scope_research(state: ResearchPlanState) -> dict[str, Any]:
         "replan_count": 0,
         "tool_calls": 0,
         "needs_replan": False,
+        "task_contract": contract.model_dump(mode="json"),
     }
+
+
+def derive_task_contract(request: dict[str, Any]) -> TaskContract:
+    """Translate user wording into terminal acceptance criteria before planning."""
+    message = str(request.get("message", ""))
+    intent = str(request.get("intent", "analyze"))
+    compares_strategies = intent == "backtest" and "策略" in message and any(
+        term in message for term in ("不同", "多个", "几个", "多种", "对比", "比较")
+    )
+    if compares_strategies:
+        return strategy_comparison_contract()
+    if intent == "backtest" and any(term in message.lower() for term in ("python", "代码", "沙盒", "自定义因子")):
+        return TaskContract(
+            operation="sandbox_research",
+            comparison_axis="none",
+            minimum_strategy_count=1,
+            required_benchmark="buy_hold",
+            minimum_history_years=5.0,
+            required_metrics=("total_return", "max_drawdown", "sharpe_ratio"),
+            required_outputs=("sandbox_validation", "equity_curves", "deterministic_replay"),
+        )
+    return TaskContract(
+        operation="backtest" if intent == "backtest" else "research",
+        comparison_axis="asset" if intent == "compare" else "none",
+        minimum_strategy_count=1,
+        required_benchmark="buy_hold" if intent == "backtest" else None,
+        minimum_history_years=1.0,
+        required_metrics=("total_return", "max_drawdown") if intent == "backtest" else (),
+        required_outputs=("equity_curves",) if intent == "backtest" else (),
+    )
 
 
 def _step(kind: str, title: str, depends_on: list[str] | None = None, *, attempts: int = 2) -> dict[str, Any]:
@@ -286,6 +321,7 @@ async def plan_research(state: ResearchPlanState) -> dict[str, Any]:
         "tickers": [str(item) for item in request.get("tickers", [])],
         "as_of_date": str(request.get("as_of_date") or date.today().isoformat()),
         "depth": depth,
+        "task_contract": state.get("task_contract"),
     }
     try:
         plan = ResearchPlan(**plan_kwargs, steps=[ResearchStep.model_validate(item) for item in steps])
@@ -339,6 +375,7 @@ def route_dispatch(state: ResearchPlanState) -> list[Send] | str:
                 "step_results": state.get("step_results", {}),
                 "replan_count": state.get("replan_count", 0),
                 "tool_calls": state.get("tool_calls", 0),
+                "task_contract": state.get("task_contract", {}),
             },
         )
         for step in ready[: min(budget.max_parallel, remaining_calls)]
@@ -460,7 +497,7 @@ async def _call_tool(context: ResearchPlanContext, name: str, args: dict[str, An
     tool = context.tools.get(name)
     if tool is None:
         raise ValueError(f"研究步骤需要的工具不可用: {name}")
-    timeout = 300 if name in {"run_fund_or_stock_analysis", "run_backtest", "design_and_run_backtest"} else 60
+    timeout = tool_timeout_seconds(name)
     raw = await asyncio.wait_for(tool.ainvoke(args), timeout=timeout)
     try:
         payload = json.loads(str(raw))
@@ -524,15 +561,45 @@ async def _execute_step(
         return await _call_tool(context, "compare_quotes", {"tickers": tickers, "asset_type": asset_type})
     if step.kind == "backtest":
         end_date = str(request.get("as_of_date") or date.today().isoformat())
-        start_date = str(
-            step.inputs.get("start_date") or (date.fromisoformat(end_date) - timedelta(days=365)).isoformat()
+        objective = str(request.get("message", ""))
+        compares_strategies = "策略" in objective and any(
+            term in objective for term in ("不同", "多个", "几个", "对比", "比较")
         )
+        sandbox_requested = any(term in objective.lower() for term in ("python", "代码", "沙盒", "自定义因子"))
+        default_days = 3652 if compares_strategies else 1826 if sandbox_requested else 365
+        start_date = str(
+            step.inputs.get("start_date") or (date.fromisoformat(end_date) - timedelta(days=default_days)).isoformat()
+        )
+        if len(tickers) == 1 and sandbox_requested:
+            return await _call_tool(
+                context,
+                "design_and_run_sandbox_strategy",
+                {
+                    "objective": objective,
+                    "ticker": ticker,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "asset_type": asset_type,
+                },
+            )
+        if len(tickers) == 1 and compares_strategies:
+            return await _call_tool(
+                context,
+                "compare_strategy_backtests",
+                {
+                    "ticker": ticker,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "asset_type": asset_type,
+                    "objective": objective,
+                },
+            )
         if len(tickers) > 1:
             return await _call_tool(
                 context,
                 "design_and_run_backtest",
                 {
-                    "objective": str(request.get("message", "")),
+                    "objective": objective,
                     "tickers": tickers,
                     "mode": "pool",
                     "start_date": start_date,
@@ -544,7 +611,7 @@ async def _execute_step(
             context,
             "design_and_run_backtest",
             {
-                "objective": str(request.get("message", "")),
+                "objective": objective,
                 "ticker": ticker,
                 "start_date": start_date,
                 "end_date": end_date,
@@ -685,13 +752,30 @@ async def verify_evidence(state: ResearchPlanState) -> dict[str, Any]:
             has_coverage = has_coverage and bool(items) and all(item.get("history") for item in items)
         elif step.kind == "market_snapshot":
             has_coverage = has_coverage and bool(output.get("quote") or output.get("quotes") or output.get("results"))
+        elif step.kind == "comparison":
+            quotes = output.get("quotes") or []
+            has_coverage = has_coverage and bool(quotes) and all(item.get("quote") for item in quotes)
+        elif step.kind == "backtest" and output.get("data_type") == "strategy_backtest_comparison":
+            acceptance = output.get("acceptance") or {}
+            has_coverage = has_coverage and acceptance.get("satisfied") is True
+        elif step.kind == "backtest" and output.get("data_type") == "sandbox_strategy_candidate":
+            has_coverage = (
+                has_coverage
+                and output.get("status") == "validated"
+                and output.get("validation", {}).get("passed") is True
+                and output.get("result", {}).get("promotion_eligible") is True
+            )
         requires_as_of = step.kind in {"market_snapshot", "price_history", "fund_nav", "news", "comparison"}
         has_as_of = not requires_as_of or all(item.as_of for item in result.evidence)
         if not evidence_is_valid or not has_coverage or not has_as_of:
             updates[step.id] = result.model_copy(
                 update={
                     "status": "failed",
-                    "error": "证据缺少来源、检索时间或所需数据覆盖范围",
+                    "error": (
+                        "任务验收契约未满足: " + ", ".join(output.get("acceptance", {}).get("missing", []))
+                        if step.kind == "backtest" and output.get("acceptance", {}).get("satisfied") is False
+                        else "证据缺少来源、检索时间或所需数据覆盖范围"
+                    ),
                 }
             ).model_dump(mode="json")
     results.update({key: StepResult.model_validate(value) for key, value in updates.items()})

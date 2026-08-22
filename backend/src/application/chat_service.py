@@ -315,13 +315,13 @@ class ChatTaskManager:
                 tool_payload = json.loads(str(result))
             except (TypeError, json.JSONDecodeError):
                 tool_payload = {}
-            for artifact in tool_payload.get("artifacts", []) if isinstance(tool_payload, dict) else []:
-                if isinstance(artifact, dict):
-                    artifacts.append(artifact)
-            surface = render_tool_result(name, str(result))
-            if surface:
-                await self._emit_a2ui(task_input, surface)
             if status != "failed":
+                for artifact in tool_payload.get("artifacts", []) if isinstance(tool_payload, dict) else []:
+                    if isinstance(artifact, dict):
+                        artifacts.append(artifact)
+                surface = render_tool_result(name, str(result))
+                if surface:
+                    await self._emit_a2ui(task_input, surface)
                 references = self._tool_references(name, tool_payload)
         return artifacts, references
 

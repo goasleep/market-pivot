@@ -193,7 +193,8 @@ class AssetAgent:
     def _explicitly_requests_mutation(message: str) -> bool:
         return bool(
             re.search(
-                r"(?:下单|提交(?:模拟)?订单|创建(?:模拟)?订单|取消订单|买入(?:模拟)?单|卖出(?:模拟)?单)",
+                r"(?:下单|提交(?:模拟)?订单|创建(?:模拟)?(?:订单|账户|盘)|取消订单|"
+                r"买入(?:模拟)?单|卖出(?:模拟)?单|部署(?:到)?模拟盘|启用部署|暂停部署|归档部署)",
                 message or "",
                 flags=re.IGNORECASE,
             )
@@ -212,8 +213,10 @@ class AssetAgent:
             return request.with_intent(AssetIntent.HELP), None
         if len(matches) == 0 and request.tickers:
             matches = [AssetIntent.QUOTE, AssetIntent.HISTORY, AssetIntent.ANALYZE, AssetIntent.BACKTEST]
+        elif AssetIntent.BACKTEST in matches:
+            return request.with_intent(AssetIntent.BACKTEST), None
         elif AssetIntent.COMPARE in matches and len(matches) > 1:
-            matches = [AssetIntent.COMPARE]
+            return request.with_intent(AssetIntent.COMPARE), None
         options = [
             {
                 "id": intent.value,
@@ -244,6 +247,13 @@ class AssetAgent:
             return AssetType.LOF
         if any(token in text for token in ("etf", "交易型基金", "指数基金")):
             return AssetType.ETF
+        if any(token in text for token in ("股票", "个股", "a股")):
+            return AssetType.STOCK
+        tickers = AssetAgent.extract_tickers(text)
+        if any(ticker.startswith(("15", "51", "56", "58")) for ticker in tickers):
+            return AssetType.ETF
+        if any(ticker.startswith(("16", "50")) for ticker in tickers):
+            return AssetType.LOF
         return AssetType.STOCK
 
     def prepare(

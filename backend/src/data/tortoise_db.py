@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from tortoise import Tortoise
+from tortoise.context import TortoiseContext
 
 from config import settings
 
 _active_db_url: str | None = None
+_contexts: set[TortoiseContext] = set()
 
 
 def database_url(db_path: str | Path | None = None, db_url: str | None = None) -> str:
@@ -34,11 +36,12 @@ async def init_database(
         # Isolated temporary databases are useful during the demo/test phase.
         # The running application initializes one URL for its whole lifespan.
         await close_database()
-    await Tortoise.init(
+    context = await Tortoise.init(
         db_url=url,
         modules={"models": ["data.db_models", "data.chat_models"]},
         _enable_global_fallback=True,
     )
+    _contexts.add(context)
     if generate_schemas:
         await Tortoise.generate_schemas(safe=True)
     _active_db_url = url
@@ -46,6 +49,10 @@ async def init_database(
 
 async def close_database() -> None:
     global _active_db_url
-    if Tortoise.is_inited():
+    contexts = list(_contexts)
+    _contexts.clear()
+    for context in contexts:
+        await context.close_connections()
+    if Tortoise.is_inited() and not contexts:
         await Tortoise.close_connections()
     _active_db_url = None

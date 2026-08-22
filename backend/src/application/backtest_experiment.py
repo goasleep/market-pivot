@@ -26,7 +26,8 @@ from strategies.skill_manager import register_strategy_spec
 STRATEGY_DESIGN_SYSTEM = """你是一个严格的量化策略设计 Agent。请为 A 股股票或场内基金设计可执行的日线策略。
 只允许使用用户提供的目标、日线 OHLCV 数据字段和下方受控指标，不能引用未来数据、实时新闻或当前才知道的财务数据。
 必须返回 JSON 对象，不能输出 Markdown。JSON 必须包含：name、version、description、asset_types、indicators、
-indicator_specs、entry_conditions、exit_conditions、stop_loss_pct、take_profit_pct、position_size_pct、
+indicator_specs、entry_conditions、exit_conditions、entry_condition_logic、exit_condition_logic、
+stop_loss_pct、take_profit_pct、position_size_pct、
 rebalance_frequency、source。每个条件必须使用受控指标名称、gt/gte/lt/lte/eq/between 操作符和数值。
 
 格式约束：
@@ -36,6 +37,8 @@ rebalance_frequency、source。每个条件必须使用受控指标名称、gt/g
 3. stop_loss_pct、take_profit_pct、position_size_pct 必须使用 0 到 1 之间的小数，
    例如 0.05 表示 5%，不能填写 5 或 5%。
 4. asset_types 必须是数组，只能包含 stock、etf、lof；source 必须为 llm。
+5. entry_condition_logic 和 exit_condition_logic 只能是 all 或 any；“并且”使用 all，“或者”使用 any。
+   多个入场过滤条件通常使用 all，多个独立退出触发条件通常使用 any。
 """
 
 PORTFOLIO_DESIGN_SYSTEM = """你是一个严格的组合配置 Agent。请为给定的同一资产类型标的池设计可复现的组合规则。
@@ -86,6 +89,22 @@ class BacktestExperimentStore:
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
+
+    async def list(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        await init_database(db_url=self.db_url)
+        rows = await BacktestExperimentRecord.all().order_by("-created_at").offset(max(0, offset)).limit(
+            max(1, min(limit, 200))
+        )
+        return [
+            {
+                "experiment_id": row.experiment_id,
+                "status": row.status,
+                **json.loads(row.payload_json),
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
+            for row in rows
+        ]
 
 
 backtest_experiments = BacktestExperimentStore()
@@ -174,6 +193,8 @@ def _build_report_markdown(
         f"- 假设：{spec.description or 'Agent 未提供额外策略假设。'}",
         f"- 入场条件：{len(spec.entry_conditions)} 条",
         f"- 出场条件：{len(spec.exit_conditions)} 条",
+        f"- 入场条件关系：{'全部满足' if spec.entry_condition_logic == 'all' else '任一满足'}",
+        f"- 出场条件关系：{'全部满足' if spec.exit_condition_logic == 'all' else '任一满足'}",
         f"- 止损：{_format_pct(spec.stop_loss_pct)}",
         f"- 止盈：{_format_pct(spec.take_profit_pct)}",
         f"- 单次仓位：{_format_pct(spec.position_size_pct)}",
@@ -304,7 +325,8 @@ def _experiment_equity_chart(result: dict[str, Any]) -> str:
         date = str(trade.get("date") or "")
         if date not in labels:
             continue
-        action = str(trade.get("action") or "").lower()
+        raw_action = trade.get("action")
+        action = str(getattr(raw_action, "value", raw_action) or "").lower()
         is_buy = action == "buy"
         trade_markers.append(
             {

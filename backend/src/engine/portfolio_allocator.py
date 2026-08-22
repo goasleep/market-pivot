@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Mapping
 
+from engine.strategy_runtime import plan_rebalance
 from engine.trading_engine import TimeAwareTradingEngine
 from models.schemas import PortfolioSpec, TradeDecision
 
@@ -52,45 +53,18 @@ def rebalance_portfolio(
     enforces lot size, T+1 availability, fees, and available cash, so this
     helper only proposes target quantities and never bypasses execution rules.
     """
-    total_value = engine.portfolio.total_value
-    if total_value <= 0:
-        return
-
-    rules = engine.rules.effective_trading_rules(engine.rules.asset_type)
-    min_lot = rules.min_lot
-    target_shares: dict[str, int] = {}
-    for ticker, weight in target.items():
-        price = float(prices.get(ticker, 0.0))
-        if price <= 0 or weight <= 0:
-            continue
-        target_shares[ticker] = int(total_value * float(weight) / price // min_lot * min_lot)
-
-    # Reduce positions that are above target, or no longer belong to target.
-    for position in list(engine.portfolio.positions):
-        desired = target_shares.get(position.ticker, 0)
-        excess = position.shares - desired
-        if excess <= 0 or position.ticker not in prices:
-            continue
-        engine.sell(position.ticker, excess, float(prices[position.ticker]), trade_date)
-
-    # Add positions after sells have released cash.
-    for ticker, desired in target_shares.items():
-        price = float(prices[ticker])
-        current = engine._find_position(ticker)
-        current_shares = current.shares if current else 0
-        additional = desired - current_shares
-        if additional <= 0:
-            continue
-        decision = decisions.get(ticker) if decisions else None
-        plan = decision.plan if decision else None
-        engine.buy(
-            ticker,
-            additional,
-            price,
-            trade_date,
-            stop_loss=plan.stop_loss if plan else None,
-            take_profit=plan.take_profit if plan else None,
-        )
+    for proposal in plan_rebalance(engine.portfolio, engine.rules, target, prices, decisions):
+        if proposal["side"] == "sell":
+            engine.sell(proposal["ticker"], proposal["shares"], proposal["price"], trade_date)
+        else:
+            engine.buy(
+                proposal["ticker"],
+                proposal["shares"],
+                proposal["price"],
+                trade_date,
+                stop_loss=proposal.get("stop_loss"),
+                take_profit=proposal.get("take_profit"),
+            )
 
     # Newly created positions have no mark price yet; use the execution price
     # for same-close snapshots and for the next allocation calculation.

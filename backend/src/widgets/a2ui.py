@@ -190,6 +190,7 @@ def render_research_plan(
                 "component": "PipelineStep",
                 "label": str(step.get("title") or step.get("kind") or "研究步骤"),
                 "status": str(step.get("status") or "pending"),
+                "detail": str(step.get("error") or ""),
             }
         )
     components[0]["children"] = children
@@ -646,10 +647,154 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
         return render_asset_card(quote, surface_id)
 
     if tool_name == "run_fund_or_stock_analysis":
+        if payload.get("error"):
+            return None
         return render_analysis_result(payload, surface_id)
 
     if tool_name in {"run_backtest", "design_and_run_backtest"}:
         return render_backtest_result(payload, surface_id)
+
+    if tool_name == "design_and_run_sandbox_strategy":
+        backtest = dict((payload.get("result") or {}).get("backtest") or {})
+        if not backtest:
+            return None
+        backtest["strategy_spec"] = payload.get("strategy_spec")
+        backtest["data_type"] = "backtest_experiment"
+        backtest["experiment_id"] = payload.get("candidate_id")
+        return render_backtest_result(backtest, surface_id)
+
+    if tool_name == "compare_strategy_backtests":
+        rows = [
+            {
+                "strategy": item.get("display_name") or item.get("strategy_name", ""),
+                "return": _percent_label(item.get("total_return")),
+                "annualized": _percent_label(item.get("annualized_return")),
+                "excess": _percent_label(item.get("excess_return")),
+                "drawdown": _percent_label(item.get("max_drawdown")),
+                "sharpe": _number_label(item.get("sharpe_ratio")),
+                "sortino": _number_label(item.get("sortino_ratio")),
+                "winRate": _percent_label(item.get("win_rate")),
+                "trades": item.get("total_trades", 0),
+            }
+            for item in payload.get("comparisons", [])
+            if isinstance(item, dict)
+        ]
+        surface_id = surface_id or f"strategy-comparison-{uuid4().hex}"
+        acceptance = payload.get("acceptance") or {}
+        acceptance_label = (
+            "验收通过"
+            if acceptance.get("satisfied") is True
+            else "验收未通过：" + "、".join(acceptance.get("missing") or ["结果不完整"])
+        )
+        by_name = {
+            item.get("strategy_name"): item
+            for item in payload.get("comparisons", [])
+            if isinstance(item, dict)
+        }
+        ranked_items = [by_name[name] for name in payload.get("ranking", []) if name in by_name][:3]
+        chart_components = []
+        equity_children = []
+        drawdown_children = []
+        equity_curves = []
+        drawdown_curves = []
+        for index, item in enumerate(ranked_items):
+            label = item.get("display_name") or item.get("strategy_name", "")
+            equity_id = f"equity-{index}"
+            drawdown_id = f"drawdown-{index}"
+            equity_children.extend([f"equity-title-{index}", equity_id])
+            drawdown_children.extend([f"drawdown-title-{index}", drawdown_id])
+            equity_curves.append(
+                [
+                    {"label": point.get("date", ""), "value": point.get("value", 0)}
+                    for point in item.get("equity_curve", [])
+                    if isinstance(point, dict)
+                ]
+            )
+            drawdown_curves.append(
+                [
+                    {"label": point.get("date", ""), "value": point.get("value", 0)}
+                    for point in item.get("drawdown_curve", [])
+                    if isinstance(point, dict)
+                ]
+            )
+            chart_components.extend(
+                [
+                    _text(f"equity-title-{index}", str(label), "caption"),
+                    {
+                        "id": equity_id,
+                        "component": "LineChart",
+                        "points": _ref(f"/equityCurves/{index}"),
+                        "ariaLabel": f"{label} 资金曲线",
+                    },
+                    _text(f"drawdown-title-{index}", str(label), "caption"),
+                    {
+                        "id": drawdown_id,
+                        "component": "LineChart",
+                        "points": _ref(f"/drawdownCurves/{index}"),
+                        "ariaLabel": f"{label} 回撤曲线",
+                    },
+                ]
+            )
+        root_children = ["title", "meta", "table"]
+        if equity_children:
+            root_children.extend(["curves", "drawdowns"])
+        root_children.append("notice")
+        return _surface(
+            surface_id,
+            [
+                {"id": "root", "component": "Card", "children": root_children},
+                _text("title", f"{payload.get('ticker', '')} 多策略回测对比", "h3"),
+                _text(
+                    "meta",
+                    (
+                        f"{payload.get('actual_start_date', payload.get('start_date', ''))} 至 "
+                        f"{payload.get('actual_end_date', payload.get('end_date', ''))} · "
+                        f"{payload.get('strategy_count', len(rows))} 个策略 · "
+                        f"按{payload.get('ranking_label', '总收益率')}排序 · {acceptance_label}"
+                    ),
+                    "caption",
+                ),
+                {
+                    "id": "table",
+                    "component": "DataTable",
+                    "columns": [
+                        {"key": "strategy", "label": "策略"},
+                        {"key": "return", "label": "收益率"},
+                        {"key": "annualized", "label": "年化"},
+                        {"key": "excess", "label": "超额"},
+                        {"key": "drawdown", "label": "最大回撤"},
+                        {"key": "sharpe", "label": "夏普"},
+                        {"key": "sortino", "label": "Sortino"},
+                        {"key": "winRate", "label": "胜率"},
+                        {"key": "trades", "label": "交易次数"},
+                    ],
+                    "rows": _ref("/rows"),
+                },
+                *(
+                    [
+                        {
+                            "id": "curves",
+                            "component": "Collapsible",
+                            "title": "排名前三资金曲线",
+                            "defaultExpanded": True,
+                            "children": equity_children,
+                        },
+                        {
+                            "id": "drawdowns",
+                            "component": "Collapsible",
+                            "title": "排名前三回撤曲线",
+                            "defaultExpanded": False,
+                            "children": drawdown_children,
+                        },
+                        *chart_components,
+                    ]
+                    if equity_children
+                    else []
+                ),
+                _text("notice", "回测基于历史数据，仅用于策略研究，不代表未来表现。", "caption"),
+            ],
+            {"rows": rows, "equityCurves": equity_curves, "drawdownCurves": drawdown_curves},
+        )
 
     if tool_name in {"search_web", "search_web_ddgs"}:
         items = []
@@ -727,6 +872,23 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
         return _surface(surface_id, components, {"rows": rows})
 
     if tool_name == "get_historical_prices":
+        if payload.get("data_type") == "price_history_collection":
+            items = [item for item in payload.get("items", []) if isinstance(item, dict)]
+            if not items:
+                return None
+            if len(items) == 1:
+                return render_tool_result(tool_name, json.dumps(items[0], ensure_ascii=False, default=str), surface_id)
+            base_surface_id = surface_id or f"history-collection-{uuid4().hex}"
+            messages: list[dict[str, Any]] = []
+            for index, item in enumerate(items):
+                rendered = render_tool_result(
+                    tool_name,
+                    json.dumps(item, ensure_ascii=False, default=str),
+                    f"{base_surface_id}-{index}",
+                )
+                if rendered:
+                    messages.extend(rendered)
+            return messages or None
         records = payload.get("history", [])
         points = []
         for item in records if isinstance(records, list) else []:

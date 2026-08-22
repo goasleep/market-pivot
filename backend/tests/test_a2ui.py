@@ -90,7 +90,7 @@ def test_research_plan_card_uses_stable_statuses_and_surface_updates():
             "progress": 100,
             "steps": [
                 {"title": "获取行情", "status": "completed"},
-                {"title": "检索新闻", "status": "failed"},
+                {"title": "检索新闻", "status": "failed", "error": "外部数据源暂时不可用"},
                 {"title": "形成结论", "status": "skipped"},
             ],
         },
@@ -102,6 +102,8 @@ def test_research_plan_card_uses_stable_statuses_and_surface_updates():
     components = messages[0]["updateComponents"]["components"]
     statuses = [item["status"] for item in components if item.get("component") == "PipelineStep"]
     assert statuses == ["completed", "failed", "skipped"]
+    failed_step = next(item for item in components if item.get("status") == "failed")
+    assert failed_step["detail"] == "外部数据源暂时不可用"
     data = messages[1]["updateDataModel"]["value"]
     assert data["progress"] == 100
     assert "Revision 2" in data["meta"]
@@ -132,3 +134,24 @@ def test_historical_prices_render_as_inline_trend_chart_and_table():
         {"label": "2026-08-12", "value": 4.0},
         {"label": "2026-08-13", "value": 4.2},
     ]
+
+
+def test_price_history_collection_unwraps_single_ticker_for_rendering():
+    messages = render_tool_result(
+        "get_historical_prices",
+        json.dumps(
+            {
+                "data_type": "price_history_collection",
+                "items": [
+                    {
+                        "ticker": "510300",
+                        "history": [{"date": "2026-08-21", "close": 4.68, "volume": 120}],
+                    }
+                ],
+            }
+        ),
+    )
+
+    data = messages[2]["updateDataModel"]["value"]
+    assert data["prices"] == [4.68]
+    assert data["rows"][0]["date"] == "2026-08-21"

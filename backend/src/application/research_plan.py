@@ -55,6 +55,7 @@ def _plan_snapshot(
         "as_of_date": plan.as_of_date,
         "depth": plan.depth,
         "revision": plan.revision,
+        "task_contract": plan.task_contract.model_dump(mode="json") if plan.task_contract else None,
         "status": status,
         "progress": round(completed / len(steps) * 100) if steps else 0,
         "steps": steps,
@@ -179,11 +180,15 @@ class ResearchPlanService:
                     "risk": "calculate_risk_metrics",
                     "report": "save_artifacts",
                 }.get(step.kind, step.kind)
+                result_payload = dict(result.output)
+                tool_name = str(result_payload.get("_tool_name") or tool_name)
+                if result.status == "failed" and result.error and not result_payload.get("error"):
+                    result_payload["error"] = result.error
                 yield {
                     "type": "tool",
                     "name": tool_name,
                     "status": result.status,
-                    "result": json.dumps(result.output or {"error": result.error}, ensure_ascii=False, default=str),
+                    "result": json.dumps(result_payload, ensure_ascii=False, default=str),
                 }
             if "finish" in update:
                 final_plan = _plan_snapshot(values, status="completed")

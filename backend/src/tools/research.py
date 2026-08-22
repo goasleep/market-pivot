@@ -178,6 +178,81 @@ async def design_and_run_backtest(
 
 
 @tool
+async def compare_strategy_backtests(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    asset_type: str = "stock",
+    strategy_names: list[str] | None = None,
+    initial_capital: float = 1_000_000,
+    decision_interval: int = 1,
+    objective: str = "",
+) -> str:
+    """在共享数据快照上比较标准策略，并完成成本、样本外和稳定性检验。"""
+    from application.strategy_comparison import build_comparison_spec, compare_strategies, standard_strategy_suite
+
+    kind = AssetType(asset_type)
+    strategies = standard_strategy_suite(kind)
+    if strategy_names:
+        requested = set(strategy_names)
+        selected = tuple(item for item in strategies if item.name in requested)
+        if len(selected) >= 7:
+            strategies = selected
+    spec = build_comparison_spec(
+        ticker=ticker,
+        start_date=start_date,
+        end_date=end_date,
+        asset_type=kind,
+        initial_capital=initial_capital,
+        strategies=strategies,
+        objective=objective,
+    )
+    payload = await compare_strategies(spec)
+    payload.update(
+        {
+            "_tool_name": "compare_strategy_backtests",
+            "decision_interval": decision_interval,
+            "provenance": provenance("akshare", freshness="historical"),
+        }
+    )
+    return _dump(payload)
+
+
+@tool
+async def design_and_run_sandbox_strategy(
+    objective: str,
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    asset_type: str = "etf",
+    initial_capital: float = 1_000_000,
+) -> str:
+    """让代码 Agent 生成受限目标仓位函数，在隔离子进程验证后由可信核心回测。"""
+    from application.strategy_candidates import strategy_candidates
+
+    candidate = await strategy_candidates.generate(
+        objective=objective,
+        ticker=ticker,
+        start_date=start_date,
+        end_date=end_date,
+        asset_type=AssetType(asset_type),
+        initial_capital=initial_capital,
+    )
+    payload = candidate.model_dump(mode="json")
+    payload.pop("source_code", None)
+    payload.update(
+        {
+            "data_type": "sandbox_strategy_candidate",
+            "_tool_name": "design_and_run_sandbox_strategy",
+            "paper_trading": False,
+            "live_trading": False,
+            "provenance": provenance("sandbox", freshness="historical"),
+        }
+    )
+    return _dump(payload)
+
+
+@tool
 async def list_trading_strategies() -> str:
     """列出系统支持的研究和交易策略。"""
     return _dump(
@@ -195,5 +270,7 @@ TOOLS = [
     build_trade_plan,
     run_backtest,
     design_and_run_backtest,
+    compare_strategy_backtests,
+    design_and_run_sandbox_strategy,
     list_trading_strategies,
 ]

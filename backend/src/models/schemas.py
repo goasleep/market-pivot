@@ -194,11 +194,13 @@ class StrategySpec(BaseModel):
     indicator_specs: list[IndicatorSpec] = Field(default_factory=list)
     entry_conditions: list[StrategyCondition] = Field(default_factory=list)
     exit_conditions: list[StrategyCondition] = Field(default_factory=list)
+    entry_condition_logic: Literal["all", "any"] = "all"
+    exit_condition_logic: Literal["all", "any"] = "any"
     stop_loss_pct: float | None = Field(default=None, ge=0, le=1)
     take_profit_pct: float | None = Field(default=None, ge=0)
     position_size_pct: float = Field(default=0.2, ge=0, le=1)
     rebalance_frequency: Literal["daily", "weekly", "manual"] = "daily"
-    source: Literal["yaml", "llm", "user"] = "yaml"
+    source: Literal["yaml", "llm", "user", "sandbox"] = "yaml"
 
 
 class PortfolioSpec(BaseModel):
@@ -281,8 +283,17 @@ class TradeDecision(BaseModel):
         if not plan:
             plan = dashboard_plan or {}
         plan = dict(plan)
-        for field_name in ("entry_price", "stop_loss", "take_profit", "position_strategy", "action_items",
-                           "entry_explanation", "stop_loss_explanation", "take_profit_explanation", "price_evidence"):
+        for field_name in (
+            "entry_price",
+            "stop_loss",
+            "take_profit",
+            "position_strategy",
+            "action_items",
+            "entry_explanation",
+            "stop_loss_explanation",
+            "take_profit_explanation",
+            "price_evidence",
+        ):
             if field_name in payload and payload[field_name] is not None and field_name not in plan:
                 plan[field_name] = payload[field_name]
         if "position_size" in payload and payload["position_size"] is not None and "position_size" not in plan:
@@ -387,6 +398,7 @@ class TradeRecord(BaseModel):
     amount: float
     commission: float = 0.0
     tax: float = 0.0
+    transfer_fee: float = 0.0
     external_id: str | None = None
 
 
@@ -582,6 +594,8 @@ class SimulationAccountConfig(BaseModel):
                 minimum_commission=self.minimum_commission,
                 stamp_tax_rate=self.stamp_tax_rate,
                 transfer_fee_rate=self.transfer_fee_rate,
+                max_single_position_pct=self.max_single_position_pct,
+                max_total_position_pct=self.max_total_position_pct,
             )
             if self.asset_type in {AssetType.ETF, AssetType.LOF}:
                 self.trading_rules.stamp_tax_rate = 0.0
@@ -610,7 +624,7 @@ class SimulationAccount(BaseModel):
     """Persisted simulation account metadata and current portfolio state."""
 
     account_id: str
-    status: Literal["active", "paused"] = "active"
+    status: Literal["active", "paused", "archived"] = "active"
     current_date: str = ""
     config: SimulationAccountConfig = Field(default_factory=SimulationAccountConfig)
     portfolio: PortfolioState = Field(default_factory=PortfolioState)
@@ -634,6 +648,8 @@ class SimulationOrder(BaseModel):
     reject_reason: str | None = None
     source: Literal["manual", "agent", "backtest", "system"] = "manual"
     run_id: str | None = None
+    deployment_id: str | None = None
+    decision_id: str | None = None
     fill_policy: Literal["next_open", "same_close", "manual"] = "next_open"
     stop_loss: float | None = Field(default=None, gt=0)
     take_profit: float | None = Field(default=None, gt=0)
@@ -667,6 +683,7 @@ class AutomationTaskConfig(BaseModel):
     universe: list[str] = Field(default_factory=list)
     asset_type: AssetType = AssetType.STOCK
     strategy_name: str | None = None
+    deployment_id: str | None = None
     max_symbols_per_run: int = Field(default=50, ge=1, le=500)
     max_orders_per_run: int = Field(default=20, ge=1, le=200)
     daily_loss_limit_pct: float = Field(default=0.03, ge=0, le=1)
@@ -709,6 +726,9 @@ class AgentRunSummary(BaseModel):
     status: Literal["queued", "running", "completed", "failed", "cancelled", "skipped"] = "queued"
     mode: Literal["observe", "confirm", "auto"] = "observe"
     strategy_name: str | None = None
+    deployment_id: str | None = None
+    strategy_sha256: str | None = None
+    llm_runtime: dict[str, Any] = Field(default_factory=dict)
     symbols_total: int = 0
     symbols_processed: int = 0
     decisions_count: int = 0
@@ -731,4 +751,30 @@ class AgentDecisionAudit(BaseModel):
     risk_status: Literal["pending", "approved", "rejected"] = "pending"
     risk_reason: str | None = None
     order_id: str | None = None
+    signal_source: Literal["agent", "deployed_strategy"] = "agent"
+    strategy_evaluation: dict[str, Any] = Field(default_factory=dict)
+    agent_gate: dict[str, Any] = Field(default_factory=dict)
+    proposed_order: dict[str, Any] | None = None
+    confirmation_status: Literal["none", "pending", "confirmed", "rejected", "expired"] = "none"
     created_at: str
+
+
+class StrategyDeployment(BaseModel):
+    """Immutable strategy snapshot bound to one paper account."""
+
+    deployment_id: str
+    experiment_id: str
+    account_id: str
+    status: Literal["active", "paused", "archived"] = "active"
+    strategy_name: str
+    strategy_version: str
+    strategy_sha256: str
+    strategy_spec: StrategySpec
+    portfolio_spec: PortfolioSpec | None = None
+    universe: list[str]
+    asset_type: AssetType
+    execution: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+    updated_at: str
+    activated_at: str | None = None
+    archived_at: str | None = None
