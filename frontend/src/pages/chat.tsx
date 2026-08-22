@@ -86,9 +86,6 @@ export function ChatPage() {
   const [search, setSearch] = useState("");
   const [sending, setSending] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LLMConfig | null>(null);
-  const [llmProfileId, setLlmProfileId] = useState("");
-  const [llmModel, setLlmModel] = useState("");
-  const [llmAuto, setLlmAuto] = useState(false);
   const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(
     null,
   );
@@ -115,13 +112,9 @@ export function ChatPage() {
 
   useEffect(() => {
     void getLLMConfig()
-      .then((data) => {
-        setLlmConfig(data);
-        setLlmProfileId(data.active_profile_id);
-        setLlmModel(data.profiles[data.active_profile_id]?.model || "");
-      })
+      .then(setLlmConfig)
       .catch(() => {
-        // The backend still has a default model if settings are unavailable.
+        // Chat still uses the backend's environment-owned model if status loading fails.
       });
   }, []);
 
@@ -605,9 +598,6 @@ export function ChatPage() {
               })),
               conversation_id: conversationId,
               task_id: taskId,
-              llm_profile_id: llmAuto ? undefined : llmProfileId || undefined,
-              llm_model: llmAuto ? undefined : llmModel || undefined,
-              llm_auto: llmAuto,
             }),
             signal: abortController.signal,
           });
@@ -688,9 +678,6 @@ export function ChatPage() {
       activeConversation,
       appendToAssistant,
       editingMessageIndex,
-      llmAuto,
-      llmModel,
-      llmProfileId,
       sending,
       setAssistantReferences,
       updateConversation,
@@ -1220,41 +1207,14 @@ export function ChatPage() {
               </div>
             )}
             <div className="flex items-end gap-2 rounded-xl border bg-background p-2 shadow-sm">
-              <div className="hidden shrink-0 items-center border-r pr-2 sm:flex">
-                <select
-                  aria-label="选择模型"
-                  value={llmAuto ? "__auto__" : `${llmProfileId}:${llmModel}`}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    if (value === "__auto__") {
-                      setLlmAuto(true);
-                      return;
-                    }
-                    const separator = value.indexOf(":");
-                    if (separator < 0) return;
-                    setLlmAuto(false);
-                    setLlmProfileId(value.slice(0, separator));
-                    setLlmModel(value.slice(separator + 1));
-                  }}
-                  disabled={sending || !llmConfig}
-                  className="max-w-[180px] bg-transparent text-xs outline-none"
-                >
-                  <option value="__auto__">自动路由</option>
-                  {llmConfig && Object.values(llmConfig.profiles).map((profile) => (
-                    <optgroup key={profile.id} label={profile.name}>
-                      {Object.keys(profile.available_models).map((model) => (
-                        <option key={`${profile.id}:${model}`} value={`${profile.id}:${model}`}>
-                          {model}
-                        </option>
-                      ))}
-                      {profile.model && !profile.available_models[profile.model] && (
-                        <option value={`${profile.id}:${profile.model}`}>
-                          {profile.model}（自定义）
-                        </option>
-                      )}
-                    </optgroup>
-                  ))}
-                </select>
+              <div
+                className="hidden max-w-[180px] shrink-0 items-center gap-1.5 border-r pr-2 text-xs sm:flex"
+                title="模型由 LLM_MODEL 环境变量配置"
+              >
+                <span className="text-muted-foreground">模型</span>
+                <code className="truncate font-medium">
+                  {llmConfig?.model || "环境配置"}
+                </code>
               </div>
               <Input
                 value={input}

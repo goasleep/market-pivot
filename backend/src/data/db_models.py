@@ -19,15 +19,6 @@ class CacheEntry(Model):
         table = "cache"
 
 
-class AppSetting(Model):
-    key = fields.CharField(max_length=255, primary_key=True)
-    value = fields.TextField()
-    updated_at = fields.FloatField()
-
-    class Meta:
-        table = "app_settings"
-
-
 class SimulationAccountRecord(Model):
     account_id = fields.CharField(max_length=64, primary_key=True)
     status = fields.CharField(max_length=32)
@@ -151,7 +142,6 @@ class ArtifactRecord(Model):
 
 __models__ = [
     CacheEntry,
-    AppSetting,
     SimulationAccountRecord,
     SimulationOrderRecord,
     SimulationSnapshotRecord,

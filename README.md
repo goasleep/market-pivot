@@ -63,12 +63,12 @@ cp .env.example .env
 # 编辑 .env，至少配置一个 LLM API Key
 ```
 
-系统默认提供 DeepSeek 原生和 OpenAI-compatible 两类 Provider Profile。`.env` 中的
-`OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 是所有 LLM Profile 共用的连接配置，且只从环境变量读取，
-不会写入数据库。`OPENAI_BASE_URL` 默认是 `https://api.openai.com/v1`；使用其他 OpenAI-compatible
-服务时，在 `.env` 中修改它。前端 **Settings** 页面只保存 Provider Type、模型名称和路由等非敏感配置。
-修改 `.env` 中的 Key 或 Base URL 后需要重启后端。
-适配器由 Provider Type 显式决定，不根据模型名称推断；OpenAI-compatible Profile 中的 DeepSeek 模型仍走兼容接口。
+LLM 配置只从环境变量读取，不会写入数据库。使用 `LLM_PROVIDER` 选择 `deepseek` 或
+`openai_compatible` 适配器，使用 `LLM_MODEL`、`LLM_TEMPERATURE` 和 `LLM_MAX_TOKENS`
+配置模型参数；连接信息使用 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`。`OPENAI_BASE_URL`
+默认是 `https://api.openai.com/v1`，使用其他 OpenAI-compatible 服务时在 `.env` 中修改它。
+前端 **Settings** 页面只读展示当前生效配置。修改这些环境变量后需要重启后端。
+适配器由 `LLM_PROVIDER` 显式决定，不根据模型名称推断。
 生成研究报告时还需要配置 S3 兼容对象存储。
 
 联网搜索配置：

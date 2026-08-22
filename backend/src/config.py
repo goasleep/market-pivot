@@ -1,93 +1,94 @@
 """Configuration management for A-Share Agent backend."""
 
 import os
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from loguru import logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from llm_catalog import default_profiles, model_info
+from llm_catalog import model_info
 from llm_runtime import current_llm_profile
 
-# --- LLM config defaults (runtime state is loaded by the application startup) ---
+# --- Environment-owned LLM configuration ---
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 _REPOSITORY_ROOT = _BACKEND_ROOT.parent
 _ENV_FILES = (_REPOSITORY_ROOT / ".env", _BACKEND_ROOT / ".env")
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-
-_LLM_CONFIG_DEFAULTS = {
-    "active_profile_id": "deepseek",
-    "profiles": {},
-    "routing": {
-        "enabled": False,
-        "routes": {
-            "chat": {"profile_id": "deepseek", "model": "deepseek-v4-flash"},
-            "analysis": {"profile_id": "deepseek", "model": "deepseek-v4-flash"},
-            "report": {"profile_id": "deepseek", "model": "deepseek-chat"},
-        },
-    },
-}
+_ENVIRONMENT_PROFILE_ID = "environment"
+_SUPPORTED_LLM_PROVIDERS = {"deepseek", "openai_compatible"}
 
 
-_runtime_llm_config: dict[str, Any] = {}
+def _environment_value(name: str, fallback: str) -> str:
+    value = os.getenv(name)
+    return (value if value is not None else fallback).strip()
 
 
-def _default_llm_state() -> dict[str, Any]:
-    return {
-        "active_profile_id": "deepseek",
-        "profiles": default_profiles(deepseek_model=settings.deepseek_model),
-        "routing": deepcopy(_LLM_CONFIG_DEFAULTS["routing"]),
+def get_llm_provider_type() -> str:
+    """Return the provider adapter selected by LLM_PROVIDER."""
+    provider = _environment_value("LLM_PROVIDER", settings.llm_provider).lower()
+    if provider not in _SUPPORTED_LLM_PROVIDERS:
+        supported = ", ".join(sorted(_SUPPORTED_LLM_PROVIDERS))
+        raise ValueError(f"LLM_PROVIDER must be one of: {supported}")
+    return provider
+
+
+def get_llm_model() -> str:
+    """Return the model ID selected by LLM_MODEL."""
+    model = _environment_value("LLM_MODEL", settings.llm_model)
+    if not model:
+        raise ValueError("LLM_MODEL must not be empty")
+    return model
+
+
+def get_llm_temperature() -> float:
+    """Return the generation temperature selected by LLM_TEMPERATURE."""
+    value = _environment_value("LLM_TEMPERATURE", str(settings.llm_temperature))
+    try:
+        temperature = float(value)
+    except ValueError as exc:
+        raise ValueError("LLM_TEMPERATURE must be a number") from exc
+    if not 0 <= temperature <= 2:
+        raise ValueError("LLM_TEMPERATURE must be between 0 and 2")
+    return temperature
+
+
+def get_llm_max_tokens() -> int:
+    """Return the output limit selected by LLM_MAX_TOKENS."""
+    value = _environment_value("LLM_MAX_TOKENS", str(settings.llm_max_tokens))
+    try:
+        max_tokens = int(value)
+    except ValueError as exc:
+        raise ValueError("LLM_MAX_TOKENS must be an integer") from exc
+    if max_tokens < 256:
+        raise ValueError("LLM_MAX_TOKENS must be at least 256")
+    return max_tokens
+
+
+def _environment_profile() -> dict[str, Any]:
+    profile = {
+        "id": _ENVIRONMENT_PROFILE_ID,
+        "name": "Environment",
+        "type": get_llm_provider_type(),
+        "model": get_llm_model(),
+        "temperature": get_llm_temperature(),
+        "max_tokens": get_llm_max_tokens(),
     }
-
-
-def _normalise_state(raw: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Validate and fill the current profile-based LLM state."""
-    if not isinstance(raw, dict) or not isinstance(raw.get("profiles"), dict) or not raw["profiles"]:
-        return _default_llm_state()
-
-    raw_profiles = raw["profiles"]
-    profiles: dict[str, dict[str, Any]] = {}
-    for profile_id, value in raw_profiles.items():
-        if not isinstance(value, dict):
-            continue
-        profile = {
-            "id": str(value.get("id") or profile_id),
-            "name": str(value.get("name") or profile_id),
-            "type": str(value.get("type") or "openai_compatible"),
-            "model": str(value.get("model") or ""),
-            "temperature": float(value.get("temperature", 0.3)),
-            "max_tokens": int(value.get("max_tokens", 8192)),
-        }
-        profiles[str(profile_id)] = profile
-
-    if not profiles:
-        return _default_llm_state()
-
-    routing = deepcopy(raw.get("routing"))
-    if not isinstance(routing, dict):
-        routing = deepcopy(_LLM_CONFIG_DEFAULTS["routing"])
-    routing.setdefault("enabled", False)
-    if not isinstance(routing.get("routes"), dict):
-        routing["routes"] = {}
-    for route, target in _LLM_CONFIG_DEFAULTS["routing"]["routes"].items():
-        routing["routes"].setdefault(route, deepcopy(target))
-
-    active_profile_id = str(raw.get("active_profile_id") or "")
-    if active_profile_id not in profiles:
-        active_profile_id = next(iter(profiles))
-    return {
-        "active_profile_id": active_profile_id,
-        "profiles": profiles,
-        "routing": routing,
-    }
+    profile["model_info"] = model_info(profile, profile["model"])
+    return profile
 
 
 def get_llm_state() -> dict[str, Any]:
-    """Get the complete secret-free, hot-reloadable profile configuration."""
-    return deepcopy(_runtime_llm_config)
+    """Return the secret-free LLM state derived exclusively from the environment."""
+    profile = _environment_profile()
+    public_profile = {key: value for key, value in profile.items() if key != "model_info"}
+    return {
+        "active_profile_id": _ENVIRONMENT_PROFILE_ID,
+        "profiles": {_ENVIRONMENT_PROFILE_ID: public_profile},
+        "routing": {"enabled": False, "routes": {}},
+    }
 
 
 def _read_api_key() -> str:
@@ -110,32 +111,29 @@ def get_llm_base_url() -> str:
     return configured.strip() or _DEFAULT_OPENAI_BASE_URL
 
 
+def _validate_llm_base_url(provider_type: str, base_url: str) -> None:
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("OPENAI_BASE_URL must be an absolute HTTP(S) URL")
+    if provider_type == "openai_compatible" and parsed.path.rstrip("/") == "":
+        raise ValueError("OPENAI_BASE_URL for an OpenAI-compatible provider must include its API path, usually /v1")
+
+
 def get_llm_config(
     profile_id: str | None = None,
     model: str | None = None,
     route: str | None = None,
 ) -> dict[str, Any]:
-    """Get one effective profile, respecting request-scoped selection."""
+    """Get the environment-owned profile, respecting a task snapshot when present."""
     scoped = current_llm_profile()
-    if scoped is not None and profile_id is None and model is None and route is None:
+    if scoped is not None:
         return scoped
-    state = get_llm_state()
-    profiles = state["profiles"]
-    selected_id = profile_id or state["active_profile_id"]
-    if route and state.get("routing", {}).get("enabled") and profile_id is None and model is None:
-        target = state.get("routing", {}).get("routes", {}).get(route, {})
-        selected_id = target.get("profile_id") or selected_id
-        model = model or target.get("model")
-    profile = deepcopy(profiles.get(selected_id) or profiles[state["active_profile_id"]])
-    selected_model = model or profile.get("model", "")
-    profile["profile_id"] = profile.get("id", selected_id)
-    profile["model"] = selected_model
-    info = model_info(profile, selected_model)
-    profile["temperature"] = info.get("temperature", profile.get("temperature", 0.3))
-    profile["max_tokens"] = info.get("max_tokens", profile.get("max_tokens", 8192))
-    profile["model_info"] = info
+    _ = (profile_id, model, route)  # Kept for compatibility with existing callers; overrides are intentionally ignored.
+    profile = _environment_profile()
+    profile["profile_id"] = _ENVIRONMENT_PROFILE_ID
     profile["api_key"] = _read_api_key()
     profile["base_url"] = get_llm_base_url()
+    _validate_llm_base_url(profile["type"], profile["base_url"])
     return profile
 
 
@@ -146,51 +144,9 @@ def resolve_llm_profile(
     route: str = "chat",
     auto: bool = False,
 ) -> dict[str, Any]:
-    """Resolve and snapshot a profile for one task."""
-    return get_llm_config(
-        profile_id=None if auto else profile_id,
-        model=None if auto else model,
-        route=route if auto else None,
-    )
-
-
-def save_llm_config(updates: dict) -> dict[str, Any]:
-    """Update the in-memory LLM configuration.
-
-    Args:
-        updates: Partial dict of non-secret profile settings to update.
-
-    Returns:
-        The full updated config dict.
-    """
-    if "profiles" in updates:
-        current = _normalise_state(updates)
-    else:
-        current = _normalise_state(_runtime_llm_config)
-        profile_id = str(updates.get("profile_id") or current["active_profile_id"])
-        profile = current["profiles"].setdefault(
-            profile_id,
-            {
-                "id": profile_id,
-                "name": profile_id,
-                "type": "openai_compatible",
-                "model": "",
-                "temperature": 0.3,
-                "max_tokens": 8192,
-            },
-        )
-        for key in ("name", "type", "model", "temperature", "max_tokens"):
-            if key in updates and updates[key] is not None:
-                profile[key] = updates[key]
-        if "active_profile_id" in updates and updates["active_profile_id"] in current["profiles"]:
-            current["active_profile_id"] = updates["active_profile_id"]
-        if "routing" in updates:
-            current["routing"] = updates["routing"]
-    _runtime_llm_config.clear()
-    _runtime_llm_config.update(_normalise_state(current))
-    active = get_llm_config()
-    logger.info("LLM config updated (profile={}, model={})", active["profile_id"], active["model"])
-    return get_llm_state()
+    """Resolve and snapshot the environment-owned profile for one task."""
+    _ = (profile_id, model, route, auto)
+    return get_llm_config()
 
 
 class Settings(BaseSettings):
@@ -200,10 +156,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # DeepSeek profile defaults.
-    deepseek_model: str = "deepseek-v4-flash"
+    # Environment-owned LLM settings. The frontend exposes these as read-only status.
+    llm_provider: str = "openai_compatible"
+    llm_model: str = "gpt-4o-mini"
+    llm_temperature: float = 0.3
+    llm_max_tokens: int = 8192
 
-    # Shared environment-owned connection settings for every LLM profile.
+    # Shared environment-owned connection settings.
     openai_api_key: str = ""
     openai_base_url: str = _DEFAULT_OPENAI_BASE_URL
 
@@ -219,6 +178,13 @@ class Settings(BaseSettings):
     # PostgreSQL runtime backend for durable multi-node deployments.
     database_path: str = "./data/cache.db"
     database_url: str | None = None  # optional Tortoise URL for shared persistence
+
+    # LangGraph owns these checkpoint tables/files.  Local mode deliberately
+    # uses a separate SQLite file so graph super-step writes do not contend
+    # with chat and market-cache transactions.
+    checkpoint_database_path: str = "./data/checkpoints.db"
+    checkpoint_database_url: str | None = None
+    checkpoint_retention_days: int = 30
 
     # S3-compatible artifact storage.  The backend proxies preview/download
     # requests, so objects do not need to be public.
@@ -268,9 +234,19 @@ class Settings(BaseSettings):
             return self.database_url
         return f"sqlite://{self.database_file_path.expanduser().resolve()}"
 
+    @property
+    def checkpoint_file_path(self) -> Path:
+        path = Path(self.checkpoint_database_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path.expanduser().resolve()
+
+    @property
+    def resolved_checkpoint_database_url(self) -> str | None:
+        """Return the configured PostgreSQL checkpoint URL, if any."""
+        return self.checkpoint_database_url or self.database_url
+
 
 settings = Settings()
-_runtime_llm_config.update(_default_llm_state())
 
 
 def configure_langsmith() -> None:

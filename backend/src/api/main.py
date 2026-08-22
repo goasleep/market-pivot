@@ -12,14 +12,12 @@ from api.routers import artifacts, automation, backtest, chat, config, health, m
 from application.automation import automation_scheduler
 from application.backtest_jobs import backtest_jobs
 from application.chat_service import chat_store, chat_task_manager
-from data.settings_store import load_llm_config
 from data.tortoise_db import close_database, init_database
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await init_database()
-    await load_llm_config()
     await chat_store.init()
     await chat_task_manager.start_worker()
     await backtest_jobs.start()

@@ -368,60 +368,20 @@ export async function getSystemStatus(): Promise<BreakerStatus> {
   return data.circuit_breakers;
 }
 
-// --- LLM Config APIs ---
+// --- Read-only LLM environment status ---
 
-export interface LLMModelInfo {
-  description: string;
-  max_tokens: number;
-  temperature?: number;
-  supports_tools?: boolean;
-  supports_reasoning?: boolean;
-}
-
-export interface LLMProfile {
-  id: string;
-  name: string;
-  type: string;
+export interface LLMConfig {
+  config_source: "environment";
+  provider_type: string;
   model: string;
   temperature: number;
   max_tokens: number;
-  available_models: Record<string, LLMModelInfo>;
-}
-
-export interface LLMConfig {
   api_key_set: boolean;
-  active_profile_id: string;
-  profiles: Record<string, LLMProfile>;
-  routing: {
-    enabled: boolean;
-    routes: Record<string, { profile_id: string; model: string }>;
-  };
   base_url: string;
-}
-
-export interface LLMConfigUpdate {
-  active_profile_id?: string;
-  profile_id?: string;
-  profile_name?: string;
-  provider_type?: string;
-  routing?: LLMConfig["routing"];
-  model?: string;
-  temperature?: number;
-  max_tokens?: number;
 }
 
 export async function getLLMConfig(): Promise<LLMConfig> {
   const res = await fetch(`${BASE_URL}/config/llm`);
   if (!res.ok) throw new Error(`Failed to fetch LLM config: ${res.statusText}`);
-  return res.json();
-}
-
-export async function updateLLMConfig(update: LLMConfigUpdate): Promise<LLMConfig> {
-  const res = await fetch(`${BASE_URL}/config/llm`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(update),
-  });
-  if (!res.ok) throw new Error(`Failed to update LLM config: ${res.statusText}`);
   return res.json();
 }

@@ -1,11 +1,7 @@
-from types import SimpleNamespace
-
 import pytest
-from pydantic import ValidationError
 
-from api.routers.config import LLMConfigUpdate, _profile_response, _response
+from api.routers.config import _response, router
 from config import get_llm_config, get_llm_state, resolve_llm_profile
-from data import settings_store
 from llm import factory, openai_compatible
 from llm_catalog import OPENAI_COMPATIBLE_MODELS, default_profiles, models_for_profile
 
@@ -22,7 +18,7 @@ def test_openai_compatible_profile_builds_chat_model(monkeypatch):
         openai_compatible,
         "get_llm_config",
         lambda **_: {
-            "profile_id": "openai",
+            "profile_id": "environment",
             "type": "openai_compatible",
             "api_key": "test-key",
             "base_url": "https://example.test/v1",
@@ -45,16 +41,36 @@ def test_openai_compatible_profile_builds_chat_model(monkeypatch):
     }
 
 
-def test_default_state_contains_profiles_and_routes():
-    state = get_llm_state()
-    assert {"deepseek", "openai"}.issubset(state["profiles"])
-    assert state["profiles"]["openai"]["type"] == "openai_compatible"
-    assert "analysis" in state["routing"]["routes"]
+def test_environment_state_contains_one_effective_profile(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("LLM_MODEL", "gpt-5.6-sol")
+    monkeypatch.setenv("LLM_TEMPERATURE", "0.2")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "64000")
 
-    selected = resolve_llm_profile("openai", "gpt-4o-mini")
-    assert selected["profile_id"] == "openai"
+    state = get_llm_state()
+    profile = state["profiles"]["environment"]
+
+    assert state["active_profile_id"] == "environment"
+    assert state["routing"] == {"enabled": False, "routes": {}}
+    assert profile == {
+        "id": "environment",
+        "name": "Environment",
+        "type": "openai_compatible",
+        "model": "gpt-5.6-sol",
+        "temperature": 0.2,
+        "max_tokens": 64000,
+    }
+
+
+def test_request_overrides_do_not_replace_environment_config(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("LLM_MODEL", "gpt-4o-mini")
+
+    selected = resolve_llm_profile("deepseek", "deepseek-chat", route="analysis", auto=True)
+
+    assert selected["profile_id"] == "environment"
+    assert selected["type"] == "openai_compatible"
     assert selected["model"] == "gpt-4o-mini"
-    assert get_llm_config(profile_id="openai")["type"] == "openai_compatible"
 
 
 def test_openai_profile_keeps_gpt_5_6_catalog_without_connection_settings():
@@ -70,85 +86,70 @@ def test_openai_profile_keeps_gpt_5_6_catalog_without_connection_settings():
         assert OPENAI_COMPATIBLE_MODELS[model_id]["supports_reasoning"] is True
 
 
-def test_all_profiles_resolve_shared_openai_api_key(monkeypatch):
-    original = get_llm_state()
+def test_environment_profile_resolves_openai_api_key(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "environment-secret")
-    try:
-        from config import save_llm_config
 
-        state = save_llm_config(original)
-
-        assert all("api_key" not in profile for profile in state["profiles"].values())
-        assert get_llm_config(profile_id="openai")["api_key"] == "environment-secret"
-        assert get_llm_config(profile_id="deepseek")["api_key"] == "environment-secret"
-    finally:
-        save_llm_config(original)
+    assert get_llm_config()["api_key"] == "environment-secret"
+    assert "api_key" not in get_llm_state()["profiles"]["environment"]
 
 
-def test_all_profiles_resolve_shared_openai_base_url(monkeypatch):
-    original = get_llm_state()
+def test_environment_profile_resolves_openai_base_url(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
-    try:
-        from config import save_llm_config
 
-        state = save_llm_config(original)
-
-        assert all("base_url" not in profile for profile in state["profiles"].values())
-        assert get_llm_config(profile_id="openai")["base_url"] == "https://gateway.example/v1"
-        assert get_llm_config(profile_id="deepseek")["base_url"] == "https://gateway.example/v1"
-    finally:
-        save_llm_config(original)
+    assert get_llm_config()["base_url"] == "https://gateway.example/v1"
+    assert "base_url" not in get_llm_state()["profiles"]["environment"]
 
 
 def test_blank_openai_base_url_uses_official_default(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "  ")
 
-    assert get_llm_config(profile_id="openai")["base_url"] == "https://api.openai.com/v1"
+    assert get_llm_config()["base_url"] == "https://api.openai.com/v1"
 
 
-def test_settings_response_exposes_environment_connection_status(monkeypatch):
+def test_openai_compatible_base_url_requires_api_path(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example")
+
+    with pytest.raises(ValueError, match="usually /v1"):
+        get_llm_config()
+
+
+def test_settings_response_exposes_read_only_environment_status(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("LLM_MODEL", "gpt-5.6-sol")
     monkeypatch.setenv("OPENAI_API_KEY", "environment-secret")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
-    profile = _profile_response(get_llm_state()["profiles"]["openai"])
+
     response = _response()
 
+    assert response.config_source == "environment"
+    assert response.provider_type == "openai_compatible"
+    assert response.model == "gpt-5.6-sol"
     assert response.api_key_set is True
     assert response.base_url == "https://gateway.example/v1"
-    assert set(response.model_dump()) == {"active_profile_id", "profiles", "routing", "api_key_set", "base_url"}
-    assert "api_key_set" not in profile
-    assert "base_url" not in profile
+    assert set(response.model_dump()) == {
+        "config_source",
+        "provider_type",
+        "model",
+        "temperature",
+        "max_tokens",
+        "api_key_set",
+        "base_url",
+    }
 
 
-@pytest.mark.asyncio
-async def test_settings_store_ignores_non_profile_payload(monkeypatch):
-    original = get_llm_state()
+def test_settings_router_is_read_only():
+    llm_routes = [route for route in router.routes if route.path == "/llm"]
 
-    async def fake_init_database():
-        return None
-
-    class FakeAppSetting:
-        @classmethod
-        async def get_or_none(cls, **_kwargs):
-            return SimpleNamespace(value='{"model":"unsupported-flat-config"}')
-
-    monkeypatch.setattr(settings_store, "init_database", fake_init_database)
-    monkeypatch.setattr(settings_store, "AppSetting", FakeAppSetting)
-
-    assert await settings_store.load_llm_config() == original
+    assert llm_routes
+    assert all("PUT" not in route.methods for route in llm_routes)
 
 
-def test_settings_rejects_plaintext_api_key():
-    with pytest.raises(ValidationError) as exc_info:
-        LLMConfigUpdate(api_key="must-not-be-persisted")
+def test_invalid_environment_provider_is_rejected(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "unsupported")
 
-    assert exc_info.value.errors()[0]["type"] == "extra_forbidden"
-
-
-def test_settings_rejects_persisted_base_url():
-    with pytest.raises(ValidationError) as exc_info:
-        LLMConfigUpdate(base_url="https://must-not-be-persisted.example/v1")
-
-    assert exc_info.value.errors()[0]["type"] == "extra_forbidden"
+    with pytest.raises(ValueError, match="LLM_PROVIDER"):
+        get_llm_config()
 
 
 def test_deepseek_named_model_does_not_override_openai_compatible_provider(monkeypatch):
