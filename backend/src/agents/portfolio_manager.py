@@ -11,6 +11,7 @@ from loguru import logger
 from agents.prompt_context import INVESTOR_CONTEXT
 from domain.decision_policy import DecisionValidator
 from llm import LLMService, get_llm_service
+from llm.context import select_conversation_history
 from models.schemas import (
     AgentReport,
     AssetType,
@@ -31,7 +32,8 @@ from models.schemas import (
 )
 from strategies.skill_manager import get_strategy_instructions, get_strategy_spec, register_strategy_spec
 
-SYSTEM_PROMPT = """You are a professional A-share portfolio manager.
+SYSTEM_PROMPT = (
+    """You are a professional A-share portfolio manager.
 You make the final trading decision based on all analyst reports.
 You synthesize technical, fundamental, sentiment analysis, debate outcome, and risk assessment.
 You must respond in Chinese.
@@ -117,7 +119,9 @@ The JSON must contain both a simplified decision and a detailed dashboard:
     }
   }
 }
-""" + INVESTOR_CONTEXT
+"""
+    + INVESTOR_CONTEXT
+)
 
 
 def _parse_dashboard(raw: dict) -> DecisionDashboard:
@@ -238,15 +242,7 @@ def _buy_plan_has_evidence(dashboard: DecisionDashboard) -> bool:
         return False
     if not battle.stop_loss < battle.entry_price < battle.take_profit:
         return False
-    return bool(
-        evidence
-        and all(
-            item.metric
-            and item.source
-            and item.as_of
-            for item in evidence
-        )
-    )
+    return bool(evidence and all(item.metric and item.source and item.as_of for item in evidence))
 
 
 async def decide(
@@ -294,14 +290,11 @@ async def decide(
 
     asset_type = AssetType(asset_type)
     asset_label = "A-share stock" if asset_type == AssetType.STOCK else f"{asset_type.value.upper()} fund"
-    context_text = "\n".join(
-        f"{item.get('role', 'user')}: {item.get('content', '')}"
-        for item in (conversation_history or [])[-8:]
-        if item.get("content")
-    )
     investor_text = "\n".join(f"{key}: {value}" for key, value in (investor_context or {}).items())
     market_facts = _market_facts(market_context, agent_reports)
-    prompt = f"""Make the final trading decision for the {asset_label} {ticker}.
+
+    def decision_prompt(context_text: str) -> str:
+        return f"""Make the final trading decision for the {asset_label} {ticker}.
 
 Current price: {current_price}
 
@@ -339,13 +332,23 @@ Make your final decision as JSON.
             market_regime=market_regime,
         )
         selected_spec = get_strategy_spec(strategy_name) if strategy_name else None
-        spec_text = (
-            json.dumps(selected_spec.model_dump(mode="json"), ensure_ascii=False)
-            if selected_spec
-            else "none"
-        )
-        prompt += f"\n\nExecutable strategy specification:\n{spec_text}\n"
+        spec_text = json.dumps(selected_spec.model_dump(mode="json"), ensure_ascii=False) if selected_spec else "none"
         full_system = SYSTEM_PROMPT + strategy_text
+        prompt_suffix = f"\n\nExecutable strategy specification:\n{spec_text}\n"
+        p0_prompt = decision_prompt("none") + prompt_suffix
+        history_selection = select_conversation_history(
+            conversation_history or [],
+            p0_messages=[
+                {"role": "system", "content": full_system},
+                {"role": "user", "content": p0_prompt},
+            ],
+        )
+        context_text = "\n".join(
+            f"{item.get('role', 'user')}: {item.get('content', '')}"
+            for item in history_selection.messages
+            if item.get("content")
+        )
+        prompt = decision_prompt(context_text or "none") + prompt_suffix
         llm_service = llm or get_llm_service()
         result = await llm_service.chat_json(prompt, system=full_system)
         dashboard = _parse_dashboard(result)

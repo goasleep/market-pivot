@@ -45,7 +45,7 @@ def test_environment_state_contains_one_effective_profile(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
     monkeypatch.setenv("LLM_MODEL", "gpt-5.6-sol")
     monkeypatch.setenv("LLM_TEMPERATURE", "0.2")
-    monkeypatch.setenv("LLM_MAX_TOKENS", "64000")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "4096")
 
     state = get_llm_state()
     profile = state["profiles"]["environment"]
@@ -53,13 +53,21 @@ def test_environment_state_contains_one_effective_profile(monkeypatch):
     assert state["active_profile_id"] == "environment"
     assert state["routing"] == {"enabled": False, "routes": {}}
     assert profile == {
+        "context_window": 128000,
         "id": "environment",
         "name": "Environment",
         "type": "openai_compatible",
         "model": "gpt-5.6-sol",
         "temperature": 0.2,
-        "max_tokens": 64000,
+        "max_tokens": 4096,
     }
+
+
+def test_environment_context_window_override_is_exposed(monkeypatch):
+    monkeypatch.setenv("LLM_CONTEXT_WINDOW", "32768")
+
+    assert get_llm_config()["context_window"] == 32768
+    assert get_llm_state()["profiles"]["environment"]["context_window"] == 32768
 
 
 def test_request_overrides_do_not_replace_environment_config(monkeypatch):
@@ -81,6 +89,8 @@ def test_openai_profile_keeps_gpt_5_6_catalog_without_connection_settings():
     assert "models" not in profile
     assert {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}.issubset(models)
     for model_id in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        assert OPENAI_COMPATIBLE_MODELS[model_id]["context_window"] == 128000
+        assert OPENAI_COMPATIBLE_MODELS[model_id]["max_output_tokens"] == 8192
         assert OPENAI_COMPATIBLE_MODELS[model_id]["max_tokens"] == 128000
         assert OPENAI_COMPATIBLE_MODELS[model_id]["supports_tools"] is True
         assert OPENAI_COMPATIBLE_MODELS[model_id]["supports_reasoning"] is True
@@ -132,6 +142,7 @@ def test_settings_response_exposes_read_only_environment_status(monkeypatch):
         "provider_type",
         "model",
         "temperature",
+        "context_window",
         "max_tokens",
         "api_key_set",
         "base_url",

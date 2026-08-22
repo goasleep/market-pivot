@@ -13,6 +13,7 @@ class LLMConfigResponse(BaseModel):
     provider_type: str
     model: str
     temperature: float
+    context_window: int
     max_tokens: int
     api_key_set: bool
     base_url: str
@@ -25,6 +26,7 @@ def _response() -> LLMConfigResponse:
         provider_type=config["type"],
         model=config["model"],
         temperature=config["temperature"],
+        context_window=config["context_window"],
         max_tokens=config["max_tokens"],
         api_key_set=llm_api_key_is_set(),
         base_url=config["base_url"],

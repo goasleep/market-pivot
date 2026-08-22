@@ -12,6 +12,7 @@ dependencies = [
     "langchain-core>=0.3.0",
     "langchain-deepseek>=0.1.0",
     "langchain-openai>=0.2.11",
+    "tiktoken>=0.7.0",
     "langfuse>=3.0.0",
     "akshare>=1.14.0",
     "mini-racer>=0.12.0; sys_platform != 'linux'",

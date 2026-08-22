@@ -22,7 +22,7 @@ def get_chat_model(
     info = cfg.get("model_info", {})
     selected_model = model or cfg["model"]
     effective_temperature = temperature if temperature is not None else info.get("temperature", cfg["temperature"])
-    effective_max_tokens = max_tokens if max_tokens is not None else info.get("max_tokens", cfg["max_tokens"])
+    effective_max_tokens = max_tokens if max_tokens is not None else cfg.get("max_tokens", info.get("max_tokens", 8192))
     return ChatOpenAI(
         model=selected_model,
         api_key=cfg["api_key"],

@@ -49,7 +49,9 @@ class ResearchService:
         if investor_context:
             state["investor_context"] = investor_context
         if conversation_history:
-            state["conversation_history"] = conversation_history[-12:]
+            # Preserve the complete source history in workflow state. The final
+            # model boundary applies the actual token budget with its full P0 prompt.
+            state["conversation_history"] = list(conversation_history)
         if market_context is not None:
             state["market_context"] = market_context
         if as_of_date is not None:

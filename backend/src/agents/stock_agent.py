@@ -24,6 +24,7 @@ from graph.agent_loop import (
     stream_agent_loop,
 )
 from graph.checkpointing import checkpoint_manager
+from llm.context import select_conversation_history
 from models.schemas import AssetType
 from observability import build_trace_config
 from tools.registry import build_artifact_tools, build_chat_tools
@@ -472,11 +473,14 @@ class AssetAgent:
             "系统支持查询模拟盘账户、持仓和订单；只有用户明确要求时才可创建或取消模拟盘订单，"
             "所有模拟盘操作都必须明确说明是纸面交易，禁止声称已经进行实盘交易。"
         )
-        messages: list[Any] = [
-            {"role": "system", "content": system},
-            *request.history[-12:],
-            {"role": "user", "content": request.message},
-        ]
+        system_message = {"role": "system", "content": system}
+        current_message = {"role": "user", "content": request.message}
+        history_selection = select_conversation_history(
+            request.history,
+            p0_messages=[system_message, current_message],
+            tools=tools,
+        )
+        messages: list[Any] = [system_message, *history_selection.messages, current_message]
         final_response = ""
         artifacts_generated = False
         chat_config = build_trace_config(

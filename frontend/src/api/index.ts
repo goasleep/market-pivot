@@ -593,6 +593,7 @@ export interface LLMConfig {
   provider_type: string;
   model: string;
   temperature: number;
+  context_window: number;
   max_tokens: number;
   api_key_set: boolean;
   base_url: string;

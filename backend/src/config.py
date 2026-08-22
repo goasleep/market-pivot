@@ -56,27 +56,59 @@ def get_llm_temperature() -> float:
 
 
 def get_llm_max_tokens() -> int:
-    """Return the output limit selected by LLM_MAX_TOKENS."""
-    value = _environment_value("LLM_MAX_TOKENS", str(settings.llm_max_tokens))
+    """Return the requested output limit, preferring the unambiguous new variable."""
+    preferred = os.getenv("LLM_MAX_OUTPUT_TOKENS")
+    if preferred is None and settings.llm_max_output_tokens is not None:
+        preferred = str(settings.llm_max_output_tokens)
+    value = preferred if preferred is not None else _environment_value("LLM_MAX_TOKENS", str(settings.llm_max_tokens))
+    value = value.strip()
     try:
         max_tokens = int(value)
     except ValueError as exc:
-        raise ValueError("LLM_MAX_TOKENS must be an integer") from exc
+        raise ValueError("LLM_MAX_OUTPUT_TOKENS must be an integer") from exc
     if max_tokens < 256:
-        raise ValueError("LLM_MAX_TOKENS must be at least 256")
+        raise ValueError("LLM_MAX_OUTPUT_TOKENS must be at least 256")
     return max_tokens
 
 
+def get_llm_context_window(default: int) -> int:
+    """Return the model input/output context window, with an optional environment override."""
+    configured_default = settings.llm_context_window or default
+    value = _environment_value("LLM_CONTEXT_WINDOW", str(configured_default))
+    try:
+        context_window = int(value)
+    except ValueError as exc:
+        raise ValueError("LLM_CONTEXT_WINDOW must be an integer") from exc
+    if context_window < 4096:
+        raise ValueError("LLM_CONTEXT_WINDOW must be at least 4096")
+    return context_window
+
+
 def _environment_profile() -> dict[str, Any]:
+    requested_output_tokens = get_llm_max_tokens()
     profile = {
         "id": _ENVIRONMENT_PROFILE_ID,
         "name": "Environment",
         "type": get_llm_provider_type(),
         "model": get_llm_model(),
         "temperature": get_llm_temperature(),
-        "max_tokens": get_llm_max_tokens(),
+        "max_tokens": requested_output_tokens,
     }
     profile["model_info"] = model_info(profile, profile["model"])
+    profile["context_window"] = get_llm_context_window(int(profile["model_info"]["context_window"]))
+    profile["model_info"]["context_window"] = profile["context_window"]
+    model_output_limit = int(profile["model_info"].get("max_output_tokens", requested_output_tokens))
+    effective_output_tokens = min(requested_output_tokens, model_output_limit)
+    if effective_output_tokens != requested_output_tokens:
+        logger.warning(
+            "Configured output limit {} exceeds model catalog limit {}; using {}",
+            requested_output_tokens,
+            model_output_limit,
+            effective_output_tokens,
+        )
+    profile["max_tokens"] = effective_output_tokens
+    profile["model_info"]["max_tokens"] = effective_output_tokens
+    profile["model_info"]["max_output_tokens"] = effective_output_tokens
     return profile
 
 
@@ -161,6 +193,8 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     llm_temperature: float = 0.3
     llm_max_tokens: int = 8192
+    llm_max_output_tokens: int | None = None
+    llm_context_window: int = 0
 
     # Shared environment-owned connection settings.
     openai_api_key: str = ""

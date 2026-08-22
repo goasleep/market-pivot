@@ -15,7 +15,8 @@ const environmentVariables = [
   ["LLM_PROVIDER", "Provider adapter"],
   ["LLM_MODEL", "Model ID"],
   ["LLM_TEMPERATURE", "Generation temperature"],
-  ["LLM_MAX_TOKENS", "Maximum output tokens"],
+  ["LLM_CONTEXT_WINDOW", "Model context window"],
+  ["LLM_MAX_OUTPUT_TOKENS", "Maximum output tokens"],
   ["OPENAI_API_KEY", "Shared API credential"],
   ["OPENAI_BASE_URL", "OpenAI-compatible endpoint"],
 ] as const;
@@ -105,6 +106,11 @@ export function SettingsPage() {
           <StatusRow label="Max Output Tokens">
             <code className="text-xs">
               {config?.max_tokens.toLocaleString("en-US") || "—"}
+            </code>
+          </StatusRow>
+          <StatusRow label="Context Window">
+            <code className="text-xs">
+              {config?.context_window.toLocaleString("en-US") || "—"}
             </code>
           </StatusRow>
           <StatusRow label="Base URL">

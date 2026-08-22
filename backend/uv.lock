@@ -49,6 +49,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "requests" },
     { name = "sse-starlette" },
+    { name = "tiktoken" },
     { name = "tortoise-orm" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -89,6 +90,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "requests", specifier = ">=2.32.0" },
     { name = "sse-starlette", specifier = ">=2.1.0" },
+    { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "tortoise-orm", specifier = ">=1.1.7" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]

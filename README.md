@@ -64,7 +64,8 @@ cp .env.example .env
 ```
 
 LLM 配置只从环境变量读取，不会写入数据库。使用 `LLM_PROVIDER` 选择 `deepseek` 或
-`openai_compatible` 适配器，使用 `LLM_MODEL`、`LLM_TEMPERATURE` 和 `LLM_MAX_TOKENS`
+`openai_compatible` 适配器，使用 `LLM_MODEL`、`LLM_TEMPERATURE`、`LLM_CONTEXT_WINDOW` 和
+`LLM_MAX_OUTPUT_TOKENS`
 配置模型参数；连接信息使用 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`。`OPENAI_BASE_URL`
 默认是 `https://api.openai.com/v1`，使用其他 OpenAI-compatible 服务时在 `.env` 中修改它。
 前端 **Settings** 页面只读展示当前生效配置。修改这些环境变量后需要重启后端。

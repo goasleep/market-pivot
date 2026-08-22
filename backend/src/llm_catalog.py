@@ -7,6 +7,8 @@ from typing import Any
 
 DEEPSEEK_MODELS: dict[str, dict[str, Any]] = {
     "deepseek-v4-flash": {
+        "context_window": 1000000,
+        "max_output_tokens": 384000,
         "max_tokens": 8192,
         "temperature": 0.3,
         "description": "DeepSeek V4 Flash for fast general-purpose analysis",
@@ -14,6 +16,8 @@ DEEPSEEK_MODELS: dict[str, dict[str, Any]] = {
         "supports_reasoning": True,
     },
     "deepseek-chat": {
+        "context_window": 65536,
+        "max_output_tokens": 8192,
         "max_tokens": 8192,
         "temperature": 0.3,
         "description": "General purpose chat model (V3)",
@@ -21,6 +25,8 @@ DEEPSEEK_MODELS: dict[str, dict[str, Any]] = {
         "supports_reasoning": False,
     },
     "deepseek-reasoner": {
+        "context_window": 65536,
+        "max_output_tokens": 16384,
         "max_tokens": 16384,
         "temperature": 0.0,
         "description": "Reasoning model (R1) for complex analysis",
@@ -31,6 +37,8 @@ DEEPSEEK_MODELS: dict[str, dict[str, Any]] = {
 
 OPENAI_COMPATIBLE_MODELS: dict[str, dict[str, Any]] = {
     "gpt-5.6-sol": {
+        "context_window": 128000,
+        "max_output_tokens": 8192,
         "max_tokens": 128000,
         "temperature": 0.3,
         "description": "OpenAI GPT-5.6 Sol for frontier reasoning and coding",
@@ -38,6 +46,8 @@ OPENAI_COMPATIBLE_MODELS: dict[str, dict[str, Any]] = {
         "supports_reasoning": True,
     },
     "gpt-5.6-terra": {
+        "context_window": 128000,
+        "max_output_tokens": 8192,
         "max_tokens": 128000,
         "temperature": 0.3,
         "description": "OpenAI GPT-5.6 Terra for balanced intelligence and cost",
@@ -45,6 +55,8 @@ OPENAI_COMPATIBLE_MODELS: dict[str, dict[str, Any]] = {
         "supports_reasoning": True,
     },
     "gpt-5.6-luna": {
+        "context_window": 128000,
+        "max_output_tokens": 8192,
         "max_tokens": 128000,
         "temperature": 0.3,
         "description": "OpenAI GPT-5.6 Luna for cost-sensitive, high-volume workloads",
@@ -52,6 +64,8 @@ OPENAI_COMPATIBLE_MODELS: dict[str, dict[str, Any]] = {
         "supports_reasoning": True,
     },
     "gpt-4o-mini": {
+        "context_window": 128000,
+        "max_output_tokens": 8192,
         "max_tokens": 8192,
         "temperature": 0.3,
         "description": "OpenAI GPT-4o mini",
@@ -59,6 +73,8 @@ OPENAI_COMPATIBLE_MODELS: dict[str, dict[str, Any]] = {
         "supports_reasoning": False,
     },
     "gpt-4o": {
+        "context_window": 128000,
+        "max_output_tokens": 8192,
         "max_tokens": 8192,
         "temperature": 0.3,
         "description": "OpenAI GPT-4o",
@@ -98,6 +114,10 @@ def models_for_profile(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
     selected = str(profile.get("model") or "")
     if selected and selected not in models:
         models[selected] = {
+            "context_window": int(
+                profile.get("context_window") or max(16384, int(profile.get("max_tokens", 8192)) * 2)
+            ),
+            "max_output_tokens": int(profile.get("max_tokens", 8192)),
             "max_tokens": int(profile.get("max_tokens", 8192)),
             "temperature": float(profile.get("temperature", 0.3)),
             "description": "Custom model",
@@ -113,6 +133,8 @@ def model_info(profile: dict[str, Any], model: str | None = None) -> dict[str, A
     if isinstance(info, dict):
         return dict(info)
     return {
+        "context_window": int(profile.get("context_window") or max(16384, int(profile.get("max_tokens", 8192)) * 2)),
+        "max_output_tokens": int(profile.get("max_tokens", 8192)),
         "max_tokens": int(profile.get("max_tokens", 8192)),
         "temperature": float(profile.get("temperature", 0.3)),
         "description": "Custom model",

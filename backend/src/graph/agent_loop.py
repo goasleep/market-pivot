@@ -22,6 +22,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
 
+from llm.context import select_messages_for_model
 from llm.service import get_llm_service
 from tools.policies import tool_requires_confirmation
 
@@ -110,9 +111,10 @@ async def decide_next_action(
     runtime: Runtime[AgentLoopContext],
 ) -> dict[str, Any]:
     """Ask the model whether to answer or call one or more tools."""
+    context = select_messages_for_model(state["messages"], tools=runtime.context.tools)
     response = await asyncio.wait_for(
         get_llm_service().chat_with_tools(
-            state["messages"],
+            context.messages,
             runtime.context.tools,
             temperature=0.2,
         ),

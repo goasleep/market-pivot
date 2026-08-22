@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.output_parsers import JsonOutputParser
 from loguru import logger
 
+from llm.context import select_messages_for_model
 from llm.factory import get_chat_model
 
 _GENERATED_TEXT_REPLACEMENTS = (
@@ -133,13 +134,14 @@ class LLMService:
         messages.append({"role": "user", "content": prompt})
 
         try:
+            context = select_messages_for_model(messages, model=model, max_output_tokens=max_tokens)
             response = await self.get_model(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 profile_id=profile_id,
                 route=route,
-            ).ainvoke(_to_messages(messages))
+            ).ainvoke(_to_messages(context.messages))
             content = _normalize_generated_financial_text(_message_text(response))
             logger.debug("LLM response ({}): {} chars", model or "configured", len(content))
             return content
@@ -164,13 +166,14 @@ class LLMService:
         messages.append({"role": "user", "content": prompt})
 
         try:
+            context = select_messages_for_model(messages, model=model, max_output_tokens=max_tokens)
             response = self.get_model(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 profile_id=profile_id,
                 route=route,
-            ).invoke(_to_messages(messages))
+            ).invoke(_to_messages(context.messages))
             content = _normalize_generated_financial_text(_message_text(response))
             logger.debug("Synchronous LLM response ({}): {} chars", model or "configured", len(content))
             return content
@@ -222,12 +225,13 @@ class LLMService:
         route: str | None = None,
     ) -> str:
         """Invoke the underlying LangChain model with role/content messages."""
+        context = select_messages_for_model(messages, model=model)
         response = await self.get_model(
             model=model,
             temperature=temperature,
             profile_id=profile_id,
             route=route,
-        ).ainvoke(_to_messages(messages))
+        ).ainvoke(_to_messages(context.messages))
         return _normalize_generated_financial_text(_message_text(response))
 
     async def chat_with_tools(
@@ -245,6 +249,7 @@ class LLMService:
         responsible for executing returned tool calls and feeding ToolMessage
         results back into the conversation.
         """
+        context = select_messages_for_model(messages, tools=tools, model=model)
         bound_model = self.get_model(
             model=model,
             temperature=temperature,
@@ -252,7 +257,7 @@ class LLMService:
             profile_id=profile_id,
             route=route,
         ).bind_tools(tools)
-        response = await bound_model.ainvoke(_to_messages(messages))
+        response = await bound_model.ainvoke(_to_messages(context.messages))
         return _normalize_generated_message(response)
 
 
