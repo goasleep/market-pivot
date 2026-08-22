@@ -109,6 +109,35 @@ def test_research_plan_card_uses_stable_statuses_and_surface_updates():
     assert "Revision 2" in data["meta"]
 
 
+def test_research_plan_card_displays_failure_recovery_adjustment():
+    messages = render_research_plan(
+        {
+            "objective": "回测 510300",
+            "depth": "standard",
+            "revision": 2,
+            "status": "running",
+            "progress": 50,
+            "steps": [
+                {
+                    "title": "执行回测",
+                    "status": "pending",
+                    "recovery": {
+                        "action": "adjust",
+                        "summary": "修正不受支持的指标名称后重新调用。",
+                    },
+                }
+            ],
+        },
+        "research-plan-recovery",
+        include_create=False,
+    )
+
+    components = messages[0]["updateComponents"]["components"]
+    step = next(item for item in components if item.get("component") == "PipelineStep")
+    assert step["status"] == "pending"
+    assert step["detail"] == "反思后调整：修正不受支持的指标名称后重新调用。"
+
+
 def test_historical_prices_render_as_inline_trend_chart_and_table():
     messages = render_tool_result(
         "get_historical_prices",

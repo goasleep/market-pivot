@@ -25,6 +25,7 @@ from models.research_plan import (
     ResearchPlan,
     ResearchStep,
     ResearchStepKind,
+    StepRecovery,
     StepResult,
 )
 from models.schemas import AssetType
@@ -56,15 +57,55 @@ class ResearchPlanContext:
     tools: dict[str, StructuredTool]
 
 
+class ResearchToolExecutionError(RuntimeError):
+    """A tool observation that retains safe call context for recovery."""
+
+    def __init__(self, tool_name: str, args: dict[str, Any], message: str):
+        super().__init__(message)
+        self.tool_name = tool_name
+        self.tool_args = _compact(args)
+
+
 DEPTH_BUDGETS = {
-    "quick": ResearchBudget(max_steps=3, max_tool_calls=4, max_replans=0, deadline_seconds=300),
+    "quick": ResearchBudget(max_steps=3, max_tool_calls=4, max_replans=1, deadline_seconds=300),
     "standard": ResearchBudget(max_steps=8, max_tool_calls=16, max_replans=1, deadline_seconds=900),
     "deep": ResearchBudget(max_steps=16, max_tool_calls=32, max_replans=2, deadline_seconds=1800),
 }
 DEPTH_STEP_RANGES = {"quick": (1, 3), "standard": (4, 8), "deep": (9, 16)}
 
-LONG_STEP_KINDS = {"backtest", "comprehensive_analysis", "report"}
+REFLECTABLE_LONG_STEP_KINDS = {"backtest", "comprehensive_analysis"}
+SINGLE_ATTEMPT_STEP_KINDS = {"report"}
 DEEP_TERMS = ("深度", "全面", "系统", "多源", "调研报告", "deep research")
+
+RECOVERY_INPUT_RULES: dict[str, dict[str, str]] = {
+    "price_history": {"limit": "20 到 500 的整数"},
+    "fund_nav": {"limit": "20 到 500 的整数"},
+    "technical": {"limit": "20 到 500 的整数"},
+    "news": {
+        "query": "不超过 500 字的检索词",
+        "num_results": "1 到 20 的整数",
+        "freshness": "搜索工具支持的时间过滤表达式",
+    },
+    "methodology": {"query": "不超过 500 字的检索词", "limit": "1 到 10 的整数"},
+    "backtest": {
+        "start_date": "YYYY-MM-DD，必须早于 end_date",
+        "end_date": "YYYY-MM-DD，不能晚于研究截止日",
+        "objective": "保留用户原目标，并补充解决错误所需的约束，不超过 2000 字",
+        "execution_mode": "agent、comparison 或 sandbox",
+        "initial_capital": "1000 到 1000000000 的数值",
+        "decision_interval": "1 到 250 的整数",
+    },
+    "risk": {
+        "stop_loss_pct": "0 到 0.5 的小数",
+        "take_profit_pct": "0 到 2 的小数",
+        "position_size_pct": "0 到 1 的小数",
+    },
+}
+
+
+def _effective_max_attempts(step: ResearchStep) -> int:
+    """Upgrade legacy read-only checkpoints without changing write-side steps."""
+    return 2 if step.kind in REFLECTABLE_LONG_STEP_KINDS else step.max_attempts
 
 
 def classify_depth(request: dict[str, Any]) -> str:
@@ -169,7 +210,7 @@ def _fallback_steps(request: dict[str, Any], depth: str) -> list[dict[str, Any]]
         steps.extend(
             [
                 _step("methodology", "确定可复现的策略假设"),
-                _step("backtest", "执行历史回测并保存实验结果", ["price_history", "methodology"], attempts=1),
+                _step("backtest", "执行历史回测并保存实验结果", ["price_history", "methodology"]),
             ]
         )
     else:
@@ -188,7 +229,7 @@ def _fallback_steps(request: dict[str, Any], depth: str) -> list[dict[str, Any]]
                 "comprehensive_analysis",
                 "运行多角色综合分析、辩论与风控",
                 comprehensive_dependencies,
-                attempts=1,
+                attempts=2,
             )
         )
     if depth == "deep" and not any(step["kind"] == "technical" for step in steps):
@@ -249,7 +290,12 @@ def _normalize_steps(raw: Any, request: dict[str, Any], depth: str) -> list[dict
         value.setdefault("depends_on", [])
         value.setdefault("inputs", {})
         value.setdefault("success_criteria", ["返回带来源和数据状态的可审计结果"])
-        value.setdefault("max_attempts", 1 if value.get("kind") in LONG_STEP_KINDS else 2)
+        if value.get("kind") in SINGLE_ATTEMPT_STEP_KINDS:
+            value["max_attempts"] = 1
+        elif value.get("kind") in REFLECTABLE_LONG_STEP_KINDS:
+            value["max_attempts"] = 2
+        else:
+            value.setdefault("max_attempts", 2)
         normalized.append(value)
     return normalized or _fallback_steps(request, depth)
 
@@ -262,8 +308,8 @@ def _validate_plan_contract(
     minimum, maximum = DEPTH_STEP_RANGES[plan.depth]
     if not minimum <= len(plan.steps) <= min(maximum, budget.max_steps):
         raise ValueError(f"研究计划不符合 {plan.depth} 深度的步骤数预算")
-    if any(step.kind in LONG_STEP_KINDS and step.max_attempts != 1 for step in plan.steps):
-        raise ValueError("回测、综合分析和报告步骤只允许执行一次")
+    if any(step.kind in SINGLE_ATTEMPT_STEP_KINDS and step.max_attempts != 1 for step in plan.steps):
+        raise ValueError("带外部写入副作用的报告步骤只允许执行一次")
     if plan.asset_type in {AssetType.ETF, AssetType.LOF} and any(
         step.kind in {"technical", "comprehensive_analysis", "backtest", "comparison", "news"}
         for step in plan.steps
@@ -297,6 +343,7 @@ async def plan_research(state: ResearchPlanState) -> dict[str, Any]:
                 "步骤必须构成无环依赖图",
                 "市场数值必须由结构化数据步骤提供",
                 "最终结论必须依赖证据步骤",
+                "回测和综合分析步骤 max_attempts=2，报告步骤 max_attempts=1",
             ],
         },
         ensure_ascii=False,
@@ -493,16 +540,259 @@ def _find_price(results: dict[str, dict[str, Any]]) -> float | None:
     return walk(results)
 
 
+def _classify_failure(error: str) -> str:
+    """Classify a public tool error before deciding whether reflection is useful."""
+    text = error.lower()
+    if any(
+        token in text
+        for token in (
+            "user_denied",
+            "unauthorized",
+            "forbidden",
+            "permission",
+            "用户拒绝",
+            "没有权限",
+            "权限不足",
+            "工具不可用",
+            "不支持的研究步骤",
+        )
+    ):
+        return "terminal"
+    if any(
+        token in text
+        for token in (
+            "timeout",
+            "timed out",
+            "rate limit",
+            "429",
+            "connection",
+            "temporarily",
+            "service unavailable",
+            "超时",
+            "限流",
+            "网络",
+            "连接失败",
+            "暂时不可用",
+            "服务繁忙",
+        )
+    ):
+        return "transient"
+    if any(
+        token in text
+        for token in (
+            "invalid",
+            "unsupported",
+            "validation",
+            "schema",
+            "required",
+            "missing",
+            "argument",
+            "parameter",
+            "校验",
+            "验证",
+            "参数",
+            "缺少",
+            "不能为空",
+            "不受支持",
+            "指标",
+            "格式",
+        )
+    ):
+        return "correctable"
+    return "unknown"
+
+
+def _bounded_number(value: Any, minimum: float, maximum: float, *, integer: bool = False) -> int | float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not minimum <= number <= maximum:
+        return None
+    return int(number) if integer else number
+
+
+def _sanitize_recovery_patch(
+    step: ResearchStep,
+    raw_patch: Any,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep LLM recovery changes inside the public, read-only research contract."""
+    if not isinstance(raw_patch, dict):
+        return {}
+    allowed = RECOVERY_INPUT_RULES.get(step.kind, {})
+    patch = {key: value for key, value in raw_patch.items() if key in allowed}
+    sanitized: dict[str, Any] = {}
+
+    limit_ranges = {
+        "price_history": (20, 500),
+        "fund_nav": (20, 500),
+        "technical": (20, 500),
+        "methodology": (1, 10),
+    }
+    if "limit" in patch and step.kind in limit_ranges:
+        value = _bounded_number(patch["limit"], *limit_ranges[step.kind], integer=True)
+        if value is not None:
+            sanitized["limit"] = value
+    if step.kind == "news":
+        if isinstance(patch.get("query"), str) and patch["query"].strip():
+            sanitized["query"] = patch["query"].strip()[:500]
+        value = _bounded_number(patch.get("num_results"), 1, 20, integer=True)
+        if value is not None:
+            sanitized["num_results"] = value
+        if isinstance(patch.get("freshness"), str) and patch["freshness"].strip():
+            sanitized["freshness"] = patch["freshness"].strip()[:100]
+    if step.kind == "methodology" and isinstance(patch.get("query"), str) and patch["query"].strip():
+        sanitized["query"] = patch["query"].strip()[:500]
+    if step.kind == "backtest":
+        original_objective = str(request.get("message", "")).strip()
+        if isinstance(patch.get("objective"), str) and patch["objective"].strip():
+            proposed = patch["objective"].strip()
+            if original_objective and original_objective not in proposed:
+                proposed = f"{original_objective}\n工具修复约束：{proposed}"
+            sanitized["objective"] = proposed[:2000]
+        mode = str(patch.get("execution_mode", "")).strip().lower()
+        tickers = [str(item) for item in request.get("tickers", [])]
+        compares_strategies = "策略" in original_objective and any(
+            term in original_objective for term in ("不同", "多个", "几个", "多种", "对比", "比较")
+        )
+        if mode in {"agent", "comparison", "sandbox"}:
+            if len(tickers) != 1 and mode != "agent":
+                mode = ""
+            elif compares_strategies and mode != "comparison":
+                mode = ""
+        if mode:
+            sanitized["execution_mode"] = mode
+        capital = _bounded_number(patch.get("initial_capital"), 1_000, 1_000_000_000)
+        if capital is not None:
+            sanitized["initial_capital"] = capital
+        interval = _bounded_number(patch.get("decision_interval"), 1, 250, integer=True)
+        if interval is not None:
+            sanitized["decision_interval"] = interval
+
+        cutoff_text = str(request.get("as_of_date") or date.today().isoformat())
+        current_end = str(step.inputs.get("end_date") or cutoff_text)
+        proposed_end = str(patch.get("end_date") or current_end)
+        proposed_start = str(patch.get("start_date") or step.inputs.get("start_date") or "")
+        try:
+            cutoff = date.fromisoformat(cutoff_text)
+            end = date.fromisoformat(proposed_end)
+            start = date.fromisoformat(proposed_start) if proposed_start else None
+        except ValueError:
+            start = None
+            end = None
+            cutoff = None
+        if end is not None and cutoff is not None and end <= cutoff:
+            if "end_date" in patch:
+                sanitized["end_date"] = end.isoformat()
+            if start is not None and start < end and "start_date" in patch:
+                sanitized["start_date"] = start.isoformat()
+    if step.kind == "risk":
+        for key, minimum, maximum in (
+            ("stop_loss_pct", 0, 0.5),
+            ("take_profit_pct", 0, 2),
+            ("position_size_pct", 0, 1),
+        ):
+            value = _bounded_number(patch.get(key), minimum, maximum)
+            if value is not None:
+                sanitized[key] = value
+    return sanitized
+
+
+async def _reflect_on_failure(
+    step: ResearchStep,
+    result: StepResult,
+    state: ResearchPlanState,
+) -> StepRecovery:
+    error = str(result.error or "工具执行失败")[:500]
+    classification = _classify_failure(error)
+    if classification == "terminal":
+        return StepRecovery(
+            attempt=result.attempt,
+            classification="terminal",
+            action="abort",
+            summary="该错误涉及权限、用户拒绝或不可用能力，已停止自动重试。",
+            error=error,
+        )
+    if classification == "transient":
+        return StepRecovery(
+            attempt=result.attempt,
+            classification="transient",
+            action="retry",
+            summary="检测到临时网络或服务错误，将在预算内使用原参数重试一次。",
+            error=error,
+        )
+
+    allowed_inputs = RECOVERY_INPUT_RULES.get(step.kind, {})
+    prompt = json.dumps(
+        {
+            "user_objective": state.get("request", {}).get("message", ""),
+            "asset_type": state.get("request", {}).get("asset_type", "stock"),
+            "tickers": state.get("request", {}).get("tickers", []),
+            "failed_step": step.model_dump(mode="json"),
+            "failed_tool_call": result.failure_context,
+            "attempt": result.attempt,
+            "error": error,
+            "classification": classification,
+            "allowed_input_patch": allowed_inputs,
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+    try:
+        raw = await get_llm_service().chat_json(
+            prompt,
+            system=(
+                "你是工具失败恢复控制器。只返回 JSON："
+                "{action:'retry|adjust|abort',summary:'公开的简短调整说明',input_patch:{}}。"
+                "不要输出内部思维链。必须保持用户标的、资产类型和研究目标，不得请求实盘交易或扩大权限；"
+                "input_patch 只能使用 allowed_input_patch 中的字段。参数可修正时选 adjust；"
+                "原样重试可能成功时选 retry；无法安全恢复时选 abort。"
+            ),
+        )
+    except Exception as exc:
+        logger.warning("Research recovery reflection failed; using bounded retry: {}", exc)
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    action = str(raw.get("action") or "retry").lower()
+    if action not in {"retry", "adjust", "abort"}:
+        action = "retry"
+    patch = _sanitize_recovery_patch(step, raw.get("input_patch"), state.get("request", {}))
+    if action == "adjust" and not patch:
+        action = "retry"
+    summary = str(raw.get("summary") or "").strip()[:500] or "已检查失败原因，将在安全预算内重试一次。"
+    return StepRecovery(
+        attempt=result.attempt,
+        classification=classification,
+        action=action,
+        summary=summary,
+        error=error,
+        input_patch=patch if action == "adjust" else {},
+    )
+
+
 async def _call_tool(context: ResearchPlanContext, name: str, args: dict[str, Any]) -> dict[str, Any]:
     tool = context.tools.get(name)
     if tool is None:
-        raise ValueError(f"研究步骤需要的工具不可用: {name}")
+        raise ResearchToolExecutionError(name, args, f"研究步骤需要的工具不可用: {name}")
     timeout = tool_timeout_seconds(name)
-    raw = await asyncio.wait_for(tool.ainvoke(args), timeout=timeout)
+    try:
+        raw = await asyncio.wait_for(tool.ainvoke(args), timeout=timeout)
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError as exc:
+        raise ResearchToolExecutionError(name, args, f"工具 {name} 执行超时") from exc
+    except Exception as exc:
+        raise ResearchToolExecutionError(name, args, str(exc)[:500] or type(exc).__name__) from exc
     try:
         payload = json.loads(str(raw))
     except json.JSONDecodeError:
         payload = {"value": str(raw)}
+    if isinstance(payload, dict) and payload.get("ok") is False:
+        error = payload.get("error")
+        message = error.get("message") if isinstance(error, dict) else error
+        raise ResearchToolExecutionError(name, args, str(message or "工具返回失败状态"))
     return payload if isinstance(payload, dict) else {"value": payload}
 
 
@@ -523,52 +813,104 @@ async def _execute_step(
             return await _call_tool(context, "compare_quotes", {"tickers": tickers, "asset_type": asset_type})
         return await _call_tool(context, "get_realtime_quote", common)
     if step.kind == "price_history":
+        limit = int(step.inputs.get("limit") or 120)
         payloads = await asyncio.gather(
             *(
-                _call_tool(context, "get_historical_prices", {"ticker": item, "asset_type": asset_type, "limit": 120})
+                _call_tool(
+                    context,
+                    "get_historical_prices",
+                    {"ticker": item, "asset_type": asset_type, "limit": limit},
+                )
                 for item in tickers[:10]
             )
         )
         return {"data_type": "price_history_collection", "items": payloads}
     if step.kind == "fund_nav":
+        limit = int(step.inputs.get("limit") or 120)
         payloads = await asyncio.gather(
             *(
-                _call_tool(context, "get_fund_nav_history", {"ticker": item, "asset_type": asset_type, "limit": 120})
+                _call_tool(
+                    context,
+                    "get_fund_nav_history",
+                    {"ticker": item, "asset_type": asset_type, "limit": limit},
+                )
                 for item in tickers[:10]
             )
         )
         return {"data_type": "fund_nav_collection", "items": payloads}
     if step.kind == "technical":
+        limit = int(step.inputs.get("limit") or 120)
         payloads = await asyncio.gather(
             *(
-                _call_tool(context, "compute_technical_indicators", {"ticker": item, "asset_type": asset_type})
+                _call_tool(
+                    context,
+                    "compute_technical_indicators",
+                    {"ticker": item, "asset_type": asset_type, "limit": limit},
+                )
                 for item in tickers[:10]
             )
         )
         return {"data_type": "technical_collection", "items": payloads}
     if step.kind == "news":
-        query = f"{' '.join(tickers)} {asset_type} 最新新闻 公告 风险 催化 {request.get('message', '')}"
-        return await _call_tool(context, "search_web", {"query": query, "num_results": 10, "freshness": "qdr:m"})
+        query = str(
+            step.inputs.get("query")
+            or f"{' '.join(tickers)} {asset_type} 最新新闻 公告 风险 催化 {request.get('message', '')}"
+        )
+        return await _call_tool(
+            context,
+            "search_web",
+            {
+                "query": query,
+                "num_results": int(step.inputs.get("num_results") or 10),
+                "freshness": str(step.inputs.get("freshness") or "qdr:m"),
+            },
+        )
     if step.kind == "methodology":
         if str(request.get("intent")) == "strategies":
             return await _call_tool(context, "list_trading_strategies", {})
         return await _call_tool(
             context,
             "search_methodology",
-            {"query": str(request.get("message", "")), "asset_type": asset_type, "limit": 5},
+            {
+                "query": str(step.inputs.get("query") or request.get("message", "")),
+                "asset_type": asset_type,
+                "limit": int(step.inputs.get("limit") or 5),
+            },
         )
     if step.kind == "comparison":
         return await _call_tool(context, "compare_quotes", {"tickers": tickers, "asset_type": asset_type})
     if step.kind == "backtest":
-        end_date = str(request.get("as_of_date") or date.today().isoformat())
-        objective = str(request.get("message", ""))
+        end_date = str(step.inputs.get("end_date") or request.get("as_of_date") or date.today().isoformat())
+        objective = str(step.inputs.get("objective") or request.get("message", ""))
         compares_strategies = "策略" in objective and any(
             term in objective for term in ("不同", "多个", "几个", "对比", "比较")
         )
         sandbox_requested = any(term in objective.lower() for term in ("python", "代码", "沙盒", "自定义因子"))
+        execution_mode = str(step.inputs.get("execution_mode") or "").lower()
+        if execution_mode == "comparison":
+            compares_strategies = True
+            sandbox_requested = False
+        elif execution_mode == "sandbox":
+            sandbox_requested = True
+            compares_strategies = False
+        elif execution_mode == "agent":
+            sandbox_requested = False
+            compares_strategies = False
         default_days = 3652 if compares_strategies else 1826 if sandbox_requested else 365
         start_date = str(
             step.inputs.get("start_date") or (date.fromisoformat(end_date) - timedelta(days=default_days)).isoformat()
+        )
+        shared_backtest_args = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "asset_type": asset_type,
+        }
+        if "initial_capital" in step.inputs:
+            shared_backtest_args["initial_capital"] = float(step.inputs["initial_capital"])
+        interval_args = (
+            {"decision_interval": int(step.inputs["decision_interval"])}
+            if "decision_interval" in step.inputs
+            else {}
         )
         if len(tickers) == 1 and sandbox_requested:
             return await _call_tool(
@@ -577,9 +919,7 @@ async def _execute_step(
                 {
                     "objective": objective,
                     "ticker": ticker,
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "asset_type": asset_type,
+                    **shared_backtest_args,
                 },
             )
         if len(tickers) == 1 and compares_strategies:
@@ -588,10 +928,9 @@ async def _execute_step(
                 "compare_strategy_backtests",
                 {
                     "ticker": ticker,
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "asset_type": asset_type,
                     "objective": objective,
+                    **interval_args,
+                    **shared_backtest_args,
                 },
             )
         if len(tickers) > 1:
@@ -602,9 +941,8 @@ async def _execute_step(
                     "objective": objective,
                     "tickers": tickers,
                     "mode": "pool",
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "asset_type": asset_type,
+                    **interval_args,
+                    **shared_backtest_args,
                 },
             )
         return await _call_tool(
@@ -613,9 +951,8 @@ async def _execute_step(
             {
                 "objective": objective,
                 "ticker": ticker,
-                "start_date": start_date,
-                "end_date": end_date,
-                "asset_type": asset_type,
+                **interval_args,
+                **shared_backtest_args,
             },
         )
     if step.kind == "comprehensive_analysis":
@@ -624,7 +961,18 @@ async def _execute_step(
         price = _find_price(state.get("step_results", {}))
         if not price:
             return {"data_type": "risk", "status": "partial", "message": "缺少有效当前价格，无法计算价格型风险指标"}
-        return await _call_tool(context, "calculate_risk_metrics", {"current_price": price})
+        return await _call_tool(
+            context,
+            "calculate_risk_metrics",
+            {
+                "current_price": price,
+                **{
+                    key: step.inputs[key]
+                    for key in ("stop_loss_pct", "take_profit_pct", "position_size_pct")
+                    if key in step.inputs
+                },
+            },
+        )
     if step.kind == "synthesis":
         evidence = _result_summaries(state.get("step_results", {}))
         text = await get_llm_service().chat(
@@ -694,6 +1042,8 @@ async def run_worker(
             evidence=evidence,
             artifact_ids=artifacts,
             output=_compact(payload),
+            failure_context=prior.failure_context,
+            recovery_history=prior.recovery_history,
         )
         return {
             "step_results": {step.id: result.model_dump(mode="json")},
@@ -701,12 +1051,19 @@ async def run_worker(
             "tool_calls": 1,
         }
     except Exception as exc:
+        failure_context = (
+            {"tool_name": exc.tool_name, "args": exc.tool_args}
+            if isinstance(exc, ResearchToolExecutionError)
+            else {}
+        )
         result = StepResult(
             step_id=step.id,
             status="failed",
             attempt=attempt,
             summary=f"{step.title}执行失败",
             error=str(exc)[:500],
+            failure_context=failure_context,
+            recovery_history=prior.recovery_history,
         )
         return {
             "step_results": {step.id: result.model_dump(mode="json")},
@@ -759,11 +1116,12 @@ async def verify_evidence(state: ResearchPlanState) -> dict[str, Any]:
             acceptance = output.get("acceptance") or {}
             has_coverage = has_coverage and acceptance.get("satisfied") is True
         elif step.kind == "backtest" and output.get("data_type") == "sandbox_strategy_candidate":
+            sandbox_backtest = output.get("result", {}).get("backtest", {})
             has_coverage = (
                 has_coverage
-                and output.get("status") == "validated"
+                and bool(output.get("candidate_id"))
                 and output.get("validation", {}).get("passed") is True
-                and output.get("result", {}).get("promotion_eligible") is True
+                and sandbox_backtest.get("final_value") is not None
             )
         requires_as_of = step.kind in {"market_snapshot", "price_history", "fund_nav", "news", "comparison"}
         has_as_of = not requires_as_of or all(item.as_of for item in result.evidence)
@@ -774,13 +1132,15 @@ async def verify_evidence(state: ResearchPlanState) -> dict[str, Any]:
                     "error": (
                         "任务验收契约未满足: " + ", ".join(output.get("acceptance", {}).get("missing", []))
                         if step.kind == "backtest" and output.get("acceptance", {}).get("satisfied") is False
+                        else "沙盒验证或可信回测未完成"
+                        if step.kind == "backtest" and output.get("data_type") == "sandbox_strategy_candidate"
                         else "证据缺少来源、检索时间或所需数据覆盖范围"
                     ),
                 }
             ).model_dump(mode="json")
     results.update({key: StepResult.model_validate(value) for key, value in updates.items()})
     failed = [step for step in plan.steps if step.id in results and results[step.id].status == "failed"]
-    retryable = [step for step in failed if results[step.id].attempt < step.max_attempts]
+    retryable = [step for step in failed if results[step.id].attempt < _effective_max_attempts(step)]
     budget = ResearchBudget.model_validate(state["budget"])
     exhausted = state.get("tool_calls", 0) >= budget.max_tool_calls
     expired = datetime.now(timezone.utc) > datetime.fromisoformat(state["deadline_at"])
@@ -825,11 +1185,35 @@ async def replan(state: ResearchPlanState) -> dict[str, Any]:
     plan = ResearchPlan.model_validate(state["plan"])
     results = {key: StepResult.model_validate(value) for key, value in (state.get("step_results") or {}).items()}
     updates: dict[str, dict[str, Any]] = {}
+    revised_steps: list[ResearchStep] = []
     for step in plan.steps:
         result = results.get(step.id)
-        if result and result.status == "failed" and result.attempt < step.max_attempts:
-            updates[step.id] = result.model_copy(update={"status": "pending", "error": None}).model_dump(mode="json")
-    plan.revision += 1
+        max_attempts = _effective_max_attempts(step)
+        if result and result.status == "failed" and result.attempt < max_attempts:
+            recovery = await _reflect_on_failure(step, result, state)
+            history = [*result.recovery_history, recovery]
+            if recovery.action == "abort":
+                updates[step.id] = result.model_copy(
+                    update={
+                        "attempt": max_attempts,
+                        "summary": recovery.summary,
+                        "recovery_history": history,
+                    }
+                ).model_dump(mode="json")
+            else:
+                if recovery.action == "adjust":
+                    step = step.model_copy(update={"inputs": {**step.inputs, **recovery.input_patch}})
+                updates[step.id] = result.model_copy(
+                    update={
+                        "status": "pending",
+                        "summary": recovery.summary,
+                        "error": None,
+                        "recovery_history": history,
+                    }
+                ).model_dump(mode="json")
+        revised_steps.append(step)
+    plan = plan.model_copy(update={"steps": tuple(revised_steps), "revision": plan.revision + 1})
+    _validate_plan_contract(plan, state["request"], ResearchBudget.model_validate(state["budget"]))
     return {
         "plan": plan.model_dump(mode="json"),
         "step_results": updates,

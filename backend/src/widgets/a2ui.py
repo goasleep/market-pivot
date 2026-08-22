@@ -184,13 +184,22 @@ def render_research_plan(
     for index, step in enumerate(steps):
         component_id = f"step-{index}"
         children.append(component_id)
+        recovery = step.get("recovery") if isinstance(step.get("recovery"), dict) else None
+        detail = str(step.get("error") or "")
+        if recovery:
+            recovery_label = {
+                "retry": "自动重试",
+                "adjust": "反思后调整",
+                "abort": "停止重试",
+            }.get(str(recovery.get("action")), "失败恢复")
+            detail = f"{recovery_label}：{recovery.get('summary') or detail}"
         components.append(
             {
                 "id": component_id,
                 "component": "PipelineStep",
                 "label": str(step.get("title") or step.get("kind") or "研究步骤"),
                 "status": str(step.get("status") or "pending"),
-                "detail": str(step.get("error") or ""),
+                "detail": detail,
             }
         )
     components[0]["children"] = children

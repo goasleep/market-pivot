@@ -13,11 +13,14 @@ from application.research_plan import _plan_snapshot
 from graph.research_plan import (
     ResearchPlanContext,
     _call_tool,
+    _classify_failure,
     _execute_step,
     _fallback_steps,
     build_research_plan_graph,
     classify_depth,
     derive_task_contract,
+    replan,
+    verify_evidence,
 )
 from models.research_plan import ResearchPlan, ResearchStep
 from models.schemas import AssetType
@@ -78,6 +81,49 @@ def test_multi_strategy_prompt_gets_machine_checkable_completion_contract():
 
 
 @pytest.mark.asyncio
+async def test_draft_sandbox_candidate_with_valid_backtest_is_completed_research_evidence():
+    result = await verify_evidence(
+        {
+            "plan": _plan([_step("sandbox", "backtest")]),
+            "step_results": {
+                "sandbox": {
+                    "step_id": "sandbox",
+                    "status": "completed",
+                    "evidence": [
+                        {
+                            "source": "受限策略研究沙盒",
+                            "source_type": "backtest",
+                            "retrieved_at": "2026-08-22T12:00:00+00:00",
+                            "data_status": "available",
+                        }
+                    ],
+                    "output": {
+                        "data_type": "sandbox_strategy_candidate",
+                        "candidate_id": "candidate-draft",
+                        "status": "draft",
+                        "validation": {"passed": True},
+                        "result": {
+                            "promotion_eligible": False,
+                            "backtest": {"final_value": 940_000, "total_return": -0.06},
+                        },
+                    },
+                }
+            },
+            "budget": {
+                "max_steps": 8,
+                "max_tool_calls": 12,
+                "max_replans": 1,
+                "deadline_seconds": 900,
+            },
+            "tool_calls": 1,
+            "deadline_at": "2099-01-01T00:00:00+00:00",
+        }
+    )
+
+    assert result["step_results"] == {}
+
+
+@pytest.mark.asyncio
 async def test_research_plan_uses_shared_long_running_tool_timeout(monkeypatch):
     captured: dict[str, int] = {}
 
@@ -102,6 +148,19 @@ async def test_research_plan_uses_shared_long_running_tool_timeout(monkeypatch):
     )
 
     assert captured["timeout"] == research_graph.tool_timeout_seconds("run_fund_or_stock_analysis") == 900
+
+
+@pytest.mark.asyncio
+async def test_research_plan_treats_structured_tool_failure_as_recoverable_error():
+    @tool
+    async def broken_tool() -> str:
+        """Return a structured tool error."""
+        return json.dumps({"ok": False, "error": {"code": "invalid_arguments", "message": "limit 参数无效"}})
+
+    context = ResearchPlanContext(tools={broken_tool.name: broken_tool})
+
+    with pytest.raises(RuntimeError, match="limit 参数无效"):
+        await _call_tool(context, broken_tool.name, {})
 
 
 @pytest.mark.asyncio
@@ -152,6 +211,205 @@ async def test_multi_strategy_request_uses_strategy_comparison_backtest_tool():
         "asset_type": "etf",
         "objective": "给510300执行不同的几个量化策略并回测，对比盈利情况",
     }
+
+
+def test_tool_failure_classifier_separates_retry_adjust_and_terminal_errors():
+    assert _classify_failure("connection timeout while reading response") == "transient"
+    assert _classify_failure("策略包含不受支持的指标: fast_ma") == "correctable"
+    assert _classify_failure("permission denied") == "terminal"
+    assert _classify_failure("unexpected upstream response") == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_replan_reflects_on_failure_and_applies_a_bounded_input_patch(monkeypatch):
+    class RecoveryLLM:
+        async def chat_json(self, prompt, system):
+            assert "fast_ma" in prompt
+            assert "allowed_input_patch" in prompt
+            assert "不要输出内部思维链" in system
+            return {
+                "action": "adjust",
+                "summary": "改用受控均线价差指标描述后重新调用回测工具。",
+                "input_patch": {
+                    "objective": "只使用 ma_spread_pct，并配置 fast_window=5、slow_window=20。",
+                    "execution_mode": "agent",
+                    "ticker": "600519",
+                    "initial_capital": 200000,
+                },
+            }
+
+    monkeypatch.setattr(research_graph, "get_llm_service", lambda: RecoveryLLM())
+    steps = [
+        _step("snapshot", "market_snapshot"),
+        _step("history", "price_history"),
+        _step("method", "methodology"),
+        _step("backtest", "backtest") | {"max_attempts": 2},
+    ]
+    state = {
+        "request": {
+            "message": "为 510300 设计均线交叉策略并回测",
+            "intent": "quote",
+            "tickers": ["510300"],
+            "asset_type": "etf",
+            "as_of_date": "2026-08-22",
+        },
+        "plan": {
+            **_plan(steps),
+            "asset_type": "stock",
+            "tickers": ["510300"],
+        },
+        "step_results": {
+            "backtest": {
+                "step_id": "backtest",
+                "status": "failed",
+                "attempt": 1,
+                "error": "策略包含不受支持的指标: fast_ma; slow_ma",
+            }
+        },
+        "budget": {
+            "max_steps": 8,
+            "max_tool_calls": 16,
+            "max_replans": 1,
+            "deadline_seconds": 900,
+        },
+        "replan_count": 0,
+    }
+
+    update = await replan(state)
+
+    revised_step = next(item for item in update["plan"]["steps"] if item["id"] == "backtest")
+    revised_result = update["step_results"]["backtest"]
+    assert update["plan"]["revision"] == 2
+    assert update["replan_count"] == 1
+    assert revised_result["status"] == "pending"
+    assert revised_result["recovery_history"][0]["action"] == "adjust"
+    assert revised_step["inputs"]["execution_mode"] == "agent"
+    assert revised_step["inputs"]["initial_capital"] == 200000
+    assert "为 510300 设计均线交叉策略并回测" in revised_step["inputs"]["objective"]
+    assert "ma_spread_pct" in revised_step["inputs"]["objective"]
+    assert "ticker" not in revised_step["inputs"]
+
+    snapshot = _plan_snapshot(
+        {
+            "plan": update["plan"],
+            "step_results": update["step_results"],
+        }
+    )
+    assert snapshot is not None
+    recovery = next(item for item in snapshot["steps"] if item["id"] == "backtest")["recovery"]
+    assert recovery["action"] == "adjust"
+    assert "受控均线价差" in recovery["summary"]
+
+
+@pytest.mark.asyncio
+async def test_revised_backtest_step_uses_adjusted_arguments_without_changing_ticker():
+    captured = {}
+
+    @tool
+    async def design_and_run_backtest(
+        objective: str,
+        ticker: str,
+        start_date: str,
+        end_date: str,
+        asset_type: str,
+        initial_capital: float = 1_000_000,
+    ) -> str:
+        """Run an adjusted backtest."""
+        captured.update(locals())
+        return json.dumps({"data_type": "backtest_experiment", "result": {"final_value": 210000}})
+
+    step = ResearchStep.model_validate(
+        _step("backtest", "backtest")
+        | {
+            "inputs": {
+                "objective": "原目标；只使用 ma_spread_pct",
+                "start_date": "2020-01-01",
+                "end_date": "2026-08-20",
+                "initial_capital": 200000,
+                "execution_mode": "agent",
+            }
+        }
+    )
+    state = {
+        "request": {
+            "message": "原目标",
+            "tickers": ["510300"],
+            "asset_type": "etf",
+            "as_of_date": "2026-08-22",
+        },
+        "plan": _plan([_step("backtest", "backtest")]),
+        "step_results": {},
+    }
+    context = ResearchPlanContext(tools={design_and_run_backtest.name: design_and_run_backtest})
+
+    result = await _execute_step(step, state, context)
+
+    assert result["result"]["final_value"] == 210000
+    assert captured["ticker"] == "510300"
+    assert captured["objective"] == "原目标；只使用 ma_spread_pct"
+    assert captured["initial_capital"] == 200000
+
+
+@pytest.mark.asyncio
+async def test_research_graph_reflects_after_failure_and_succeeds_on_second_tool_call(monkeypatch):
+    calls = 0
+
+    @tool
+    async def get_realtime_quote(ticker: str, asset_type: str = "stock") -> str:
+        """Get a quote, failing once to exercise recovery."""
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("invalid upstream response schema")
+        return json.dumps(
+            {
+                "quote": {"ticker": ticker, "asset_type": asset_type, "price": 4.2},
+                "provenance": {
+                    "source": "test-market-data",
+                    "as_of": "2026-08-22T09:30:00+08:00",
+                    "fetched_at": "2026-08-22T09:30:01+08:00",
+                    "status": "available",
+                },
+            }
+        )
+
+    class PlannerAndRecoveryLLM:
+        async def chat_json(self, _prompt, system):
+            if "市场研究 Planner" in system:
+                raise RuntimeError("use deterministic plan")
+            return {
+                "action": "retry",
+                "summary": "上游响应结构异常，保留原查询范围重试一次。",
+                "input_patch": {},
+            }
+
+    monkeypatch.setattr(research_graph, "get_llm_service", lambda: PlannerAndRecoveryLLM())
+    graph = build_research_plan_graph(MemorySaver())
+
+    result = await graph.ainvoke(
+        {
+            "request": {
+                "message": "查询 510300 行情",
+                "intent": "quote",
+                "tickers": ["510300"],
+                "asset_type": "etf",
+                "task_id": "task-recovery",
+            }
+        },
+        config={"configurable": {"thread_id": "task-recovery"}, "recursion_limit": 40},
+        context=ResearchPlanContext(tools={get_realtime_quote.name: get_realtime_quote}),
+    )
+
+    step_result = result["step_results"]["market_snapshot"]
+    assert calls == 2
+    assert result["plan"]["revision"] == 2
+    assert result["replan_count"] == 1
+    assert step_result["status"] == "completed"
+    assert step_result["attempt"] == 2
+    assert step_result["recovery_history"][0]["action"] == "retry"
+    assert step_result["failure_context"]["tool_name"] == "get_realtime_quote"
+    assert step_result["failure_context"]["args"]["ticker"] == "510300"
+    assert step_result["output"]["quote"]["price"] == 4.2
 
 
 @pytest.mark.parametrize(

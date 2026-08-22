@@ -33,6 +33,11 @@ def _plan_snapshot(
     steps = []
     for step in plan.steps:
         result = results.get(step.id)
+        recovery_history = (
+            [item.model_dump(mode="json") for item in result.recovery_history]
+            if result
+            else []
+        )
         steps.append(
             {
                 "id": step.id,
@@ -41,6 +46,8 @@ def _plan_snapshot(
                 "status": result.status if result else "running" if step.id in (running_ids or set()) else "pending",
                 "summary": result.summary if result else "",
                 "error": result.error if result else None,
+                "recovery_history": recovery_history,
+                "recovery": recovery_history[-1] if recovery_history else None,
             }
         )
     completed = sum(item["status"] in {"completed", "failed", "skipped"} for item in steps)

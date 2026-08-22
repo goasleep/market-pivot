@@ -28,6 +28,8 @@ ResearchStepKind = Literal[
     "report",
 ]
 ResearchStepStatus = Literal["pending", "running", "completed", "failed", "skipped"]
+RecoveryClassification = Literal["transient", "correctable", "terminal", "unknown"]
+RecoveryAction = Literal["retry", "adjust", "abort"]
 
 
 class EvidenceRef(BaseModel):
@@ -99,6 +101,15 @@ class ResearchPlan(BaseModel):
         return self
 
 
+class StepRecovery(BaseModel):
+    attempt: int = Field(ge=1)
+    classification: RecoveryClassification
+    action: RecoveryAction
+    summary: str = Field(min_length=1, max_length=500)
+    error: str = Field(default="", max_length=500)
+    input_patch: dict[str, Any] = Field(default_factory=dict)
+
+
 class StepResult(BaseModel):
     step_id: str
     status: ResearchStepStatus
@@ -108,6 +119,8 @@ class StepResult(BaseModel):
     artifact_ids: list[str] = Field(default_factory=list)
     output: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    failure_context: dict[str, Any] = Field(default_factory=dict)
+    recovery_history: list[StepRecovery] = Field(default_factory=list)
 
 
 class ResearchBudget(BaseModel):
