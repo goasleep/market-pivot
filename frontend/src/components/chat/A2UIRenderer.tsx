@@ -478,7 +478,8 @@ function RenderComponent({
               ? "border-primary bg-primary/10 text-primary"
               : "border-border text-muted-foreground";
       const icon = completed ? "✓" : failed ? "×" : skipped ? "–" : status === "running" ? "•" : "○";
-      return <div className="flex items-center gap-2 text-xs"><span className={cn("flex h-6 w-6 items-center justify-center rounded-full border text-[10px]", statusClass)}>{icon}</span><span>{String(component.label || "")}</span></div>;
+      const detail = String(component.detail || "");
+      return <div className="flex items-start gap-2 text-xs"><span className={cn("flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-[10px]", statusClass)}>{icon}</span><span className="min-w-0"><span className="block">{String(component.label || "")}</span>{detail && <span className={cn("mt-0.5 block text-[11px]", failed ? "text-destructive" : "text-muted-foreground")}>{detail}</span>}</span></div>;
     }
     case "List": {
       const items = resolve(component.items);

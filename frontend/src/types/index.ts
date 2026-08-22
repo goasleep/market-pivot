@@ -137,7 +137,7 @@ export interface Position {
 export interface Portfolio {
   account_id: string;
   name: string;
-  status: "active" | "paused";
+  status: "active" | "paused" | "archived";
   current_date: string;
   initial_capital: number;
   total_pnl: number;
@@ -197,7 +197,14 @@ export interface SimulationEvent {
 }
 
 export interface ExternalSimulationConfig {
-  provider: "internal" | "eastmoney_emt" | "eastmoney_file" | "juejin" | "joinquant" | "ricequant" | "custom";
+  provider:
+    | "internal"
+    | "eastmoney_emt"
+    | "eastmoney_file"
+    | "juejin"
+    | "joinquant"
+    | "ricequant"
+    | "custom";
   enabled: boolean;
   simulation_only: boolean;
   endpoint: string;
@@ -259,6 +266,8 @@ export interface SimulationOrder {
   reject_reason: string | null;
   source?: "manual" | "agent" | "backtest" | "system";
   run_id?: string | null;
+  deployment_id?: string | null;
+  decision_id?: string | null;
   fill_policy?: "next_open" | "same_close" | "manual";
 }
 
@@ -274,6 +283,7 @@ export interface AutomationTaskConfig {
   universe: string[];
   asset_type: AssetType;
   strategy_name: string | null;
+  deployment_id: string | null;
   max_symbols_per_run: number;
   max_orders_per_run: number;
   daily_loss_limit_pct: number;
@@ -298,9 +308,13 @@ export interface AgentRunSummary {
   account_id: string;
   run_date: string;
   trigger: "schedule" | "manual" | "retry" | "settlement";
-  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "skipped";
+  status:
+    "queued" | "running" | "completed" | "failed" | "cancelled" | "skipped";
   mode: AutomationMode;
   strategy_name: string | null;
+  deployment_id: string | null;
+  strategy_sha256: string | null;
+  llm_runtime: Record<string, unknown>;
   symbols_total: number;
   symbols_processed: number;
   decisions_count: number;
@@ -321,7 +335,32 @@ export interface AgentDecisionAudit {
   risk_status: "pending" | "approved" | "rejected";
   risk_reason: string | null;
   order_id: string | null;
+  signal_source: "agent" | "deployed_strategy";
+  strategy_evaluation: Record<string, unknown>;
+  agent_gate: Record<string, unknown>;
+  proposed_order: Record<string, unknown> | null;
+  confirmation_status:
+    "none" | "pending" | "confirmed" | "rejected" | "expired";
   created_at: string;
+}
+
+export interface StrategyDeployment {
+  deployment_id: string;
+  experiment_id: string;
+  account_id: string;
+  status: "active" | "paused" | "archived";
+  strategy_name: string;
+  strategy_version: string;
+  strategy_sha256: string;
+  strategy_spec: Record<string, unknown>;
+  portfolio_spec?: PortfolioSpec | null;
+  universe: string[];
+  asset_type: AssetType;
+  execution: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  activated_at?: string | null;
+  archived_at?: string | null;
 }
 
 // --- Chat / A2UI types ---

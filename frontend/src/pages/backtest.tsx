@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { runBacktest, runBacktestExperiment } from "@/api";
-import type { AssetType, BacktestMode, BacktestResult } from "@/types";
+import { deployBacktestExperiment, runBacktest, runBacktestExperiment } from "@/api";
+import type { AssetType, BacktestExperimentResult, BacktestMode, BacktestResult, StrategyDeployment } from "@/types";
 
 export function BacktestPage() {
   const [mode, setMode] = useState<BacktestMode>("portfolio");
@@ -9,6 +9,10 @@ export function BacktestPage() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [result, setResult] = useState<BacktestResult | null>(null);
+  const [experiment, setExperiment] = useState<BacktestExperimentResult | null>(null);
+  const [deployment, setDeployment] = useState<StrategyDeployment | null>(null);
+  const [accountId, setAccountId] = useState("");
+  const [accountName, setAccountName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
 
@@ -21,12 +25,37 @@ export function BacktestPage() {
   const run = async (withAgent: boolean) => {
     setRunning(true); setError(null);
     try {
-      const response = withAgent
-        ? (await runBacktestExperiment({ ...payload, objective: "设计一个短中线、控制回撤的 ETF 组合策略" })).result
-        : await runBacktest(payload);
-      setResult(response);
+      if (withAgent) {
+        const response = await runBacktestExperiment({
+          ...payload,
+          objective: `设计一个短中线、控制回撤的 ${assetType.toUpperCase()} ${mode === "portfolio" ? "组合" : "交易"}策略`,
+        });
+        setExperiment(response);
+        setResult(response.result);
+        setAccountId(`paper_${response.experiment_id.replace(/[^A-Za-z0-9_-]/g, "_").slice(-20)}`);
+        setAccountName(`${String(response.strategy_spec.name || "Agent 策略")} 模拟盘`);
+      } else {
+        setExperiment(null);
+        setResult(await runBacktest(payload));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "回测失败");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const deploy = async () => {
+    if (!experiment || !accountId.trim()) return;
+    setRunning(true); setError(null);
+    try {
+      setDeployment(await deployBacktestExperiment(experiment.experiment_id, {
+        account_id: accountId.trim(),
+        account_name: accountName.trim() || undefined,
+        mode: "confirm",
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "部署失败");
     } finally {
       setRunning(false);
     }
@@ -47,6 +76,7 @@ export function BacktestPage() {
     </section>
     {error && <p className="rounded-md border border-destructive p-4 text-sm text-destructive">{error}</p>}
     {result && <section className="grid gap-4 md:grid-cols-4"><Metric title="最终资产" value={`¥${result.final_value.toLocaleString()}`} /><Metric title="总收益率" value={`${(result.total_return * 100).toFixed(2)}%`} /><Metric title="最大回撤" value={`${(result.max_drawdown * 100).toFixed(2)}%`} /><Metric title="交易次数" value={String(result.total_trades)} /></section>}
+    {experiment && <section className="space-y-4 rounded-xl border bg-card p-5"><div><h2 className="font-semibold">部署到独立模拟盘</h2><p className="text-sm text-muted-foreground">实验 {experiment.experiment_id} 的策略将以不可变快照部署；默认逐单确认，可同时创建多个账户。</p></div><div className="grid gap-3 md:grid-cols-2"><label className="space-y-2 text-sm">账户 ID<input className="flex h-10 w-full rounded-md border bg-transparent px-3" value={accountId} onChange={(e) => setAccountId(e.target.value)} /></label><label className="space-y-2 text-sm">账户名称<input className="flex h-10 w-full rounded-md border bg-transparent px-3" value={accountName} onChange={(e) => setAccountName(e.target.value)} /></label></div><button className="rounded-md bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50" disabled={running || !accountId.trim()} onClick={deploy}>创建并启用模拟盘</button>{deployment && <p className="text-sm text-emerald-700">已部署 {deployment.strategy_name} → <a className="underline" href={`/automation/${deployment.account_id}`}>{deployment.account_id}</a></p>}</section>}
   </main>;
 }
 
