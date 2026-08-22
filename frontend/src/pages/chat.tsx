@@ -118,9 +118,9 @@ export function ChatPage() {
       });
   }, []);
 
-  // `sending` represents a task running anywhere in this chat page. Keep it
-  // separate from the selected conversation so switching views never cancels
-  // or hides the task that is still streaming in the background.
+  // `sending` represents the single task running on this chat page. Navigation
+  // stays locked until the task reaches a terminal state so the reconnect
+  // effect remains attached to the conversation that owns the stream.
   const activeConversationSending = Boolean(
     activeConversation?.messages.some(
       (message) => message.role === "assistant" && message.loading && message.taskId,
@@ -220,6 +220,7 @@ export function ChatPage() {
   );
 
   const startNewConversation = () => {
+    if (sending) return;
     const conversation = newConversation();
     setStore((current) => ({
       activeId: conversation.conversationId,
@@ -231,6 +232,7 @@ export function ChatPage() {
   };
 
   const openConversation = (conversationId: string) => {
+    if (sending) return;
     setStore((current) => ({ ...current, activeId: conversationId }));
     setInput("");
     setEditingMessageIndex(null);
@@ -321,7 +323,15 @@ export function ChatPage() {
           const nextMessages = a2uiMessages(
             part.content as A2UIMessage | A2UIMessage[],
           );
-          const existingKeys = new Set(previousMessages.map(a2uiMessageKey));
+          const existingKeys = new Set(
+            assistant.parts.flatMap((existingPart) =>
+              existingPart.type === "a2ui"
+                ? a2uiMessages(
+                    existingPart.content as A2UIMessage | A2UIMessage[],
+                  ).map(a2uiMessageKey)
+                : [],
+            ),
+          );
           previous.content = [
             ...previousMessages,
             ...nextMessages.filter((message) => {
@@ -332,6 +342,34 @@ export function ChatPage() {
             }),
           ];
         } else {
+          if (
+            part.type === "interaction" &&
+            assistant.parts.some(
+              (existingPart) =>
+                existingPart.type === "interaction" &&
+                (existingPart.content as ChatInteraction).interaction_id ===
+                  (part.content as ChatInteraction).interaction_id,
+            )
+          ) {
+            return item;
+          }
+          if (part.type === "a2ui") {
+            const existingKeys = new Set(
+              assistant.parts.flatMap((existingPart) =>
+                existingPart.type === "a2ui"
+                  ? a2uiMessages(
+                      existingPart.content as A2UIMessage | A2UIMessage[],
+                    ).map(a2uiMessageKey)
+                  : [],
+              ),
+            );
+            const uniqueMessages = a2uiMessages(
+              part.content as A2UIMessage | A2UIMessage[],
+            ).filter((message) => !existingKeys.has(a2uiMessageKey(message)));
+            if (!uniqueMessages.length) return item;
+            assistant.parts.push({ ...part, content: uniqueMessages });
+            return { ...item, messages, updatedAt: new Date().toISOString() };
+          }
           if (
             part.type === "artifact" &&
             typeof (part.content as Record<string, unknown>)?.artifact_id === "string" &&
@@ -382,7 +420,15 @@ export function ChatPage() {
           const nextMessages = a2uiMessages(
             part.content as A2UIMessage | A2UIMessage[],
           );
-          const existingKeys = new Set(previousMessages.map(a2uiMessageKey));
+          const existingKeys = new Set(
+            assistant.parts.flatMap((existingPart) =>
+              existingPart.type === "a2ui"
+                ? a2uiMessages(
+                    existingPart.content as A2UIMessage | A2UIMessage[],
+                  ).map(a2uiMessageKey)
+                : [],
+            ),
+          );
           previous.content = [
             ...(previousMessages as A2UIMessage[]),
             ...nextMessages.filter((message) => {
@@ -393,6 +439,34 @@ export function ChatPage() {
             }),
           ];
         } else {
+          if (
+            part.type === "interaction" &&
+            assistant.parts.some(
+              (existingPart) =>
+                existingPart.type === "interaction" &&
+                (existingPart.content as ChatInteraction).interaction_id ===
+                  (part.content as ChatInteraction).interaction_id,
+            )
+          ) {
+            return item;
+          }
+          if (part.type === "a2ui") {
+            const existingKeys = new Set(
+              assistant.parts.flatMap((existingPart) =>
+                existingPart.type === "a2ui"
+                  ? a2uiMessages(
+                      existingPart.content as A2UIMessage | A2UIMessage[],
+                    ).map(a2uiMessageKey)
+                  : [],
+              ),
+            );
+            const uniqueMessages = a2uiMessages(
+              part.content as A2UIMessage | A2UIMessage[],
+            ).filter((message) => !existingKeys.has(a2uiMessageKey(message)));
+            if (!uniqueMessages.length) return item;
+            assistant.parts.push({ ...part, content: uniqueMessages });
+            return { ...item, messages, updatedAt: new Date().toISOString() };
+          }
           if (
             part.type === "artifact" &&
             typeof (part.content as Record<string, unknown>)?.artifact_id === "string" &&
@@ -1017,6 +1091,7 @@ export function ChatPage() {
           <Button
             className="w-full justify-start gap-2"
             onClick={startNewConversation}
+            disabled={sending}
           >
             <Plus className="h-4 w-4" />
             新对话
@@ -1066,6 +1141,7 @@ export function ChatPage() {
                     onClick={() =>
                       openConversation(conversation.conversationId)
                     }
+                    disabled={sending}
                   >
                     <span className="block truncate text-sm">
                       {conversation.title}
@@ -1136,6 +1212,7 @@ export function ChatPage() {
             variant="outline"
             size="sm"
             onClick={startNewConversation}
+            disabled={sending}
             className="hidden gap-1.5 sm:flex"
           >
             <Plus className="h-4 w-4" />

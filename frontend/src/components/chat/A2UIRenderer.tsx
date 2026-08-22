@@ -465,7 +465,20 @@ function RenderComponent({
     }
     case "PipelineStep": {
       const status = String(component.status || "pending");
-      return <div className="flex items-center gap-2 text-xs"><span className={cn("flex h-6 w-6 items-center justify-center rounded-full border text-[10px]", status === "done" ? "border-green-500 bg-green-500/10 text-green-500" : status === "running" ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground")}>{status === "done" ? "✓" : status === "running" ? "•" : "○"}</span><span>{String(component.label || "")}</span></div>;
+      const completed = ["done", "complete", "completed"].includes(status);
+      const failed = status === "failed";
+      const skipped = status === "skipped";
+      const statusClass = completed
+        ? "border-green-500 bg-green-500/10 text-green-500"
+        : failed
+          ? "border-destructive bg-destructive/10 text-destructive"
+          : skipped
+            ? "border-amber-500 bg-amber-500/10 text-amber-600"
+            : status === "running"
+              ? "border-primary bg-primary/10 text-primary"
+              : "border-border text-muted-foreground";
+      const icon = completed ? "✓" : failed ? "×" : skipped ? "–" : status === "running" ? "•" : "○";
+      return <div className="flex items-center gap-2 text-xs"><span className={cn("flex h-6 w-6 items-center justify-center rounded-full border text-[10px]", statusClass)}>{icon}</span><span>{String(component.label || "")}</span></div>;
     }
     case "List": {
       const items = resolve(component.items);
