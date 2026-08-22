@@ -1,6 +1,6 @@
 import json
 
-from widgets.a2ui import CATALOG_ID, render_agent_pipeline, render_stock_card, render_tool_result
+from widgets.a2ui import CATALOG_ID, render_agent_pipeline, render_research_plan, render_stock_card, render_tool_result
 
 
 def test_stock_card_uses_a2ui_surface_and_data_model():
@@ -78,6 +78,33 @@ def test_progressive_pipeline_update_does_not_recreate_surface():
 
     assert "createSurface" not in messages[0]
     assert messages[0]["updateComponents"]["surfaceId"] == "pipeline-1"
+
+
+def test_research_plan_card_uses_stable_statuses_and_surface_updates():
+    messages = render_research_plan(
+        {
+            "objective": "比较 510300 与 510500",
+            "depth": "standard",
+            "revision": 2,
+            "status": "completed_with_gaps",
+            "progress": 100,
+            "steps": [
+                {"title": "获取行情", "status": "completed"},
+                {"title": "检索新闻", "status": "failed"},
+                {"title": "形成结论", "status": "skipped"},
+            ],
+        },
+        "research-plan-task-1",
+        include_create=False,
+    )
+
+    assert "createSurface" not in messages[0]
+    components = messages[0]["updateComponents"]["components"]
+    statuses = [item["status"] for item in components if item.get("component") == "PipelineStep"]
+    assert statuses == ["completed", "failed", "skipped"]
+    data = messages[1]["updateDataModel"]["value"]
+    assert data["progress"] == 100
+    assert "Revision 2" in data["meta"]
 
 
 def test_historical_prices_render_as_inline_trend_chart_and_table():

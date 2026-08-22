@@ -12,9 +12,18 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Sequence
 
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
+from loguru import logger
 
 from application.research import research_service
-from graph.agent_loop import resume_agent_loop, stream_agent_loop
+from application.research_plan import research_plan_service
+from graph.agent_loop import (
+    get_agent_loop,
+    resume_agent_loop,
+    resume_checkpoint_agent_loop,
+    resume_native_agent_loop,
+    stream_agent_loop,
+)
+from graph.checkpointing import checkpoint_manager
 from models.schemas import AssetType
 from observability import build_trace_config
 from tools.registry import build_artifact_tools, build_chat_tools
@@ -89,6 +98,15 @@ class AssetAgent:
         AssetIntent.STRATEGIES: ("策略", "选股", "交易规则", "strategies"),
         AssetIntent.PORTFOLIO: ("持仓", "组合", "仓位", "账户", "portfolio"),
         AssetIntent.ANALYZE: ("分析", "估值", "基本面", "技术面", "财报", "趋势", "买入", "卖出", "建议", "analy"),
+    }
+    _research_intents = {
+        AssetIntent.QUOTE,
+        AssetIntent.HISTORY,
+        AssetIntent.NEWS,
+        AssetIntent.STRATEGIES,
+        AssetIntent.ANALYZE,
+        AssetIntent.COMPARE,
+        AssetIntent.BACKTEST,
     }
 
     @classmethod
@@ -335,13 +353,18 @@ class AssetAgent:
             if decision is None:
                 return "{}"
             market_context = result.get("market_context")
-            artifacts = await research_service.create_artifacts(
-                decision,
-                market_context,
-                source="chat-tool-analysis",
-                conversation_id=request.conversation_id,
-                task_id=request.task_id,
-            )
+            try:
+                artifacts = await research_service.create_artifacts(
+                    decision,
+                    market_context,
+                    source="chat-tool-analysis",
+                    conversation_id=request.conversation_id,
+                    task_id=request.task_id,
+                    execution_key=f"{request.task_id}:comprehensive-report" if request.task_id else None,
+                )
+            except Exception as exc:
+                logger.warning("Analysis report artifact generation failed; returning decision only: {}", exc)
+                artifacts = []
             payload = research_service.decision_payload(decision, market_context, artifacts=artifacts)
             return json.dumps(payload, ensure_ascii=False)
 
@@ -381,6 +404,31 @@ class AssetAgent:
             ),
             allow_mutating_tools=request.allow_mutating_tools,
         )
+        if (
+            request.intent in self._research_intents
+            and not request.allow_mutating_tools
+            and request.task_id
+            and checkpoint_manager.saver is not None
+        ):
+            yield {
+                "type": "execution_metadata",
+                "execution_version": 2,
+                "graph_name": "market-research-plan",
+                "thread_id": request.task_id,
+            }
+            research_config = build_trace_config(
+                "market-research-plan",
+                tags=["asset-agent", "research-plan", request.intent.value],
+                metadata={"intent": request.intent.value, "task_id": request.task_id},
+                session_id=request.conversation_id,
+            )
+            async for event in research_plan_service.stream(
+                self.request_payload(request),
+                tools,
+                config=research_config,
+            ):
+                yield event
+            return
         system = (
             "你是 A-Share Agent 的对话入口。用户意图已经通过系统闸门确认，你只执行该意图范围内的任务；"
             "禁止根据记忆编造行情、历史价格或新闻。行情、历史、新闻、对比和策略都必须通过工具获取。"
@@ -425,7 +473,44 @@ class AssetAgent:
             metadata={"intent": request.intent.value},
             session_id=request.conversation_id,
         )
-        async for update in stream_agent_loop(messages, tools, max_steps=100, config=chat_config):
+        native_checkpoints = bool(request.task_id and checkpoint_manager.saver is not None)
+        if native_checkpoints:
+            chat_config = checkpoint_manager.graph_config(request.task_id or "", chat_config)
+        stream = (
+            stream_agent_loop(
+                messages,
+                tools,
+                max_steps=100,
+                config=chat_config,
+                native_interrupts=True,
+                task_id=request.task_id,
+            )
+            if native_checkpoints
+            else stream_agent_loop(messages, tools, max_steps=100, config=chat_config)
+        )
+        async for update in stream:
+            native_interrupt = update.get("__interrupt__")
+            if native_interrupt:
+                value = getattr(native_interrupt[0], "value", {})
+                if not isinstance(value, dict):
+                    value = {}
+                yield {
+                    "type": "interaction_required",
+                    "kind": "tool_confirmation",
+                    "question": str(value.get("question") or "Agent 准备执行一个需要用户确认的工具操作，是否继续？"),
+                    "options": [
+                        {"id": "approve", "label": "确认执行"},
+                        {"id": "reject", "label": "取消执行"},
+                    ],
+                    "resume": {
+                        "native_checkpoint": True,
+                        "graph_name": "asset-agent-chat",
+                        "thread_id": request.task_id,
+                        "interrupt_id": getattr(native_interrupt[0], "id", ""),
+                    },
+                    "tool": value,
+                }
+                return
             for node_update in update.values():
                 if not isinstance(node_update, dict):
                     continue
@@ -468,6 +553,105 @@ class AssetAgent:
             text = _compact_generated_report(final_response) if artifacts_generated else final_response
             yield {"type": "text", "text": text}
 
+    async def resume_checkpoint(self, request: AssetAgentRequest) -> AsyncIterator[dict[str, Any]]:
+        """Continue a v2 task reclaimed after its worker lease expired."""
+        if not request.task_id or checkpoint_manager.saver is None:
+            async for event in self.chat(request):
+                yield event
+            return
+        tools = build_chat_tools(
+            self._analysis_tool(conversation_id=request.conversation_id, task_id=request.task_id),
+            artifact_tools=build_artifact_tools(
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+            ),
+            allow_mutating_tools=request.allow_mutating_tools,
+        )
+        config = checkpoint_manager.graph_config(
+            request.task_id,
+            build_trace_config(
+                "asset-agent-chat-recover",
+                tags=["asset-agent", "chat", request.intent.value],
+                metadata={"intent": request.intent.value, "task_id": request.task_id},
+                session_id=request.conversation_id,
+            ),
+        )
+        snapshot = await get_agent_loop().aget_state(config)
+        if not snapshot.values:
+            async for event in self.chat(request):
+                yield event
+            return
+        if not snapshot.next:
+            final_response = str(snapshot.values.get("final_response") or "")
+            if final_response:
+                yield {"type": "text", "text": final_response}
+            return
+        async for update in resume_checkpoint_agent_loop(tools, config=config, task_id=request.task_id):
+            native_interrupt = update.get("__interrupt__")
+            if native_interrupt:
+                value = getattr(native_interrupt[0], "value", {})
+                if not isinstance(value, dict):
+                    value = {}
+                yield {
+                    "type": "interaction_required",
+                    "kind": "tool_confirmation",
+                    "question": str(value.get("question") or "Agent 准备执行一个需要用户确认的工具操作，是否继续？"),
+                    "options": [
+                        {"id": "approve", "label": "确认执行"},
+                        {"id": "reject", "label": "取消执行"},
+                    ],
+                    "resume": {
+                        "native_checkpoint": True,
+                        "graph_name": "asset-agent-chat",
+                        "thread_id": request.task_id,
+                        "interrupt_id": getattr(native_interrupt[0], "id", ""),
+                    },
+                    "tool": value,
+                }
+                return
+            for node_update in update.values():
+                if not isinstance(node_update, dict):
+                    continue
+                for event in node_update.get("tool_events", []):
+                    yield {
+                        "type": "tool",
+                        "name": event.get("name", "unknown"),
+                        "status": event.get("status", "completed"),
+                        "result": event.get("result", ""),
+                    }
+                for event in node_update.get("reasoning_events", []):
+                    if isinstance(event, dict) and event.get("text"):
+                        yield {"type": "reasoning", "text": str(event["text"])}
+                if node_update.get("final_response"):
+                    yield {"type": "text", "text": str(node_update["final_response"])}
+
+    async def resume_research_checkpoint(self, request: AssetAgentRequest) -> AsyncIterator[dict[str, Any]]:
+        """Continue a reclaimed v2 Research Plan from its latest native checkpoint."""
+        if not request.task_id or checkpoint_manager.saver is None:
+            async for event in self.chat(request):
+                yield event
+            return
+        tools = build_chat_tools(
+            self._analysis_tool(conversation_id=request.conversation_id, task_id=request.task_id),
+            artifact_tools=build_artifact_tools(
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+            ),
+            allow_mutating_tools=False,
+        )
+        config = build_trace_config(
+            "market-research-plan-recover",
+            tags=["asset-agent", "research-plan", "recover"],
+            metadata={"task_id": request.task_id},
+            session_id=request.conversation_id,
+        )
+        async for event in research_plan_service.resume(
+            self.request_payload(request),
+            tools,
+            config=config,
+        ):
+            yield event
+
     async def resume_chat(
         self,
         interaction: dict[str, Any],
@@ -497,6 +681,65 @@ class AssetAgent:
             allow_mutating_tools=request.allow_mutating_tools,
         )
         approved = option_id == "approve"
+        if payload.get("native_checkpoint"):
+            thread_id = str(payload.get("thread_id") or request.task_id or "")
+            if not thread_id or checkpoint_manager.saver is None:
+                raise ValueError("原生 checkpoint 不可用，无法恢复该任务")
+            resume_config = checkpoint_manager.graph_config(
+                thread_id,
+                build_trace_config(
+                    "asset-agent-chat-resume",
+                    tags=["asset-agent", "chat", request.intent.value],
+                    metadata={"intent": request.intent.value, "task_id": request.task_id or ""},
+                    session_id=request.conversation_id,
+                ),
+            )
+            async for update in resume_native_agent_loop(
+                tools,
+                approved=approved,
+                config=resume_config,
+                task_id=request.task_id,
+            ):
+                native_interrupt = update.get("__interrupt__")
+                if native_interrupt:
+                    value = getattr(native_interrupt[0], "value", {})
+                    if not isinstance(value, dict):
+                        value = {}
+                    yield {
+                        "type": "interaction_required",
+                        "kind": "tool_confirmation",
+                        "question": str(
+                            value.get("question") or "Agent 准备执行一个需要用户确认的工具操作，是否继续？"
+                        ),
+                        "options": [
+                            {"id": "approve", "label": "确认执行"},
+                            {"id": "reject", "label": "取消执行"},
+                        ],
+                        "resume": {
+                            "native_checkpoint": True,
+                            "graph_name": "asset-agent-chat",
+                            "thread_id": thread_id,
+                            "interrupt_id": getattr(native_interrupt[0], "id", ""),
+                        },
+                        "tool": value,
+                    }
+                    return
+                for node_update in update.values():
+                    if not isinstance(node_update, dict):
+                        continue
+                    for event in node_update.get("tool_events", []):
+                        yield {
+                            "type": "tool",
+                            "name": event.get("name", "unknown"),
+                            "status": event.get("status", "completed"),
+                            "result": event.get("result", ""),
+                        }
+                    for event in node_update.get("reasoning_events", []):
+                        if isinstance(event, dict) and event.get("text"):
+                            yield {"type": "reasoning", "text": str(event["text"])}
+                    if node_update.get("final_response"):
+                        yield {"type": "text", "text": str(node_update["final_response"])}
+            return
         if not approved:
             yield {
                 "type": "tool",
@@ -521,6 +764,7 @@ class AssetAgent:
                 metadata={"intent": request.intent.value, "task_id": request.task_id or ""},
                 session_id=request.conversation_id,
             ),
+            task_id=request.task_id,
         ):
             for node_update in update.values():
                 if not isinstance(node_update, dict):
@@ -614,7 +858,7 @@ class AssetAgent:
     ) -> RunnableConfig:
         """Reuse the parent chat trace when analysis is invoked as a tool."""
         if config is None:
-            return build_trace_config(
+            trace_config = build_trace_config(
                 "asset-agent-analysis",
                 tags=["asset-agent", "chat", request.intent.value],
                 metadata={
@@ -625,18 +869,25 @@ class AssetAgent:
                 },
                 session_id=request.conversation_id,
             )
-        return {
-            **config,
-            "run_name": "asset-agent-analysis",
-            "tags": [*config.get("tags", []), "asset-agent", "analysis"],
-            "metadata": {
-                **config.get("metadata", {}),
-                "ticker": request.ticker or "",
-                "intent": request.intent.value,
-                "strategy": request.strategy or "auto",
-                "conversation_id": request.conversation_id or "",
-            },
-        }
+        else:
+            trace_config = {
+                **config,
+                "run_name": "asset-agent-analysis",
+                "tags": [*config.get("tags", []), "asset-agent", "analysis"],
+                "metadata": {
+                    **config.get("metadata", {}),
+                    "ticker": request.ticker or "",
+                    "intent": request.intent.value,
+                    "strategy": request.strategy or "auto",
+                    "conversation_id": request.conversation_id or "",
+                },
+            }
+        if request.task_id and checkpoint_manager.saver is not None:
+            return checkpoint_manager.graph_config(
+                f"{request.task_id}:research:comprehensive",
+                trace_config,
+            )
+        return trace_config
 
 
 # Backward-compatible names for persisted callers and existing integrations.

@@ -8,17 +8,17 @@ here prevents each caller from growing its own slightly different pipeline.
 from __future__ import annotations
 
 from typing import Any, AsyncIterator
+from uuid import uuid4
 
 from artifacts.service import artifact_service
-from graph.workflow import workflow as compiled_workflow
+from graph.checkpointing import checkpoint_manager
+from graph.workflow import get_workflow
 from models.schemas import AssetType, MarketContext, TradeDecision
 from observability import build_trace_config
 
 
 class ResearchService:
     """Application boundary around LangGraph; callers do not build graph state."""
-
-    workflow = compiled_workflow
 
     @staticmethod
     def build_state(
@@ -87,7 +87,10 @@ class ResearchService:
     @staticmethod
     def _invoke_options(config: dict[str, Any] | None) -> dict[str, Any]:
         """Keep run metadata attached; fall back for minimal test doubles."""
-        return {"config": config} if config else {}
+        if checkpoint_manager.saver is None:
+            return {"config": config} if config else {}
+        thread_id = str((config or {}).get("configurable", {}).get("thread_id") or f"analysis-{uuid4().hex}")
+        return {"config": checkpoint_manager.graph_config(thread_id, config)}
 
     async def run_state(
         self,
@@ -101,7 +104,7 @@ class ResearchService:
         ``workflow_override`` is intentionally narrow and exists for backtest
         doubles and isolated tests; production callers use the shared graph.
         """
-        runner = workflow_override or self.workflow
+        runner = workflow_override or get_workflow()
         options = self._invoke_options(trace_config)
         try:
             return await runner.ainvoke(state, **options)
@@ -118,7 +121,7 @@ class ResearchService:
         workflow_override: Any | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream canonical workflow updates with an accumulated state."""
-        runner = workflow_override or self.workflow
+        runner = workflow_override or get_workflow()
         options = self._invoke_options(trace_config)
         accumulated = dict(state)
         try:
@@ -209,6 +212,7 @@ class ResearchService:
         source: str,
         conversation_id: str | None = None,
         task_id: str | None = None,
+        execution_key: str | None = None,
     ) -> list[dict[str, Any]]:
         """Create report files through the dedicated ReportAgent."""
         return await artifact_service.create_analysis_artifacts(
@@ -217,6 +221,7 @@ class ResearchService:
             source=source,
             conversation_id=conversation_id,
             task_id=task_id,
+            execution_key=execution_key,
         )
 
     @staticmethod

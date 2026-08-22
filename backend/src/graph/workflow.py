@@ -160,7 +160,7 @@ async def run_portfolio_manager(state: WorkflowState) -> dict:
 # --- Build graph ---
 
 
-def build_workflow():
+def build_workflow(checkpointer: Any | None = None):
     """Build and compile the LangGraph workflow."""
     graph = StateGraph(WorkflowState)
 
@@ -191,8 +191,18 @@ def build_workflow():
     graph.add_edge("risk", "portfolio")
     graph.add_edge("portfolio", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 # Compiled workflow singleton
 workflow = build_workflow()
+
+
+def configure_workflow(checkpointer: Any | None) -> None:
+    """Recompile the shared research graph with the application saver."""
+    global workflow
+    workflow = build_workflow(checkpointer)
+
+
+def get_workflow():
+    return workflow

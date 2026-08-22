@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -70,20 +71,23 @@ async def submit_simulation_order(
     asset_type: str = "stock",
     order_type: str = "market",
     limit_price: float | None = None,
+    execution_key: str | None = None,
 ) -> str:
     """创建一笔待成交的纸面交易订单；只有用户明确要求下单时调用。"""
+    deterministic_order_id = (
+        f"sim-{hashlib.sha256(execution_key.encode()).hexdigest()[:24]}" if execution_key else None
+    )
     order = await simulation_accounts.create_order(
-        account_id,
-        ticker,
-        Decision(side),
-        shares,
-        order_type,
-        limit_price,
-        None,
-        "agent",
-        None,
-        "manual",
-        AssetType(asset_type),
+        account_id=account_id,
+        ticker=ticker,
+        side=Decision(side),
+        shares=shares,
+        order_type=order_type,
+        limit_price=limit_price,
+        source="agent",
+        fill_policy="manual",
+        asset_type=AssetType(asset_type),
+        order_id=deterministic_order_id,
     )
     return _dump(
         {

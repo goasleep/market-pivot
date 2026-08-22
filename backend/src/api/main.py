@@ -13,12 +13,21 @@ from application.automation import automation_scheduler
 from application.backtest_jobs import backtest_jobs
 from application.chat_service import chat_store, chat_task_manager
 from data.tortoise_db import close_database, init_database
+from graph.agent_loop import configure_agent_loop
+from graph.checkpointing import checkpoint_manager
+from graph.research_plan import configure_research_plan_graph
+from graph.workflow import configure_workflow
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await init_database()
     await chat_store.init()
+    checkpointer = await checkpoint_manager.start()
+    configure_agent_loop(checkpointer)
+    configure_research_plan_graph(checkpointer)
+    configure_workflow(checkpointer)
+    await checkpoint_manager.prune_stale_threads()
     await chat_task_manager.start_worker()
     await backtest_jobs.start()
     await automation_scheduler.start()
@@ -28,6 +37,10 @@ async def lifespan(_app: FastAPI):
         await automation_scheduler.stop()
         await backtest_jobs.stop()
         await chat_task_manager.stop_worker()
+        configure_agent_loop(None)
+        configure_research_plan_graph(None)
+        configure_workflow(None)
+        await checkpoint_manager.stop()
         await chat_store.close()
         await close_database()
 

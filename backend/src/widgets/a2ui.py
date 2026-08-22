@@ -148,7 +148,7 @@ def render_agent_pipeline(
     done_count = 0
     for index, stage in enumerate(stages):
         status = "running" if stage.get("name") == current_stage else stage.get("status", "pending")
-        if status in {"done", "complete"}:
+        if status in {"done", "complete", "completed"}:
             done_count += 1
         item_id = f"stage-{index}"
         child_ids.append(item_id)
@@ -164,6 +164,59 @@ def render_agent_pipeline(
     data["progress"] = round(done_count / len(stages) * 100) if stages else 0
     components[0]["children"] = child_ids
     return _surface(surface_id, components, data, include_create)
+
+
+def render_research_plan(
+    plan: dict[str, Any],
+    surface_id: str,
+    include_create: bool = True,
+) -> list[dict[str, Any]]:
+    """Render one replaceable public plan snapshot without exposing chain of thought."""
+    steps = [item for item in plan.get("steps", []) if isinstance(item, dict)]
+    children = ["title", "meta", "objective", "progress"]
+    components: list[dict[str, Any]] = [
+        {"id": "root", "component": "Card", "children": children},
+        _text("title", "市场研究执行计划", "h3"),
+        _text("meta", _ref("/meta"), "caption"),
+        _text("objective", _ref("/objective"), "body"),
+        {"id": "progress", "component": "Progress", "value": _ref("/progress")},
+    ]
+    for index, step in enumerate(steps):
+        component_id = f"step-{index}"
+        children.append(component_id)
+        components.append(
+            {
+                "id": component_id,
+                "component": "PipelineStep",
+                "label": str(step.get("title") or step.get("kind") or "研究步骤"),
+                "status": str(step.get("status") or "pending"),
+            }
+        )
+    components[0]["children"] = children
+    depth_labels = {"quick": "快速", "standard": "标准", "deep": "深度"}
+    status_labels = {
+        "running": "执行中",
+        "completed": "已完成",
+        "completed_with_gaps": "已完成（存在数据缺口）",
+        "failed": "失败",
+        "cancelled": "已取消",
+    }
+    return _surface(
+        surface_id,
+        components,
+        {
+            "objective": str(plan.get("objective") or "市场研究"),
+            "progress": int(plan.get("progress") or 0),
+            "meta": (
+                f"{depth_labels.get(str(plan.get('depth')), str(plan.get('depth') or '标准'))} · "
+                f"Revision {int(plan.get('revision') or 1)} · "
+                f"{status_labels.get(str(plan.get('status')), str(plan.get('status') or '执行中'))} · "
+                f"进度 {int(plan.get('progress') or 0)}%"
+            ),
+            "steps": steps,
+        },
+        include_create,
+    )
 
 
 def render_signal_gauge(

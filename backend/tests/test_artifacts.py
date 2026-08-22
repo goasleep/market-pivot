@@ -1,4 +1,5 @@
 import base64
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -87,6 +88,28 @@ async def test_analysis_artifacts_are_written_and_retrievable(tmp_path):
         assert artifact["preview_url"].endswith(f"/{artifact['artifact_id']}/preview")
     assert "ReportAgent report" in storage.objects[artifacts[0]["object_key"]].decode()
     assert len(await service.list()) == 1
+
+
+@pytest.mark.asyncio
+async def test_analysis_report_generation_runs_off_the_event_loop(tmp_path):
+    main_thread_id = threading.get_ident()
+    generation_thread_ids: list[int] = []
+
+    class ThreadRecordingReportAgent(FakeReportAgent):
+        def generate(self, decision, market_context=None, *, generated_at=None):
+            generation_thread_ids.append(threading.get_ident())
+            return super().generate(decision, market_context, generated_at=generated_at)
+
+    service = ArtifactService(
+        db_path=tmp_path / "artifacts.db",
+        storage=MemoryArtifactStorage(),
+        report_agent=ThreadRecordingReportAgent(),
+    )
+
+    await service.create_analysis_artifacts(TradeDecision(ticker="510300"), source="test")
+
+    assert generation_thread_ids
+    assert generation_thread_ids[0] != main_thread_id
 
 
 @pytest.mark.asyncio

@@ -440,6 +440,9 @@ class ChatStore:
                         "llm_model": llm_model,
                         "llm_auto": llm_auto,
                         "assistant_message_id": assistant_message_id,
+                        "execution_version": 2,
+                        "graph_name": "asset-agent-chat",
+                        "thread_id": task_id,
                     }
                 ),
                 updated_at=timestamp,
@@ -658,7 +661,7 @@ class ChatStore:
         await self._ensure_ready()
         timestamp = _now()
         updated = await ChatTask.filter(task_id=task_id, status__in=["pending", "interrupted"]).update(
-            status="running", updated_at=timestamp
+            status="running", error=None, updated_at=timestamp
         )
         if updated:
             task = await ChatTask.filter(task_id=task_id).first()
@@ -799,11 +802,21 @@ class ChatStore:
         ).exists()
         if active:
             return False
+        task_ids = list(await ChatTask.filter(conversation_id=conversation_id).values_list("task_id", flat=True))
         message_ids = await ChatMessage.filter(conversation_id=conversation_id).values_list("message_id", flat=True)
         if message_ids:
             await ChatMessageReference.filter(message_id__in=list(message_ids)).delete()
             await ChatMessageSearch.filter(message_id__in=list(message_ids)).delete()
+        if task_ids:
+            await ChatTaskEvent.filter(task_id__in=task_ids).delete()
+            await ChatTaskInteraction.filter(task_id__in=task_ids).delete()
+            await ChatTaskState.filter(task_id__in=task_ids).delete()
         await ChatMessage.filter(conversation_id=conversation_id).delete()
         await ChatTask.filter(conversation_id=conversation_id).delete()
         deleted = await ChatConversation.filter(conversation_id=conversation_id).delete()
+        if deleted and task_ids:
+            from graph.checkpointing import checkpoint_manager
+
+            for task_id in task_ids:
+                await checkpoint_manager.delete_thread_family(str(task_id))
         return bool(deleted)

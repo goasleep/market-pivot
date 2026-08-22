@@ -11,13 +11,21 @@ from loguru import logger
 
 from agents.asset_agent import asset_agent
 from application.chat_store import ChatStore
+from application.research_plan import RESEARCH_GRAPH_NAME
 from config import resolve_llm_profile
 from llm_runtime import use_llm_profile
-from widgets.a2ui import render_activity, render_markdown, render_tool_result
+from widgets.a2ui import render_activity, render_markdown, render_research_plan, render_tool_result
 
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _public_task_error(exc: Exception) -> str:
+    """Return a stable user-facing message without exposing provider internals."""
+    if "sensitive_words_detected" in str(exc).lower():
+        return "模型服务拒绝了最终文字生成；已获取的结构化数据仍可参考，请稍后重试。"
+    return "任务执行失败，请稍后重试。"
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,10 @@ class ChatTaskInput:
     llm_profile_id: str | None = None
     llm_model: str | None = None
     llm_auto: bool = False
+    execution_version: int = 2
+    graph_name: str = "asset-agent-chat"
+    thread_id: str | None = None
+    resume_from_checkpoint: bool = False
 
 
 def _llm_route(intent: Any, message: str = "") -> str:
@@ -90,7 +102,17 @@ class ChatTaskManager:
                     state = await self.store.get_task_state(task_id)
                     if state is None:
                         continue
-                    await self.start(self._task_input_from_state(state))
+                    record = await self.store.get_task(task_id)
+                    state["resume_from_checkpoint"] = bool(
+                        record
+                        and record["status"] == "interrupted"
+                        and int(state.get("execution_version", 1)) >= 2
+                    )
+                    resume_interaction = state.get("resume_interaction")
+                    await self.start(
+                        self._task_input_from_state(state),
+                        resume_interaction if isinstance(resume_interaction, dict) else None,
+                    )
             except Exception as exc:
                 logger.warning("Chat task worker poll failed: {}", exc)
             try:
@@ -333,6 +355,14 @@ class ChatTaskManager:
         pending_references: list[dict[str, Any]] = []
         seen_tool_events: set[str] = set()
         async for event in events:
+            if event.get("type") == "execution_metadata":
+                state = await self.store.get_task_state(task_input.task_id)
+                if state is not None:
+                    state["execution_version"] = int(event.get("execution_version", 2))
+                    state["graph_name"] = str(event.get("graph_name") or state.get("graph_name"))
+                    state["thread_id"] = str(event.get("thread_id") or task_input.task_id)
+                    await self.store.set_task_state(task_input.task_id, state)
+                continue
             if event.get("type") == "interaction_required":
                 for artifact in pending_artifacts:
                     await self._emit_artifact(task_input, artifact)
@@ -344,6 +374,25 @@ class ChatTaskManager:
                     )
                 await self._emit_interaction(task_input, event)
                 return True
+            if event.get("type") == "plan_update":
+                plan = event.get("plan")
+                if not isinstance(plan, dict):
+                    continue
+                state = await self.store.get_task_state(task_input.task_id)
+                if state is not None and state.get("graph_name") != RESEARCH_GRAPH_NAME:
+                    state["execution_version"] = 2
+                    state["graph_name"] = RESEARCH_GRAPH_NAME
+                    state["thread_id"] = task_input.thread_id or task_input.task_id
+                    await self.store.set_task_state(task_input.task_id, state)
+                await self._emit_a2ui(
+                    task_input,
+                    render_research_plan(
+                        plan,
+                        f"research-plan-{task_input.task_id}",
+                        include_create=bool(event.get("create", False)),
+                    ),
+                )
+                continue
             if event.get("type") == "tool":
                 event_key = f"{event.get('name', 'unknown')}:{event.get('result', '')}"
                 if event_key in seen_tool_events:
@@ -399,7 +448,13 @@ class ChatTaskManager:
                 auto=task_input.llm_auto,
             )
             with use_llm_profile(profile):
-                paused = await self._consume_agent_events(task_input, asset_agent.chat(request))
+                if task_input.resume_from_checkpoint and task_input.graph_name == RESEARCH_GRAPH_NAME:
+                    events = asset_agent.resume_research_checkpoint(request)
+                elif task_input.resume_from_checkpoint and hasattr(asset_agent, "resume_checkpoint"):
+                    events = asset_agent.resume_checkpoint(request)
+                else:
+                    events = asset_agent.chat(request)
+                paused = await self._consume_agent_events(task_input, events)
             if paused:
                 return
             await self._emit_a2ui(
@@ -423,7 +478,7 @@ class ChatTaskManager:
                 await self._broadcast(task_id, {"event": "done", "data": "{}"})
         except Exception as exc:
             logger.exception("[AssetAgent] Chat task failed: {}", exc)
-            await self._emit_text(task_input, f"请求失败：{exc}")
+            await self._emit_text(task_input, _public_task_error(exc))
             await self.store.update_task(task_id, "failed", str(exc))
             await self._broadcast(task_id, {"event": "done", "data": "{}"})
         finally:
@@ -449,6 +504,13 @@ class ChatTaskManager:
         state = await self.store.get_task_state(task_id)
         if state is None:
             raise ValueError("聊天任务缺少恢复上下文")
+        # Persist the answered interaction before making the task runnable. The
+        # previous paused coroutine may still be cleaning up, and another worker
+        # can claim the task as soon as it becomes pending. Keeping the resume
+        # payload in durable state ensures every claimant resumes the selected
+        # branch instead of restarting the original request.
+        state["resume_interaction"] = answered
+        await self.store.set_task_state(task_id, state)
         await self.store.update_task(task_id, "pending")
         task_input = ChatTaskInput(
             task_id=task_id,
@@ -461,6 +523,10 @@ class ChatTaskManager:
             llm_profile_id=state.get("llm_profile_id"),
             llm_model=state.get("llm_model"),
             llm_auto=bool(state.get("llm_auto", False)),
+            execution_version=int(state.get("execution_version", 1)),
+            graph_name=str(state.get("graph_name") or "asset-agent-chat"),
+            thread_id=str(state.get("thread_id") or state["task_id"]),
+            resume_from_checkpoint=bool(state.get("resume_from_checkpoint", False)),
         )
         await self.start(task_input, answered)
         return {
@@ -483,6 +549,10 @@ class ChatTaskManager:
             llm_profile_id=state.get("llm_profile_id"),
             llm_model=state.get("llm_model"),
             llm_auto=bool(state.get("llm_auto", False)),
+            execution_version=int(state.get("execution_version", 1)),
+            graph_name=str(state.get("graph_name") or "asset-agent-chat"),
+            thread_id=str(state.get("thread_id") or state["task_id"]),
+            resume_from_checkpoint=bool(state.get("resume_from_checkpoint", False)),
         )
 
     async def _run_resume(self, task_input: ChatTaskInput, interaction: dict[str, Any]) -> None:
@@ -490,11 +560,26 @@ class ChatTaskManager:
         heartbeat = asyncio.create_task(self._heartbeat(task_id), name=f"chat-heartbeat-{task_id}")
         try:
             await self._emit_text(task_input, "已收到你的选择，Agent 继续执行。")
-            request_payload = (interaction.get("payload") or {}).get("request") or {}
-            if hasattr(asset_agent, "request_from_payload"):
+            interaction_payload = dict(interaction.get("payload") or {})
+            request_payload = interaction_payload.get("request") or {}
+            runtime_interaction = interaction
+            if request_payload and hasattr(asset_agent, "request_from_payload"):
                 request = asset_agent.request_from_payload(request_payload)
             else:
-                request = {"intent": "chat"}
+                request = asset_agent.prepare(
+                    message=task_input.message,
+                    history=task_input.history,
+                    strategy=task_input.strategy,
+                    conversation_id=task_input.conversation_id,
+                    task_id=task_input.task_id,
+                    asset_type=task_input.asset_type,
+                    llm_profile_id=task_input.llm_profile_id,
+                    llm_model=task_input.llm_model,
+                    llm_auto=task_input.llm_auto,
+                )
+                if hasattr(asset_agent, "request_payload"):
+                    interaction_payload["request"] = asset_agent.request_payload(request)
+                    runtime_interaction = {**interaction, "payload": interaction_payload}
             profile = resolve_llm_profile(
                 task_input.llm_profile_id,
                 task_input.llm_model,
@@ -507,7 +592,7 @@ class ChatTaskManager:
             with use_llm_profile(profile):
                 paused = await self._consume_agent_events(
                     task_input,
-                    asset_agent.resume_chat(interaction, str(interaction["selected_option"])),
+                    asset_agent.resume_chat(runtime_interaction, str(interaction["selected_option"])),
                 )
             if paused:
                 return
@@ -523,7 +608,7 @@ class ChatTaskManager:
                 await self._broadcast(task_id, {"event": "done", "data": "{}"})
         except Exception as exc:
             logger.exception("[AssetAgent] Chat task resume failed: {}", task_id)
-            await self._emit_text(task_input, f"请求失败：{exc}")
+            await self._emit_text(task_input, _public_task_error(exc))
             await self.store.update_task(task_id, "failed", str(exc))
             await self._broadcast(task_id, {"event": "done", "data": "{}"})
         finally:

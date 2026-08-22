@@ -359,7 +359,13 @@ class SimulationAccountService:
         asset_type: AssetType | str | None = None,
         stop_loss: float | None = None,
         take_profit: float | None = None,
+        order_id: str | None = None,
     ) -> SimulationOrder:
+        if order_id:
+            await self._ensure_ready()
+            existing = await SimulationOrderRecord.get_or_none(order_id=order_id)
+            if existing is not None:
+                return SimulationOrder.model_validate(json.loads(existing.order_json))
         account = await self.get_account(account_id)
         if account.status != "active":
             raise ValueError("模拟账户已暂停")
@@ -381,7 +387,7 @@ class SimulationAccountService:
         if order_type == "limit" and (limit_price is None or limit_price <= 0):
             raise ValueError("限价单必须提供正数 limit_price")
         order = SimulationOrder(
-            order_id=f"sim-{uuid4().hex[:16]}",
+            order_id=order_id or f"sim-{uuid4().hex[:16]}",
             account_id=account_id,
             ticker=ticker,
             asset_type=AssetType(asset_type or account.config.asset_type),

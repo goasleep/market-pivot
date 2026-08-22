@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -645,8 +646,13 @@ class ArtifactService:
         conversation_id: str | None,
         task_id: str | None,
         metadata: dict[str, Any],
+        artifact_id: str | None = None,
     ) -> dict[str, Any]:
-        artifact_id = f"artifact-{uuid4().hex[:16]}"
+        await init_database(db_url=self.db_url)
+        artifact_id = artifact_id or f"artifact-{uuid4().hex[:16]}"
+        existing = await ArtifactRecord.get_or_none(artifact_id=artifact_id)
+        if existing is not None:
+            return self._record(existing)
         prefix = settings.s3_artifacts_prefix.strip("/")
         object_key = "/".join(part for part in (prefix, artifact_id, name) if part)
         self.storage.put(object_key, content, mime_type)
@@ -669,7 +675,6 @@ class ArtifactService:
             "metadata_json": _json(metadata),
             "created_at": created_at,
         }
-        await init_database(db_url=self.db_url)
         await ArtifactRecord.create(**record)
         response = {
             **{key: value for key, value in record.items() if key not in {"metadata_json", "relative_path"}},
@@ -690,6 +695,7 @@ class ArtifactService:
         conversation_id: str | None,
         task_id: str | None,
         metadata: dict[str, Any],
+        artifact_id: str | None = None,
     ) -> dict[str, Any]:
         """Keep the analysis-report API backed by the generic artifact writer."""
         return await self._create_bytes(
@@ -703,6 +709,7 @@ class ArtifactService:
             conversation_id=conversation_id,
             task_id=task_id,
             metadata=metadata,
+            artifact_id=artifact_id,
         )
 
     @staticmethod
@@ -759,6 +766,7 @@ class ArtifactService:
         ticker: str | None = None,
         asset_type: str | None = None,
         metadata: dict[str, Any] | None = None,
+        execution_key: str | None = None,
     ) -> list[dict[str, Any]]:
         """Persist LLM-selected text, document, data, image, or video files.
 
@@ -768,7 +776,7 @@ class ArtifactService:
         record, while distinct files remain allowed in the same task.
         """
         created: list[dict[str, Any]] = []
-        for item in artifacts:
+        for index, item in enumerate(artifacts):
             if not isinstance(item, dict):
                 raise ValueError("每个 artifact 必须是对象")
             raw_name = str(item.get("name") or "artifact").strip()
@@ -840,6 +848,11 @@ class ArtifactService:
                     conversation_id=conversation_id,
                     task_id=task_id,
                     metadata=artifact_metadata,
+                    artifact_id=(
+                        f"artifact-{hashlib.sha256(f'{execution_key}:{index}'.encode()).hexdigest()[:24]}"
+                        if execution_key
+                        else None
+                    ),
                 )
             )
         return created
@@ -852,10 +865,29 @@ class ArtifactService:
         source: str = "analysis",
         conversation_id: str | None = None,
         task_id: str | None = None,
+        execution_key: str | None = None,
     ) -> list[dict[str, Any]]:
         """Create the single user-facing HTML report through ReportAgent."""
+        artifact_id = (
+            f"artifact-{hashlib.sha256(f'{execution_key}:0'.encode()).hexdigest()[:24]}"
+            if execution_key
+            else None
+        )
+        if artifact_id:
+            await init_database(db_url=self.db_url)
+            existing = await ArtifactRecord.get_or_none(artifact_id=artifact_id)
+            if existing is not None:
+                return [self._record(existing)]
         generated_at = _now()
-        report = self.report_agent.generate(decision, market_context, generated_at=generated_at)
+        # ReportAgent uses the provider's synchronous client and can take several
+        # minutes for a full HTML document. Keep it off the FastAPI event loop so
+        # task heartbeats, cancellation, status polling, and SSE remain responsive.
+        report = await asyncio.to_thread(
+            self.report_agent.generate,
+            decision,
+            market_context,
+            generated_at=generated_at,
+        )
         metadata = dict(report.metadata)
         metadata.setdefault("generated_at", generated_at)
         return [
@@ -868,6 +900,7 @@ class ArtifactService:
                 conversation_id,
                 task_id,
                 metadata,
+                artifact_id,
             ),
         ]
 

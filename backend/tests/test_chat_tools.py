@@ -55,6 +55,26 @@ def test_chat_tools_expose_paper_portfolio_and_orders(monkeypatch, tmp_path):
     assert len(json.loads(orders)["orders"]) == 1
 
 
+def test_simulation_order_execution_key_is_idempotent(monkeypatch, tmp_path):
+    accounts = SimulationAccountService(tmp_path / "simulation-idempotent.db")
+    monkeypatch.setattr(simulation, "simulation_accounts", accounts)
+    arguments = {
+        "ticker": "510300",
+        "side": "buy",
+        "shares": 100,
+        "account_id": "default",
+        "asset_type": "etf",
+        "execution_key": "task-1:call-1",
+    }
+
+    first = json.loads(asyncio.run(simulation.submit_simulation_order.ainvoke(arguments)))
+    second = json.loads(asyncio.run(simulation.submit_simulation_order.ainvoke(arguments)))
+    orders = asyncio.run(accounts.list_orders("default"))
+
+    assert first["order"]["order_id"] == second["order"]["order_id"]
+    assert len(orders) == 1
+
+
 def test_analysis_tool_requires_and_validates_asset_type():
     tool = StockAgent()._analysis_tool()
     schema = tool.args_schema.model_json_schema()
@@ -160,6 +180,23 @@ def test_chat_agent_exposes_artifact_tool_and_persists_multiple_files(monkeypatc
     payload = json.loads(result)
     assert payload["ok"] is True
     assert len(payload["artifacts"]) == 2
+
+
+def test_artifact_execution_key_reuses_stable_sequence_ids(monkeypatch, tmp_path):
+    service = ArtifactService(
+        db_path=tmp_path / "artifacts-idempotent.db",
+        storage=LocalArtifactStorage(tmp_path / "idempotent-objects"),
+    )
+    monkeypatch.setattr(artifact_tools, "artifact_service", service)
+    arguments = {
+        "artifacts": [{"name": "研究摘要", "format": "md", "content": "# 摘要"}],
+        "execution_key": "task-1:call-artifact",
+    }
+
+    first = json.loads(asyncio.run(artifact_tools.save_artifacts.ainvoke(arguments)))
+    second = json.loads(asyncio.run(artifact_tools.save_artifacts.ainvoke(arguments)))
+
+    assert first["artifacts"][0]["artifact_id"] == second["artifacts"][0]["artifact_id"]
 
 
 def test_chat_agent_exposes_atomic_research_tools():
@@ -460,6 +497,33 @@ def test_analysis_tool_passes_asset_type_to_workflow(monkeypatch):
 
     assert json.loads(result)["asset_type"] == "etf"
     assert captured == {"ticker": "510300", "asset_type": AssetType.ETF}
+
+
+def test_analysis_tool_returns_decision_when_report_generation_fails(monkeypatch):
+    agent = StockAgent()
+
+    async def fake_analyze(request, *, config=None):
+        return {}, {
+            "final_decision": TradeDecision(
+                ticker=request.ticker,
+                asset_type=request.asset_type,
+                decision=Decision.HOLD,
+                reasoning="结构化分析仍可用",
+            )
+        }
+
+    async def failed_artifacts(*args, **kwargs):
+        raise RuntimeError("sensitive_words_detected")
+
+    monkeypatch.setattr(agent, "analyze", fake_analyze)
+    monkeypatch.setattr(research_service, "create_artifacts", failed_artifacts)
+
+    result = asyncio.run(agent._analysis_tool().ainvoke({"ticker": "510300", "asset_type": "etf"}))
+    payload = json.loads(result)
+
+    assert payload["asset_type"] == "etf"
+    assert payload["reasoning"] == "结构化分析仍可用"
+    assert payload["artifacts"] == []
 
 
 def test_analysis_tool_has_dedicated_long_running_budget():

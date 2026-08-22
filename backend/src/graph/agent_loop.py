@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import operator
+from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import (
@@ -18,13 +19,15 @@ from langchain_core.messages import (
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, StateGraph
+from langgraph.runtime import Runtime
+from langgraph.types import Command, interrupt
 
 from llm.service import get_llm_service
 from tools.policies import tool_requires_confirmation
 
 DEFAULT_MAX_STEPS = 100
 TOOL_TIMEOUT_SECONDS = 60
-LONG_RUNNING_TOOL_TIMEOUT_SECONDS = 300
+LONG_RUNNING_TOOL_TIMEOUT_SECONDS = 900
 LLM_TIMEOUT_SECONDS = 90
 
 
@@ -46,14 +49,22 @@ class AgentLoopState(TypedDict, total=False):
     messages: list[Any]
     step: int
     max_steps: int
-    tools: list[StructuredTool]
-    tool_map: dict[str, StructuredTool]
     tool_events: Annotated[list[dict[str, Any]], operator.add]
     reasoning_events: Annotated[list[dict[str, Any]], operator.add]
     final_response: str
     max_steps_reached: bool
     pending_tool_confirmation: dict[str, Any]
     checkpoint_messages: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class AgentLoopContext:
+    """Run-scoped dependencies that must never be written to checkpoints."""
+
+    tools: list[StructuredTool]
+    tool_map: dict[str, StructuredTool]
+    native_interrupts: bool = False
+    task_id: str | None = None
 
 
 def _content_text(content: Any) -> str:
@@ -82,12 +93,15 @@ def _message_objects(messages: list[Any]) -> list[Any]:
     return normalized
 
 
-async def decide_next_action(state: AgentLoopState) -> dict[str, Any]:
+async def decide_next_action(
+    state: AgentLoopState,
+    runtime: Runtime[AgentLoopContext],
+) -> dict[str, Any]:
     """Ask the model whether to answer or call one or more tools."""
     response = await asyncio.wait_for(
         get_llm_service().chat_with_tools(
             state["messages"],
-            state["tools"],
+            runtime.context.tools,
             temperature=0.2,
         ),
         timeout=LLM_TIMEOUT_SECONDS,
@@ -118,6 +132,7 @@ async def decide_next_action(state: AgentLoopState) -> dict[str, Any]:
 
 async def execute_tool_calls(
     state: AgentLoopState,
+    runtime: Runtime[AgentLoopContext],
     config: RunnableConfig,
 ) -> dict[str, Any]:
     """Execute the model's selected tools and append observations.
@@ -132,6 +147,7 @@ async def execute_tool_calls(
         return {"tool_events": [{"name": "unknown", "status": "invalid model response"}]}
 
     calls = response.tool_calls or []
+    approvals: dict[str, bool] = {}
     for call in calls:
         name = str(call.get("name", ""))
         if tool_requires_confirmation(name):
@@ -139,6 +155,22 @@ async def execute_tool_calls(
             if not isinstance(args, dict):
                 args = {}
             call_id = call.get("id", "") or f"tool-call-{state.get('step', 0)}-0"
+            if runtime.context.native_interrupts:
+                answer = interrupt(
+                    {
+                        "kind": "tool_confirmation",
+                        "question": "Agent 准备执行一个需要用户确认的工具操作，是否继续？",
+                        "tool_name": name,
+                        "tool_call_id": call_id,
+                        "args": args,
+                    }
+                )
+                approvals[call_id] = bool(
+                    answer is True
+                    or answer == "approve"
+                    or (isinstance(answer, dict) and answer.get("approved") is True)
+                )
+                continue
             return {
                 "pending_tool_confirmation": {
                     "tool_name": name,
@@ -152,8 +184,16 @@ async def execute_tool_calls(
     events: list[dict[str, Any]] = []
     for call in response.tool_calls or []:
         name = call.get("name", "")
-        tool = state["tool_map"].get(name)
+        tool = runtime.context.tool_map.get(name)
         call_id = call.get("id", "") or f"tool-call-{state.get('step', 0)}-{len(events)}"
+        if tool_requires_confirmation(name) and not approvals.get(call_id, False):
+            result = json.dumps(
+                {"ok": False, "error": {"code": "user_denied", "message": "用户拒绝执行该工具"}},
+                ensure_ascii=False,
+            )
+            events.append({"name": name, "status": "failed", "result": result})
+            tool_messages.append(ToolMessage(content=result, tool_call_id=call_id))
+            continue
         if not tool:
             result = json.dumps(
                 {"ok": False, "error": {"code": "unknown_tool", "message": f"未知工具: {name}"}},
@@ -172,6 +212,9 @@ async def execute_tool_calls(
             events.append({"name": name, "status": "failed", "result": result})
             tool_messages.append(ToolMessage(content=result, tool_call_id=call_id))
             continue
+        args = dict(args)
+        if runtime.context.task_id and name in {"save_artifacts", "submit_simulation_order"}:
+            args.setdefault("execution_key", f"{runtime.context.task_id}:{call_id}")
 
         attempts = tool_attempts(name)
         timeout_seconds = tool_timeout_seconds(name)
@@ -235,13 +278,13 @@ def route_after_tools(state: AgentLoopState) -> str:
     return END if state.get("pending_tool_confirmation") else "decide"
 
 
-def build_agent_loop():
+def build_agent_loop(checkpointer: Any | None = None):
     """Compile the cyclic LLM/tool graph.
 
     Tools are request-scoped state so the same graph can be reused for stock,
     ETF, LOF, and future capabilities without global mutable tool registries.
     """
-    graph = StateGraph(AgentLoopState)
+    graph = StateGraph(AgentLoopState, context_schema=AgentLoopContext)
     graph.add_node("decide", decide_next_action)
     graph.add_node("execute_tools", execute_tool_calls)
     graph.set_entry_point("decide")
@@ -255,10 +298,34 @@ def build_agent_loop():
         route_after_tools,
         {"decide": "decide", END: END},
     )
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 agent_loop = build_agent_loop()
+
+
+def configure_agent_loop(checkpointer: Any | None) -> None:
+    """Recompile the shared graph when the application checkpoint backend starts."""
+    global agent_loop
+    agent_loop = build_agent_loop(checkpointer)
+
+
+def get_agent_loop():
+    return agent_loop
+
+
+def _loop_context(
+    tools: list[StructuredTool],
+    *,
+    native_interrupts: bool = False,
+    task_id: str | None = None,
+) -> AgentLoopContext:
+    return AgentLoopContext(
+        tools=tools,
+        tool_map={tool.name: tool for tool in tools},
+        native_interrupts=native_interrupts,
+        task_id=task_id,
+    )
 
 
 async def run_agent_loop(
@@ -267,19 +334,19 @@ async def run_agent_loop(
     *,
     max_steps: int = DEFAULT_MAX_STEPS,
     config: dict[str, Any] | None = None,
+    task_id: str | None = None,
 ) -> AgentLoopState:
     """Run the single LangGraph chat loop and return its final state."""
     return await agent_loop.ainvoke(
         {
             "messages": messages,
-            "tools": tools,
-            "tool_map": {tool.name: tool for tool in tools},
             "step": 0,
             "max_steps": max_steps,
             "tool_events": [],
             "reasoning_events": [],
         },
         config=config,
+        context=_loop_context(tools, task_id=task_id),
     )
 
 
@@ -289,9 +356,18 @@ async def stream_agent_loop(
     *,
     max_steps: int = DEFAULT_MAX_STEPS,
     config: dict[str, Any] | None = None,
+    native_interrupts: bool = False,
+    task_id: str | None = None,
 ):
     """Stream updates from the single LangGraph chat loop."""
-    async for update in _stream_manual_agent_loop(messages, tools, max_steps=max_steps, config=config):
+    async for update in _stream_manual_agent_loop(
+        messages,
+        tools,
+        max_steps=max_steps,
+        config=config,
+        native_interrupts=native_interrupts,
+        task_id=task_id,
+    ):
         yield update
 
 
@@ -301,19 +377,53 @@ async def _stream_manual_agent_loop(
     *,
     max_steps: int = DEFAULT_MAX_STEPS,
     config: dict[str, Any] | None = None,
+    native_interrupts: bool = False,
+    task_id: str | None = None,
 ):
     """Compatibility loop used by offline tests and no-key local development."""
     async for update in agent_loop.astream(
         {
             "messages": messages,
-            "tools": tools,
-            "tool_map": {tool.name: tool for tool in tools},
             "step": 0,
             "max_steps": max_steps,
             "tool_events": [],
             "reasoning_events": [],
         },
         config=config,
+        context=_loop_context(tools, native_interrupts=native_interrupts, task_id=task_id),
+        stream_mode="updates",
+    ):
+        yield update
+
+
+async def resume_native_agent_loop(
+    tools: list[StructuredTool],
+    *,
+    approved: bool,
+    config: dict[str, Any],
+    task_id: str | None = None,
+):
+    """Resume the latest native LangGraph interrupt for one task thread."""
+    async for update in agent_loop.astream(
+        Command(resume={"approved": approved}),
+        config=config,
+        context=_loop_context(tools, native_interrupts=True, task_id=task_id),
+        stream_mode="updates",
+    ):
+        yield update
+
+
+async def resume_checkpoint_agent_loop(
+    tools: list[StructuredTool],
+    *,
+    config: dict[str, Any],
+    task_id: str | None = None,
+):
+    """Continue an interrupted native thread from its latest durable super-step."""
+    async for update in agent_loop.astream(
+        None,
+        config=config,
+        context=_loop_context(tools, native_interrupts=True, task_id=task_id),
         stream_mode="updates",
     ):
         yield update
@@ -327,6 +437,7 @@ async def resume_agent_loop(
     approved: bool,
     max_steps: int = DEFAULT_MAX_STEPS,
     config: dict[str, Any] | None = None,
+    task_id: str | None = None,
 ):
     """Resume a loop after a persisted tool confirmation decision.
 
@@ -348,7 +459,13 @@ async def resume_agent_loop(
             ensure_ascii=False,
         )
         messages.append(ToolMessage(content=result, tool_call_id=call_id))
-        async for update in stream_agent_loop(messages, tools, max_steps=max_steps, config=config):
+        async for update in stream_agent_loop(
+            messages,
+            tools,
+            max_steps=max_steps,
+            config=config,
+            task_id=task_id,
+        ):
             yield update
         return
 
@@ -367,7 +484,10 @@ async def resume_agent_loop(
         timeout_seconds = tool_timeout_seconds(name)
         for attempt in range(attempts):
             try:
-                value = await asyncio.wait_for(tool.ainvoke(args, config=config), timeout=timeout_seconds)
+                invoke_args = dict(args)
+                if task_id and name in {"save_artifacts", "submit_simulation_order"}:
+                    invoke_args.setdefault("execution_key", f"{task_id}:{call_id}")
+                value = await asyncio.wait_for(tool.ainvoke(invoke_args, config=config), timeout=timeout_seconds)
                 result = str(value)
                 break
             except asyncio.TimeoutError:
@@ -397,7 +517,13 @@ async def resume_agent_loop(
             status = "completed"
 
     messages.append(ToolMessage(content=result, tool_call_id=call_id))
-    async for update in stream_agent_loop(messages, tools, max_steps=max_steps, config=config):
+    async for update in stream_agent_loop(
+        messages,
+        tools,
+        max_steps=max_steps,
+        config=config,
+        task_id=task_id,
+    ):
         for node_update in update.values():
             if isinstance(node_update, dict) and status:
                 # The normal stream owns subsequent events. The synthetic

@@ -31,6 +31,7 @@ from engine.portfolio_allocator import (
     target_weights,
 )
 from engine.trading_engine import TimeAwareTradingEngine, decision_shares
+from graph.workflow import get_workflow
 from models.schemas import (
     AssetType,
     Decision,
@@ -45,7 +46,7 @@ from strategies.compiler import evaluate_strategy, strategy_from_mapping
 
 # Kept as a module alias for existing test doubles and callers that patch the
 # workflow. Production invocation is routed through ResearchService below.
-workflow = research_service.workflow
+workflow = get_workflow()
 
 
 async def run_backtest(

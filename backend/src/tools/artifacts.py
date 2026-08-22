@@ -35,6 +35,7 @@ async def _persist_chat_artifacts(
     *,
     conversation_id: str | None = None,
     task_id: str | None = None,
+    execution_key: str | None = None,
 ) -> str:
     if not artifacts:
         raise ValueError("至少需要一个 artifact 文件")
@@ -43,25 +44,31 @@ async def _persist_chat_artifacts(
         source="chat",
         conversation_id=conversation_id,
         task_id=task_id,
+        execution_key=execution_key,
     )
     return _dump({"ok": True, "artifacts": records})
 
 
 @tool
-async def save_artifacts(artifacts: list[ChatArtifactDraft]) -> str:
+async def save_artifacts(artifacts: list[ChatArtifactDraft], execution_key: str | None = None) -> str:
     """保存一个或多个用户可预览、下载或留档的生成产物。
 
     长文、HTML、Markdown、PDF、JSON、CSV、图片和视频都属于 artifact；
     可以一次保存多个不同文件。文本使用 content，二进制使用 content_base64。
     """
-    return await _persist_chat_artifacts(artifacts)
+    return await _persist_chat_artifacts(artifacts, execution_key=execution_key)
 
 
 def build_artifact_tool(*, conversation_id: str | None = None, task_id: str | None = None) -> StructuredTool:
     """Bind chat ownership metadata to the LLM-facing artifact tool."""
 
-    async def save_bound_artifacts(artifacts: list[ChatArtifactDraft]) -> str:
-        return await _persist_chat_artifacts(artifacts, conversation_id=conversation_id, task_id=task_id)
+    async def save_bound_artifacts(artifacts: list[ChatArtifactDraft], execution_key: str | None = None) -> str:
+        return await _persist_chat_artifacts(
+            artifacts,
+            conversation_id=conversation_id,
+            task_id=task_id,
+            execution_key=execution_key,
+        )
 
     return StructuredTool.from_function(
         coroutine=save_bound_artifacts,

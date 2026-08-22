@@ -8,6 +8,13 @@ from application import chat_service
 from application.chat_service import ChatStore, ChatTaskInput, ChatTaskManager
 
 
+def test_public_task_error_hides_provider_details():
+    message = chat_service._public_task_error(RuntimeError("sensitive_words_detected request-id-secret"))
+
+    assert message == "模型服务拒绝了最终文字生成；已获取的结构化数据仍可参考，请稍后重试。"
+    assert "request-id-secret" not in message
+
+
 @pytest_asyncio.fixture
 async def store(tmp_path):
     chat_store = ChatStore(tmp_path / "chat.db")
@@ -36,6 +43,24 @@ async def test_chat_store_persists_partial_and_cancelled_turn(store):
     task = await store.get_task("task-1")
     assert task is not None
     assert task["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_chat_store_clears_stale_error_when_task_is_reclaimed(store):
+    await store.prepare_task(
+        conversation_id="conversation-reclaim",
+        task_id="task-reclaim",
+        message="分析 ETF 510300",
+        history=[],
+    )
+    await store.update_task("task-reclaim", "interrupted", "节点正在关闭")
+
+    assert await store.begin_task("task-reclaim")
+    task = await store.get_task("task-reclaim")
+
+    assert task is not None
+    assert task["status"] == "running"
+    assert task["error"] is None
 
 
 @pytest.mark.asyncio
@@ -117,6 +142,9 @@ async def test_chat_task_pauses_and_resumes_after_interaction(store, monkeypatch
     assert (await store.get_task("task-pause"))["status"] == "waiting_user"
 
     response = await manager.respond("task-pause", interaction["interaction_id"], "quote")
+    resume_state = await store.get_task_state("task-pause")
+    assert resume_state is not None
+    assert resume_state["resume_interaction"]["selected_option"] == "quote"
     last_paused_event_id = max(int(event["id"]) for event in paused_events)
     assert response["last_event_id"] == last_paused_event_id
     resumed_events = [
@@ -132,6 +160,128 @@ async def test_chat_task_pauses_and_resumes_after_interaction(store, monkeypatch
     conversation = await store.get_conversation("conversation-pause")
     assert conversation is not None
     assert conversation["messages"][-1]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_chat_task_projects_plan_updates_to_stable_a2ui_surface(store, monkeypatch):
+    _, assistant_id = await store.prepare_task(
+        conversation_id="conversation-plan",
+        task_id="task-plan",
+        message="分析 600519",
+        history=[],
+    )
+
+    class FakeAssetAgent:
+        def prepare(self, **kwargs):
+            return kwargs
+
+        async def chat(self, request):
+            del request
+            yield {
+                "type": "plan_update",
+                "create": True,
+                "plan": {
+                    "plan_id": "plan-1",
+                    "objective": "分析 600519",
+                    "asset_type": "stock",
+                    "tickers": ["600519"],
+                    "as_of_date": "2026-08-22",
+                    "depth": "standard",
+                    "revision": 1,
+                    "status": "completed",
+                    "progress": 100,
+                    "steps": [
+                        {
+                            "id": "market",
+                            "kind": "market_snapshot",
+                            "title": "获取行情",
+                            "status": "completed",
+                        }
+                    ],
+                },
+            }
+            yield {"type": "text", "text": "研究完成。"}
+
+    monkeypatch.setattr(chat_service, "asset_agent", FakeAssetAgent())
+    manager = ChatTaskManager(store)
+    await manager.start(
+        ChatTaskInput(
+            task_id="task-plan",
+            conversation_id="conversation-plan",
+            message="分析 600519",
+            history=[],
+            strategy=None,
+            asset_type="stock",
+            assistant_message_id=assistant_id,
+        )
+    )
+    events = [event async for event in manager.subscribe("task-plan")]
+
+    a2ui_payloads = [json.loads(event["data"])["a2ui"] for event in events if event["event"] == "a2ui"]
+    surfaces = [
+        payload["createSurface"]["surfaceId"]
+        for payload in a2ui_payloads
+        if "createSurface" in payload
+    ]
+    assert "research-plan-task-plan" in surfaces
+    state = await store.get_task_state("task-plan")
+    assert state is not None
+    assert state["graph_name"] == "market-research-plan"
+
+
+@pytest.mark.asyncio
+async def test_chat_worker_resumes_persisted_interaction_instead_of_restarting(store, monkeypatch):
+    _, assistant_id = await store.prepare_task(
+        conversation_id="conversation-worker-resume",
+        task_id="task-worker-resume",
+        message="510300",
+        history=[],
+    )
+    interaction = await store.create_interaction(
+        "task-worker-resume",
+        "intent_clarification",
+        "选择任务",
+        [{"id": "quote", "label": "行情"}],
+        {"request": {"message": "510300"}},
+    )
+    answered = await store.answer_interaction(interaction["interaction_id"], "quote")
+    state = await store.get_task_state("task-worker-resume")
+    assert state is not None
+    state["resume_interaction"] = answered
+    await store.set_task_state("task-worker-resume", state)
+
+    calls: list[str] = []
+
+    class FakeAssetAgent:
+        def prepare(self, **kwargs):
+            return kwargs
+
+        async def chat(self, request):
+            del request
+            calls.append("chat")
+            yield {"type": "text", "text": "不应重新执行"}
+
+        async def resume_chat(self, resumed_interaction, option_id):
+            calls.append("resume")
+            assert resumed_interaction["interaction_id"] == interaction["interaction_id"]
+            assert option_id == "quote"
+            yield {"type": "text", "text": "已按选择恢复。"}
+
+        @staticmethod
+        def request_from_payload(payload):
+            return payload
+
+    monkeypatch.setattr(chat_service, "asset_agent", FakeAssetAgent())
+    manager = ChatTaskManager(store)
+    await manager.start_worker()
+    try:
+        events = [event async for event in manager.subscribe("task-worker-resume")]
+    finally:
+        await manager.stop_worker()
+
+    assert calls == ["resume"]
+    assert any(event["event"] == "done" for event in events)
+    assert (await store.get_task("task-worker-resume"))["status"] == "completed"
 
 
 @pytest.mark.asyncio
