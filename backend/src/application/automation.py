@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from loguru import logger
 
 from application.automation_store import automation_store
+from application.deployments import deployment_service
 from application.research import research_service
-from config import settings
+from config import get_llm_config, settings
+from data.backtest_data import prepare_backtest_data
+from data.fund_provider import async_get_fund_history
+from data.market_context import build_market_context
 from data.stock_provider import async_get_stock_history, async_get_stock_realtime
 from data.trading_calendar import is_trading_day
 from engine.broker_adapters import (
@@ -22,6 +26,7 @@ from engine.broker_adapters import (
 )
 from engine.simulation_account import simulation_accounts
 from engine.simulation_events import simulation_events
+from engine.strategy_runtime import decision_from_strategy, plan_rebalance, target_weights_for_decisions
 from engine.trading_engine import decision_shares
 from models.schemas import AgentRunSummary, AutomationTaskConfig, Decision, LiveOrderIntent, TradeDecision
 
@@ -63,6 +68,19 @@ class AutomationService:
 
     async def update_task(self, account_id: str, config: AutomationTaskConfig) -> dict:
         await simulation_accounts.get_account(account_id)
+        current = (await automation_store.get_task(account_id))["config"]
+        if current.deployment_id:
+            protected = (
+                "deployment_id",
+                "universe",
+                "asset_type",
+                "strategy_name",
+                "fill_time",
+                "execution_mode",
+                "simulation_only",
+            )
+            if any(getattr(config, field) != getattr(current, field) for field in protected):
+                raise ValueError("已部署策略的版本、标的池和执行参数不可在自动化配置中修改")
         await automation_store.update_task(account_id, config=config)
         payload = await self.get_task_payload(account_id)
         await simulation_events.publish(account_id, "automation.updated", payload)
@@ -112,6 +130,15 @@ class AutomationService:
                 "agent.run.started",
                 {"run_id": summary.run_id, "run_date": effective_date, "symbols": universe},
             )
+
+            if config.deployment_id:
+                return await self._run_deployed_account(
+                    account,
+                    config,
+                    claimed,
+                    universe,
+                    effective_date,
+                )
 
             decisions_count = 0
             orders_count = 0
@@ -188,6 +215,271 @@ class AutomationService:
                 final.model_dump(mode="json"),
             )
             return final
+
+    async def _run_deployed_account(
+        self,
+        account,
+        config: AutomationTaskConfig,
+        summary: AgentRunSummary,
+        universe: list[str],
+        effective_date: str,
+    ) -> AgentRunSummary:
+        deployment = await deployment_service.get(config.deployment_id or "")
+        if deployment.account_id != account.account_id or deployment.status != "active":
+            return await automation_store.update_run(
+                summary.run_id,
+                status="failed",
+                completed_at=datetime.now(SHANGHAI).isoformat(),
+                error="策略部署与模拟账户不匹配或未启用",
+            )
+        if deployment.strategy_spec.source == "sandbox" and config.execution_mode != "paper":
+            return await automation_store.update_run(
+                summary.run_id,
+                status="failed",
+                completed_at=datetime.now(SHANGHAI).isoformat(),
+                error="LLM/沙盒研究策略禁止进入实盘执行链路",
+            )
+        llm = get_llm_config()
+        await automation_store.update_run(
+            summary.run_id,
+            deployment_id=deployment.deployment_id,
+            strategy_sha256=deployment.strategy_sha256,
+            llm_runtime={
+                "provider": llm.get("type"),
+                "model": llm.get("model"),
+                "temperature": llm.get("temperature"),
+                "max_tokens": llm.get("max_tokens"),
+                "workflow_version": "deployed-strategy-agent-gate-v1",
+            },
+        )
+        start_date = (date.fromisoformat(effective_date) - timedelta(days=1095)).isoformat()
+        analyses: dict[str, dict] = {}
+        failures: list[str] = []
+        positions = {position.ticker: position for position in account.portfolio.positions}
+        for index, ticker in enumerate(universe, start=1):
+            try:
+                if deployment.asset_type.value == "stock":
+                    frame = await async_get_stock_history(ticker, start_date=start_date, end_date=effective_date)
+                else:
+                    frame = await async_get_fund_history(
+                        ticker,
+                        asset_type=deployment.asset_type.value,
+                        start_date=start_date,
+                        end_date=effective_date,
+                    )
+                normalized, _ = prepare_backtest_data(
+                    frame,
+                    ticker=ticker,
+                    asset_type=deployment.asset_type.value,
+                    start_date=start_date,
+                    end_date=effective_date,
+                    adjustment="qfq" if deployment.asset_type.value == "stock" else "provider_default",
+                )
+                normalized = normalized[normalized["date"] <= effective_date]
+                if normalized.empty:
+                    raise ValueError("没有截至运行日的有效历史行情")
+                current_price = float(normalized.iloc[-1]["close"])
+                context = await build_market_context(
+                    ticker,
+                    asset_type=deployment.asset_type,
+                    as_of_date=effective_date,
+                    current_price=current_price,
+                    history_df=normalized,
+                    include_live_enrichment=False,
+                )
+                freshness_error = self._data_freshness_error(context, effective_date, config.data_max_age_seconds)
+                if freshness_error:
+                    raise ValueError(freshness_error)
+                base_decision, evaluation = decision_from_strategy(
+                    deployment.strategy_spec,
+                    normalized,
+                    asset_type=deployment.asset_type,
+                    ticker=ticker,
+                    current_price=current_price,
+                    position=positions.get(ticker),
+                )
+                gate = {"approved": True, "reason": "策略为 HOLD，无需 Agent 审核"}
+                if base_decision.decision != Decision.HOLD:
+                    agent_result = await research_service.run(
+                        ticker,
+                        strategy=deployment.strategy_name,
+                        asset_type=deployment.asset_type,
+                        market_context=context,
+                        current_price=current_price,
+                        as_of_date=effective_date,
+                    )
+                    agent_decision = agent_result.get("final_decision")
+                    approved = isinstance(agent_decision, TradeDecision) and (
+                        agent_decision.decision == base_decision.decision
+                    )
+                    gate = {
+                        "approved": approved,
+                        "reason": ("Agent 与确定性策略方向一致" if approved else "Agent 未批准该策略交易方向"),
+                        "agent_decision": (
+                            agent_decision.model_dump(mode="json")
+                            if isinstance(agent_decision, TradeDecision)
+                            else None
+                        ),
+                    }
+                analyses[ticker] = {
+                    "decision": base_decision,
+                    "evaluation": evaluation,
+                    "gate": gate,
+                    "price": current_price,
+                }
+            except Exception as exc:
+                failures.append(f"{ticker}: {exc}")
+                logger.exception("Deployed strategy cycle failed for {}", ticker)
+            await automation_store.update_run(summary.run_id, symbols_processed=index)
+
+        approved_decisions = {
+            ticker: item["decision"] for ticker, item in analyses.items() if item["gate"].get("approved")
+        }
+        prices = {ticker: item["price"] for ticker, item in analyses.items()}
+        proposals: dict[str, dict] = {}
+        if deployment.portfolio_spec:
+            weights = target_weights_for_decisions(
+                approved_decisions,
+                account.portfolio,
+                deployment.portfolio_spec,
+            )
+            planned = plan_rebalance(account.portfolio, account.config, weights, prices, approved_decisions)
+            proposals = {
+                proposal["ticker"]: proposal
+                for proposal in planned
+                if proposal["ticker"] in approved_decisions
+                and approved_decisions[proposal["ticker"]].decision.value == proposal["side"]
+            }
+        else:
+            for ticker, decision in approved_decisions.items():
+                if decision.decision == Decision.HOLD:
+                    continue
+                shares = decision_shares(account.portfolio, account.config, decision, prices[ticker])
+                if shares > 0:
+                    proposals[ticker] = {
+                        "ticker": ticker,
+                        "side": decision.decision.value,
+                        "shares": shares,
+                        "price": prices[ticker],
+                        "stop_loss": decision.stop_loss,
+                        "take_profit": decision.take_profit,
+                    }
+
+        orders_count = 0
+        ordered_tickers = sorted(
+            analyses,
+            key=lambda ticker: (0 if (proposals.get(ticker) or {}).get("side") == "sell" else 1, ticker),
+        )
+        for ticker in ordered_tickers:
+            item = analyses[ticker]
+            proposal = proposals.get(ticker)
+            gate_approved = bool(item["gate"].get("approved"))
+            risk_status = "approved" if gate_approved else "rejected"
+            risk_reason = item["gate"].get("reason")
+            confirmation = "pending" if proposal and config.mode == "confirm" else "none"
+            audit = await automation_store.add_decision(
+                summary.run_id,
+                account.account_id,
+                item["decision"],
+                item["price"],
+                risk_status,
+                risk_reason,
+                signal_source="deployed_strategy",
+                strategy_evaluation=item["evaluation"],
+                agent_gate=item["gate"],
+                proposed_order=proposal,
+                confirmation_status=confirmation,
+            )
+            if proposal and config.mode == "auto" and orders_count < config.max_orders_per_run:
+                try:
+                    order = await self._submit_proposal(
+                        account.account_id,
+                        summary.run_id,
+                        audit.decision_id,
+                        deployment.deployment_id,
+                        proposal,
+                        effective_date,
+                        config,
+                    )
+                    orders_count += 1
+                    audit = await automation_store.update_decision(
+                        audit.decision_id,
+                        order_id=order.order_id,
+                        confirmation_status="confirmed",
+                        risk_status="approved" if order.status in {"pending", "filled"} else "rejected",
+                        risk_reason=order.reject_reason,
+                    )
+                except ValueError as exc:
+                    audit = await automation_store.update_decision(
+                        audit.decision_id,
+                        risk_status="rejected",
+                        risk_reason=str(exc),
+                    )
+            elif proposal and config.mode == "auto":
+                audit = await automation_store.update_decision(
+                    audit.decision_id,
+                    risk_status="rejected",
+                    risk_reason="达到本次 Agent 运行的最大订单数",
+                )
+            await automation_store.add_event(
+                account.account_id, "agent.decision", audit.model_dump(mode="json"), summary.run_id
+            )
+            await simulation_events.publish(account.account_id, "agent.decision", audit.model_dump(mode="json"))
+
+        final = await automation_store.update_run(
+            summary.run_id,
+            status="completed" if analyses or not failures else "failed",
+            symbols_processed=len(universe),
+            decisions_count=len(analyses),
+            orders_count=orders_count,
+            completed_at=datetime.now(SHANGHAI).isoformat(),
+            error="; ".join(failures) if failures else None,
+        )
+        await simulation_events.publish(
+            account.account_id,
+            "agent.run.completed" if final.status == "completed" else "agent.run.failed",
+            final.model_dump(mode="json"),
+        )
+        return final
+
+    async def _submit_proposal(
+        self,
+        account_id: str,
+        run_id: str,
+        decision_id: str,
+        deployment_id: str,
+        proposal: dict,
+        trade_date: str,
+        config: AutomationTaskConfig,
+    ):
+        import hashlib
+
+        account = await simulation_accounts.get_account(account_id)
+        if config.daily_loss_limit_pct:
+            daily_pnl = await simulation_accounts.daily_pnl(account_id)
+            if daily_pnl <= -account.portfolio.initial_capital * config.daily_loss_limit_pct:
+                raise ValueError("触发单日亏损限额")
+        order_id = f"sim-{hashlib.sha256(f'{deployment_id}:{run_id}:{decision_id}'.encode()).hexdigest()[:24]}"
+        order = await simulation_accounts.create_order(
+            account_id=account_id,
+            ticker=proposal["ticker"],
+            side=Decision(proposal["side"]),
+            shares=int(proposal["shares"]),
+            order_type="market",
+            submitted_date=trade_date,
+            source="agent",
+            run_id=run_id,
+            fill_policy=config.fill_time,
+            asset_type=config.asset_type,
+            stop_loss=proposal.get("stop_loss"),
+            take_profit=proposal.get("take_profit"),
+            order_id=order_id,
+            deployment_id=deployment_id,
+            decision_id=decision_id,
+        )
+        if config.fill_time == "same_close" and order.status == "pending":
+            order = await simulation_accounts.fill_order(order.order_id, float(proposal["price"]), trade_date)
+        return order
 
     @staticmethod
     def _data_freshness_error(context, effective_date: str, max_age_seconds: int) -> str | None:
@@ -407,12 +699,46 @@ class AutomationService:
         audit = await automation_store.get_decision(decision_id)
         if audit.account_id != account_id:
             raise KeyError("Agent decision 不属于该模拟账户")
+        if audit.confirmation_status == "rejected":
+            raise ValueError("该 Agent 决策已被用户拒绝，不能确认")
         if audit.risk_status == "rejected":
             raise ValueError("该 Agent 决策已被风控拦截，不能确认")
         if audit.order_id:
             return audit
         task = await automation_store.get_task(account_id)
         config: AutomationTaskConfig = task["config"]
+        if audit.proposed_order and config.deployment_id:
+            run = await automation_store.get_run(audit.run_id)
+            if config.fill_time == "same_close" and run.run_date != _today():
+                updated = await automation_store.update_decision(
+                    decision_id,
+                    confirmation_status="expired",
+                    risk_status="rejected",
+                    risk_reason="同日收盘执行提案已过期，请重新运行策略",
+                )
+                raise ValueError(updated.risk_reason)
+            proposal = dict(audit.proposed_order)
+            if price is not None:
+                proposal["price"] = price
+            order = await self._submit_proposal(
+                account_id,
+                audit.run_id,
+                audit.decision_id,
+                config.deployment_id,
+                proposal,
+                run.run_date,
+                config,
+            )
+            updated = await automation_store.update_decision(
+                decision_id,
+                current_price=float(proposal["price"]),
+                risk_status="approved" if order.status in {"pending", "filled"} else "rejected",
+                risk_reason=order.reject_reason,
+                order_id=order.order_id,
+                confirmation_status="confirmed",
+            )
+            await simulation_events.publish(account_id, "agent.decision.confirmed", updated.model_dump(mode="json"))
+            return updated
         fill_price = price or audit.current_price
         if fill_price <= 0:
             quote = await async_get_stock_realtime(audit.ticker)
@@ -445,6 +771,63 @@ class AutomationService:
         )
         await simulation_events.publish(account_id, "agent.decision.confirmed", updated.model_dump(mode="json"))
         return updated
+
+    async def reject_decision(self, account_id: str, decision_id: str):
+        """Record an explicit user rejection without changing risk evaluation."""
+        audit = await automation_store.get_decision(decision_id)
+        if audit.account_id != account_id:
+            raise KeyError("Agent decision 不属于该模拟账户")
+        if audit.order_id:
+            raise ValueError("该 Agent 决策已经生成订单，不能拒绝")
+        if audit.confirmation_status == "rejected":
+            return audit
+        if audit.confirmation_status != "pending":
+            raise ValueError("该 Agent 决策当前不需要确认")
+        updated = await automation_store.update_decision(
+            decision_id,
+            confirmation_status="rejected",
+        )
+        await simulation_events.publish(account_id, "agent.decision.rejected", updated.model_dump(mode="json"))
+        return updated
+
+    async def confirm_run(self, account_id: str, run_id: str) -> dict:
+        run = await automation_store.get_run(run_id)
+        if run.account_id != account_id:
+            raise KeyError("Agent run 不属于该模拟账户")
+        decisions = await automation_store.list_decisions(account_id, run_id, 1000)
+        task = await automation_store.get_task(account_id)
+        config: AutomationTaskConfig = task["config"]
+        pending = [
+            item
+            for item in decisions
+            if item.proposed_order and item.confirmation_status == "pending" and not item.order_id
+        ]
+        pending.sort(
+            key=lambda item: (
+                0 if (item.proposed_order or {}).get("side") == "sell" else 1,
+                item.ticker,
+            )
+        )
+        pending = pending[: config.max_orders_per_run]
+        confirmed = []
+        failures: list[dict[str, str]] = []
+        for audit in pending:
+            try:
+                confirmed.append(await self.confirm_decision(account_id, audit.decision_id))
+            except ValueError as exc:
+                failures.append({"decision_id": audit.decision_id, "error": str(exc)})
+        refreshed = await automation_store.get_run(run_id)
+        await automation_store.update_run(
+            run_id,
+            orders_count=max(
+                refreshed.orders_count, len([item for item in decisions if item.order_id]) + len(confirmed)
+            ),
+        )
+        return {
+            "run_id": run_id,
+            "confirmed": [item.model_dump(mode="json") for item in confirmed],
+            "failures": failures,
+        }
 
     async def settle_account(
         self,
@@ -557,7 +940,13 @@ class AutomationService:
             filled.append(
                 await simulation_accounts.fill_order(order.order_id, float(fill_map[order.ticker]), target_date)
             )
-        account = await simulation_accounts.mark_to_market(account_id, price_map, target_date)
+        task = await automation_store.get_task(account_id)
+        account = await simulation_accounts.mark_to_market(
+            account_id,
+            price_map,
+            target_date,
+            trigger_exits=not bool(task["config"].deployment_id),
+        )
         payload = {
             "account_id": account_id,
             "date": target_date,
@@ -590,9 +979,15 @@ class AutomationScheduler:
 
     async def stop(self) -> None:
         self._stopping.set()
-        if self._task:
-            await self._task
-        self._task = None
+        task, self._task = self._task, None
+        if task is None:
+            return
+        try:
+            await task
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def _run(self) -> None:
         while not self._stopping.is_set():
@@ -607,6 +1002,7 @@ class AutomationScheduler:
 
     async def tick(self, now: datetime | None = None) -> None:
         current = now or datetime.now(SHANGHAI)
+        eligible: list[str] = []
         for account in await simulation_accounts.list_accounts():
             if account.status != "active":
                 continue
@@ -626,12 +1022,23 @@ class AutomationScheduler:
                 continue
             if task["last_run_date"] == current.date().isoformat():
                 continue
-            await self.service.settle_account(account.account_id, current.date().isoformat())
-            await self.service.run_account(
-                account.account_id,
-                trigger="schedule",
-                run_date=current.date().isoformat(),
-            )
+            eligible.append(account.account_id)
+
+        semaphore = asyncio.Semaphore(settings.automation_max_concurrency)
+
+        async def run_one(account_id: str) -> None:
+            async with semaphore:
+                try:
+                    await self.service.settle_account(account_id, current.date().isoformat())
+                    await self.service.run_account(
+                        account_id,
+                        trigger="schedule",
+                        run_date=current.date().isoformat(),
+                    )
+                except Exception:
+                    logger.exception("Automation scheduler account cycle failed for {}", account_id)
+
+        await asyncio.gather(*(run_one(account_id) for account_id in eligible))
 
 
 automation_scheduler = AutomationScheduler(automation_service)

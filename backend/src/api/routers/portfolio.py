@@ -43,7 +43,7 @@ class CreateAccountRequest(BaseModel):
 
 
 class StatusRequest(BaseModel):
-    status: str = Field(..., pattern="^(active|paused)$")
+    status: str = Field(..., pattern="^(active|paused|archived)$")
 
 
 class OrderRequest(BaseModel):
@@ -209,7 +209,7 @@ async def stream_account(account_id: str, websocket: WebSocket):
             if idle_seconds >= 30:
                 await websocket.send_json({"type": "heartbeat", "account_id": account_id})
                 idle_seconds = 0
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     finally:
         await simulation_events.unsubscribe(account_id, queue)
@@ -317,6 +317,15 @@ async def reset_account(account_id: str):
         return payload
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/accounts/{account_id}/archive")
+async def archive_account(account_id: str):
+    if account_id == "default":
+        raise HTTPException(status_code=400, detail="默认模拟账户不能归档")
+    account = await simulation_accounts.set_status(account_id, "archived")
+    await _publish_account_update(account_id, event_type="account.archived", data={})
+    return await _account_payload(account.account_id)
 
 
 @router.post("/reset")

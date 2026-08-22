@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from application import automation as automation_module
@@ -95,6 +97,19 @@ async def test_scheduler_skips_non_trading_day(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_scheduler_stop_is_idempotent_after_task_cancellation():
+    class FakeService:
+        pass
+
+    scheduler = automation_module.AutomationScheduler(FakeService())
+    scheduler._task = asyncio.create_task(asyncio.sleep(60))
+    scheduler._task.cancel()
+    await scheduler.stop()
+    await scheduler.stop()
+    assert scheduler._task is None
+
+
+@pytest.mark.asyncio
 async def test_store_claim_run_is_single_winner(tmp_path):
     store = AutomationStore(tmp_path / "claim.sqlite3")
     config = AutomationTaskConfig(universe=["000001"])
@@ -104,6 +119,35 @@ async def test_store_claim_run_is_single_winner(tmp_path):
     assert first is not None
     assert first.status == "running"
     assert second is None
+
+
+@pytest.mark.asyncio
+async def test_user_can_reject_pending_decision(monkeypatch, tmp_path):
+    store = AutomationStore(tmp_path / "reject.sqlite3")
+    monkeypatch.setattr(automation_module, "automation_store", store)
+    audit = await store.add_decision(
+        "run-1",
+        "default",
+        TradeDecision(
+            ticker="000001",
+            decision=Decision.BUY,
+            confidence=0.9,
+            position_size=0.1,
+        ),
+        10.0,
+        risk_status="approved",
+        proposed_order={"ticker": "000001", "side": "buy", "shares": 100, "price": 10.0},
+        confirmation_status="pending",
+    )
+    service = AutomationService()
+
+    rejected = await service.reject_decision("default", audit.decision_id)
+    repeated = await service.reject_decision("default", audit.decision_id)
+
+    assert rejected.confirmation_status == "rejected"
+    assert repeated.confirmation_status == "rejected"
+    with pytest.raises(ValueError, match="已被用户拒绝"):
+        await service.confirm_decision("default", audit.decision_id)
 
 
 @pytest.mark.asyncio

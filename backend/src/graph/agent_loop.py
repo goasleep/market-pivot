@@ -33,14 +33,26 @@ LLM_TIMEOUT_SECONDS = 90
 
 def tool_timeout_seconds(name: str) -> int:
     """Return the execution budget for a tool invocation."""
-    if name in {"run_fund_or_stock_analysis", "run_backtest", "design_and_run_backtest"}:
+    if name in {
+        "run_fund_or_stock_analysis",
+        "run_backtest",
+        "design_and_run_backtest",
+        "compare_strategy_backtests",
+        "design_and_run_sandbox_strategy",
+    }:
         return LONG_RUNNING_TOOL_TIMEOUT_SECONDS
     return TOOL_TIMEOUT_SECONDS
 
 
 def tool_attempts(name: str) -> int:
     """Return retry count without duplicating expensive or mutating work."""
-    if name in {"run_fund_or_stock_analysis", "run_backtest", "design_and_run_backtest"}:
+    if name in {
+        "run_fund_or_stock_analysis",
+        "run_backtest",
+        "design_and_run_backtest",
+        "compare_strategy_backtests",
+        "design_and_run_sandbox_strategy",
+    }:
         return 1
     return 1 if name.startswith(("submit_", "cancel_", "create_", "fill_")) else 2
 
@@ -213,7 +225,12 @@ async def execute_tool_calls(
             tool_messages.append(ToolMessage(content=result, tool_call_id=call_id))
             continue
         args = dict(args)
-        if runtime.context.task_id and name in {"save_artifacts", "submit_simulation_order"}:
+        if runtime.context.task_id and name in {
+            "save_artifacts",
+            "submit_simulation_order",
+            "create_simulation_account",
+            "deploy_backtest_experiment",
+        }:
             args.setdefault("execution_key", f"{runtime.context.task_id}:{call_id}")
 
         attempts = tool_attempts(name)
@@ -485,7 +502,12 @@ async def resume_agent_loop(
         for attempt in range(attempts):
             try:
                 invoke_args = dict(args)
-                if task_id and name in {"save_artifacts", "submit_simulation_order"}:
+                if task_id and name in {
+                    "save_artifacts",
+                    "submit_simulation_order",
+                    "create_simulation_account",
+                    "deploy_backtest_experiment",
+                }:
                     invoke_args.setdefault("execution_key", f"{task_id}:{call_id}")
                 value = await asyncio.wait_for(tool.ainvoke(invoke_args, config=config), timeout=timeout_seconds)
                 result = str(value)

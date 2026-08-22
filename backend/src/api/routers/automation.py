@@ -110,6 +110,27 @@ async def confirm_decision(account_id: str, decision_id: str, price: float | Non
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/accounts/{account_id}/decisions/{decision_id}/reject")
+async def reject_decision(account_id: str, decision_id: str):
+    try:
+        audit = await automation_service.reject_decision(account_id, decision_id)
+        return audit.model_dump(mode="json")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/accounts/{account_id}/runs/{run_id}/confirm")
+async def confirm_run(account_id: str, run_id: str):
+    try:
+        return await automation_service.confirm_run(account_id, run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/accounts/{account_id}/events")
 async def list_events(account_id: str, limit: int = 100):
     return {"events": await automation_store.list_events(account_id, limit)}

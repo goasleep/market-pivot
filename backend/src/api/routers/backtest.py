@@ -81,6 +81,11 @@ async def get_backtest_experiment(experiment_id: str):
     return result
 
 
+@router.get("/experiments")
+async def list_backtest_experiments(limit: int = 50, offset: int = 0):
+    return {"experiments": await backtest_experiments.list(limit, offset)}
+
+
 @router.post("/run")
 async def run_backtest_api(req: BacktestRequest):
     symbols = _symbols(req)

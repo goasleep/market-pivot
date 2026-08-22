@@ -111,6 +111,7 @@ class AutomationStore:
             status="queued",
             mode=config.mode,
             strategy_name=config.strategy_name,
+            deployment_id=config.deployment_id,
             idempotency_key=idempotency_key,
         )
         timestamp = _now()
@@ -206,6 +207,12 @@ class AutomationStore:
         risk_status: str = "pending",
         risk_reason: str | None = None,
         order_id: str | None = None,
+        *,
+        signal_source: str = "agent",
+        strategy_evaluation: dict | None = None,
+        agent_gate: dict | None = None,
+        proposed_order: dict | None = None,
+        confirmation_status: str = "none",
     ) -> AgentDecisionAudit:
         await self._ready()
         audit = AgentDecisionAudit(
@@ -218,6 +225,11 @@ class AutomationStore:
             risk_status=risk_status,
             risk_reason=risk_reason,
             order_id=order_id,
+            signal_source=signal_source,
+            strategy_evaluation=strategy_evaluation or {},
+            agent_gate=agent_gate or {},
+            proposed_order=proposed_order,
+            confirmation_status=confirmation_status,
             created_at=_now(),
         )
         await AgentDecisionRecord.create(

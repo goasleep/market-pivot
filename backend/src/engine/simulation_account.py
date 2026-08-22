@@ -91,9 +91,7 @@ class SimulationAccountService:
             updated_at=_now(),
         )
 
-    async def create_account(
-        self, account_id: str, config: SimulationAccountConfig | None = None
-    ) -> SimulationAccount:
+    async def create_account(self, account_id: str, config: SimulationAccountConfig | None = None) -> SimulationAccount:
         await self._ensure_ready()
         if not ACCOUNT_ID_PATTERN.fullmatch(account_id):
             raise ValueError("account_id 只能包含字母、数字、下划线和连字符，长度 1-64")
@@ -141,9 +139,7 @@ class SimulationAccountService:
         await self._save_account(account)
         return account
 
-    async def update_external_config(
-        self, account_id: str, update: ExternalSimulationConfig
-    ) -> SimulationAccount:
+    async def update_external_config(self, account_id: str, update: ExternalSimulationConfig) -> SimulationAccount:
         account = await self.get_account(account_id)
         if not update.token:
             update = update.model_copy(update={"token": account.config.external.token})
@@ -292,8 +288,8 @@ class SimulationAccountService:
         return account
 
     async def set_status(self, account_id: str, status: str) -> SimulationAccount:
-        if status not in {"active", "paused"}:
-            raise ValueError("status 必须是 active 或 paused")
+        if status not in {"active", "paused", "archived"}:
+            raise ValueError("status 必须是 active、paused 或 archived")
         account = await self.get_account(account_id)
         account.status = status
         await self._save_account(account)
@@ -321,13 +317,21 @@ class SimulationAccountService:
         )
 
     async def mark_to_market(
-        self, account_id: str, prices: dict[str, float], snapshot_date: str
+        self,
+        account_id: str,
+        prices: dict[str, float],
+        snapshot_date: str,
+        *,
+        trigger_exits: bool = True,
     ) -> SimulationAccount:
         account = await self.get_account(account_id)
         engine = TradingEngine(account.portfolio.initial_capital, account.config, current_date=account.current_date)
         engine.portfolio = account.portfolio
         engine.set_date(snapshot_date)
-        engine.update_prices({ticker: float(price) for ticker, price in prices.items()})
+        engine.update_prices(
+            {ticker: float(price) for ticker, price in prices.items()},
+            trigger_exits=trigger_exits,
+        )
         account.portfolio = engine.portfolio
         account.current_date = snapshot_date
         await self._save_account(account)
@@ -360,6 +364,8 @@ class SimulationAccountService:
         stop_loss: float | None = None,
         take_profit: float | None = None,
         order_id: str | None = None,
+        deployment_id: str | None = None,
+        decision_id: str | None = None,
     ) -> SimulationOrder:
         if order_id:
             await self._ensure_ready()
@@ -398,6 +404,8 @@ class SimulationAccountService:
             submitted_date=submitted_date or account.current_date,
             source=source,
             run_id=run_id,
+            deployment_id=deployment_id,
+            decision_id=decision_id,
             fill_policy=effective_fill_policy,
             stop_loss=stop_loss,
             take_profit=take_profit,
@@ -446,8 +454,14 @@ class SimulationAccountService:
         engine.set_date(fill_date)
         engine.update_prices({order.ticker: execution_price})
         if order.side == Decision.BUY:
-            trade = engine.buy(order.ticker, order.shares, execution_price, fill_date,
-                              stop_loss=order.stop_loss, take_profit=order.take_profit)
+            trade = engine.buy(
+                order.ticker,
+                order.shares,
+                execution_price,
+                fill_date,
+                stop_loss=order.stop_loss,
+                take_profit=order.take_profit,
+            )
         else:
             trade = engine.sell(order.ticker, order.shares, execution_price, fill_date)
 

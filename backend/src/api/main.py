@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
-from api.routers import artifacts, automation, backtest, chat, config, health, market, portfolio
+from api.routers import artifacts, automation, backtest, chat, config, deployments, health, market, portfolio
 from application.automation import automation_scheduler
 from application.backtest_jobs import backtest_jobs
 from application.chat_service import chat_store, chat_task_manager
@@ -74,6 +74,7 @@ app.include_router(artifacts.router, prefix="/api/artifacts", tags=["artifacts"]
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(automation.router, prefix="/api/automation", tags=["automation"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
+app.include_router(deployments.router, prefix="/api/deployments", tags=["deployments"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(config.router, prefix="/api/config", tags=["config"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])

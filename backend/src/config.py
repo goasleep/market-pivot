@@ -173,6 +173,7 @@ class Settings(BaseSettings):
     # Live trading safety gate.  Keep disabled unless a reviewed broker
     # adapter and an isolated live account have been configured.
     live_trading_enabled: bool = False
+    automation_max_concurrency: int = 3
 
     # Local SQLite database for single-node mode. DATABASE_URL selects the
     # PostgreSQL runtime backend for durable multi-node deployments.

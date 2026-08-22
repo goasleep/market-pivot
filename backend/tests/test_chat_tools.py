@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+import pandas as pd
 import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
@@ -23,6 +24,7 @@ from graph.agent_loop import (
 from models.schemas import AssetType, Decision, MarketContext, TradeDecision
 from tools import artifacts as artifact_tools
 from tools import assets, data, research, simulation
+from tools.policies import tool_requires_confirmation
 from tools.registry import build_chat_tools
 from widgets.a2ui import render_activity, render_tool_result
 
@@ -101,12 +103,33 @@ def test_chat_agent_hides_mutating_tools_without_explicit_execution_request():
     }
     assert "submit_simulation_order" not in readonly_names
     assert "cancel_simulation_order" not in readonly_names
+    assert "create_simulation_account" not in readonly_names
+    assert "deploy_backtest_experiment" not in readonly_names
+    assert "set_strategy_deployment_status" not in readonly_names
+    assert "list_simulation_accounts" in readonly_names
+    assert "list_strategy_deployments" in readonly_names
 
     execution_names = {
         tool.name
         for tool in build_chat_tools(assets.get_realtime_quote, allow_mutating_tools=True)
     }
     assert "submit_simulation_order" in execution_names
+    assert "create_simulation_account" in execution_names
+    assert "deploy_backtest_experiment" in execution_names
+    assert "set_strategy_deployment_status" in execution_names
+
+
+def test_deployment_chat_tools_require_explicit_language_and_confirmation():
+    agent = StockAgent()
+    assert agent._explicitly_requests_mutation("把这个回测部署到模拟盘") is True
+    assert agent._explicitly_requests_mutation("暂停部署 deploy-123") is True
+    assert agent._explicitly_requests_mutation("查看有哪些模拟盘") is False
+    for name in (
+        "create_simulation_account",
+        "deploy_backtest_experiment",
+        "set_strategy_deployment_status",
+    ):
+        assert tool_requires_confirmation(name) is True
 
 
 @pytest.mark.asyncio
@@ -345,6 +368,84 @@ def test_compare_quotes_uses_one_market_snapshot(monkeypatch):
     assert payload["provenance"][0]["source_id"] == "akshare"
 
 
+def test_realtime_quote_falls_back_to_latest_history(monkeypatch):
+    async def empty_realtime(ticker, *, asset_type):
+        return {}
+
+    async def history(ticker, *, asset_type):
+        return pd.DataFrame(
+            [
+                {"date": "2026-08-20", "close": 4.5, "volume": 100},
+                {"date": "2026-08-21", "close": 4.68, "volume": 120},
+            ]
+        )
+
+    monkeypatch.setattr(assets, "async_get_fund_realtime", empty_realtime)
+    monkeypatch.setattr(assets, "async_get_fund_history", history)
+
+    result = asyncio.run(assets.get_realtime_quote.ainvoke({"ticker": "510300", "asset_type": "etf"}))
+    payload = json.loads(result)
+
+    assert payload["available"] is True
+    assert payload["data_status"] == "degraded"
+    assert payload["quote"]["price"] == 4.68
+    assert payload["quote"]["data_date"] == "2026-08-21"
+    assert payload["provenance"][0]["status"] == "degraded"
+    assert payload["provenance"][0]["freshness"] == "historical_fallback"
+
+
+def test_realtime_stock_quote_uses_retrieval_time_when_provider_has_no_market_date(monkeypatch):
+    async def realtime(ticker):
+        return {"ticker": ticker, "price": 10.5}
+
+    monkeypatch.setattr(assets, "async_get_stock_realtime", realtime)
+
+    result = asyncio.run(assets.get_realtime_quote.ainvoke({"ticker": "600519", "asset_type": "stock"}))
+    payload = json.loads(result)
+
+    assert payload["data_status"] == "available"
+    assert payload["quote"]["updated_at"]
+    assert payload["provenance"][0]["as_of"] == payload["quote"]["updated_at"]
+
+
+def test_compare_strategy_backtests_runs_same_assumptions_for_builtin_strategies(monkeypatch):
+    import application.strategy_comparison as comparison_module
+
+    captured = {}
+
+    async def fake_compare(spec):
+        captured["spec"] = spec
+        return {
+            "data_type": "strategy_backtest_comparison",
+            "strategy_count": len(spec.strategies),
+            "ranking": [item.name for item in spec.strategies],
+            "comparisons": [],
+            "data_snapshot": {"sha256": "a" * 64},
+            "acceptance": {"satisfied": True, "missing": []},
+        }
+
+    monkeypatch.setattr(comparison_module, "compare_strategies", fake_compare)
+    result = asyncio.run(
+        research.compare_strategy_backtests.ainvoke(
+            {
+                "ticker": "510300",
+                "asset_type": "etf",
+                "start_date": "2025-08-22",
+                "end_date": "2026-08-21",
+                "objective": "对比盈利情况",
+            }
+        )
+    )
+    payload = json.loads(result)
+
+    assert payload["strategy_count"] == 8
+    assert payload["ranking"][0] == "buy_hold"
+    assert captured["spec"].asset_type == AssetType.ETF
+    assert captured["spec"].initial_capital == 1_000_000
+    assert captured["spec"].ranking_metric == "total_return"
+    assert captured["spec"].task_contract.minimum_strategy_count == 7
+
+
 def test_parallel_search_merges_serper_and_ddgs_results(monkeypatch):
     monkeypatch.setattr(serper_provider.settings, "anysearch_api_key", "configured")
     monkeypatch.setattr(serper_provider.settings, "serper_api_key", "configured")
@@ -402,6 +503,57 @@ def test_web_content_extractor_removes_non_article_markup():
     assert "恶意指令" not in result["content"]
     assert "导航菜单" not in result["content"]
     assert result["page_title"] == "半导体行业快讯"
+
+
+def test_web_content_extractor_removes_portal_boilerplate_and_prefers_article():
+    html = """
+    <html><head><title>沪深300ETF份额变化</title></head><body>
+      <div><a href="/guba">股吧首页</a> | <a href="/hot">热门个股吧</a> |
+      <a href="/topics">热门主题吧</a> | <a href="/more">更多</a></div>
+      <div>欢迎扫码安装 - 行情和统计 相关公告 基本信息 公告申购赎回清单</div>
+      <main><article>
+        <h1>沪深300ETF份额变化</h1>
+        <p>最新公开数据显示，该基金份额较上一交易日有所变化，成交额保持在近期正常区间。</p>
+        <p>分析交易信号时仍应结合折溢价、成交量、跟踪误差以及市场整体趋势进行判断。</p>
+      </article></main>
+      <div>郑重声明：本网站所刊载的所有资料及图表仅供参考使用，投资者据此操作风险自担。</div>
+      <div>扫一扫下载APP 东方财富Level-2 东方财富证券开户 东方财富在线交易</div>
+      <div>信息网络传播视听节目许可证 0908328号 沪ICP备05006054号 版权所有</div>
+    </body></html>
+    """
+
+    result = extract_article_content(html)
+    second_result = extract_article_content(html)
+
+    assert result["content_status"] == "full_text"
+    assert result["content_filter_version"] == "v3"
+    assert "基金份额较上一交易日" in result["content"]
+    assert "股吧首页" not in result["content"]
+    assert "欢迎扫码" not in result["content"]
+    assert "郑重声明" not in result["content"]
+    assert "东方财富Level-2" not in result["content"]
+    assert "沪ICP备" not in result["content"]
+    assert second_result["content"] == result["content"]
+
+
+def test_web_content_extractor_rejects_dynamic_quote_page_shell():
+    result = extract_article_content(
+        """
+        <html><head><title>沪深300ETF华泰柏瑞(510300)股票行情</title></head><body>
+          <div>上海证券交易所服务热线：400-8888-400 APP下载 微博微信 English繁</div>
+          <div>上交所APP“通办”栏目</div>
+          <div>行情和统计 相关公告 基本信息 公告申购赎回清单</div>
+          <div>上证：- - - - (涨:- 平:- 跌:-) 深证：- - - - (涨:- 平:- 跌:-)</div>
+          <div>今开: - 最高: - 涨停: - 换手: - 成交量: - 振幅: - 外盘: -</div>
+          <div>名称最新价涨跌幅 股票名称持仓占比涨跌幅</div>
+          <div>数据加载中...</div>
+          <div>关于我们 广告服务 联系我们 法律声明 隐私保护 友情链接</div>
+        </body></html>
+        """
+    )
+
+    assert result["content_status"] == "empty"
+    assert result["content"] == ""
 
 
 def test_sentiment_does_not_use_snippet_only_results_for_llm_signal():
@@ -531,6 +683,7 @@ def test_analysis_tool_has_dedicated_long_running_budget():
     assert tool_attempts("run_fund_or_stock_analysis") == 1
     assert tool_timeout_seconds("run_backtest") == LONG_RUNNING_TOOL_TIMEOUT_SECONDS
     assert tool_timeout_seconds("design_and_run_backtest") == LONG_RUNNING_TOOL_TIMEOUT_SECONDS
+    assert tool_timeout_seconds("compare_strategy_backtests") == LONG_RUNNING_TOOL_TIMEOUT_SECONDS
     assert tool_attempts("run_backtest") == 1
     assert tool_timeout_seconds("get_latest_news") == TOOL_TIMEOUT_SECONDS
     assert tool_attempts("get_latest_news") == 2
@@ -545,6 +698,15 @@ def test_render_activity_exposes_error_reason():
         "status": "failed",
         "error": "tool_timeout: 超过 300 秒",
     }
+
+
+def test_failed_analysis_payload_does_not_render_a_decision_card():
+    messages = render_tool_result(
+        "run_fund_or_stock_analysis",
+        json.dumps({"error": "tool_timeout: 工具执行超过 300 秒"}, ensure_ascii=False),
+    )
+
+    assert messages is None
 
 
 def test_chat_renders_analysis_result_as_inline_a2ui():

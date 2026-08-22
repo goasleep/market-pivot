@@ -168,6 +168,8 @@ GET /api/artifacts/{artifact_id}/download
 
 实盘模式需要同时满足 `LIVE_TRADING_ENABLED=true`、自动化任务 `execution_mode=live` 且 `live_armed=true`、账户配置启用 `custom_http` Adapter。Adapter 对接一个由用户自行维护的交易网关：`POST /orders` 接收标准化订单，`DELETE /orders/{id}` 撤单，`GET /sync?account_id=...` 返回现金和持仓快照。默认配置和未实现的 provider 都会 fail-closed；未完成券商适配、风控和人工审批前，不应启用真实账户。
 
+回测实验完成后，可在“回测与部署”页面把实验部署为独立的内部模拟账户。每次部署保存不可变的 `StrategySpec`、组合规则、标的池、成本参数和版本哈希；默认使用 `confirm` 模式，确定性策略先生成买卖提案，再由 Agent 对买入、卖出及止损退出逐项审核。多个活动账户由调度器并发运行，并通过 `AUTOMATION_MAX_CONCURRENCY` 限制并发数。
+
 Chat 中的回测支持股票池，例如 `回测 000737,600519`。批量回测会让每个股票使用各自的历史 as-of 上下文，并合并到同一个组合中计算资金曲线和交易成本。
 
 ### 测试与构建

@@ -18,6 +18,21 @@ class ToolPolicy:
 
 
 TOOL_POLICIES: dict[str, ToolPolicy] = {
+    "create_simulation_account": ToolPolicy(
+        requires_explicit_request=True,
+        confirmation="always",
+        side_effect=True,
+    ),
+    "deploy_backtest_experiment": ToolPolicy(
+        requires_explicit_request=True,
+        confirmation="always",
+        side_effect=True,
+    ),
+    "set_strategy_deployment_status": ToolPolicy(
+        requires_explicit_request=True,
+        confirmation="always",
+        side_effect=True,
+    ),
     "submit_simulation_order": ToolPolicy(
         requires_explicit_request=True,
         confirmation="always",

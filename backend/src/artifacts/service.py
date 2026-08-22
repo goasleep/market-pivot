@@ -775,6 +775,7 @@ class ArtifactService:
         Duplicate retries with the same task/name/content return the existing
         record, while distinct files remain allowed in the same task.
         """
+        await init_database(db_url=self.db_url)
         created: list[dict[str, Any]] = []
         for index, item in enumerate(artifacts):
             if not isinstance(item, dict):
