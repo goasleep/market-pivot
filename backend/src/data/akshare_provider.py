@@ -311,6 +311,7 @@ def _date_string(value: str) -> str:
 
 def _normalize_fund_price_history(frame: pd.DataFrame, ticker: str, asset_type: str) -> pd.DataFrame:
     """Normalize primary, fallback, and cached fund OHLCV rows to one schema."""
+    source_metadata = dict(frame.attrs.get("source_metadata") or {})
     frame = frame.rename(
         columns={
             "日期": "date",
@@ -339,7 +340,30 @@ def _normalize_fund_price_history(frame: pd.DataFrame, ticker: str, asset_type: 
         frame["pct_chg"] = 0.0
     frame["ticker"] = ticker
     frame["asset_type"] = asset_type
+    if source_metadata:
+        frame.attrs["source_metadata"] = source_metadata
     return frame
+
+
+def _fund_history_source_metadata(
+    *,
+    source_id: str,
+    source_name: str,
+    endpoint: str,
+    fallback: bool,
+    fallback_reason: str = "",
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "source_id": source_id,
+        "source_name": source_name,
+        "endpoint": endpoint,
+        "fallback": fallback,
+        "source_chain": ["eastmoney", source_id] if fallback else [source_id],
+        "cache": "miss",
+    }
+    if fallback_reason:
+        metadata["fallback_reason"] = fallback_reason[:500]
+    return metadata
 
 
 def _fetch_etf_nav_history(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -765,14 +789,33 @@ def get_fund_history(
     else:
         end_date = end_date.replace("-", "")
 
-    cache_key = f"fund_hist:{asset_type}:{ticker}:{start_date}:{end_date}:{adjust}"
+    # v2 persists actual upstream provenance together with the rows. Keeping a
+    # versioned key prevents a legacy row-only cache from being mislabeled.
+    cache_key = f"fund_hist:v2:{asset_type}:{ticker}:{start_date}:{end_date}:{adjust}"
     cached = _cache.get(cache_key, ttl=TTL_DAILY)
     if cached is None and end_date < datetime.now().strftime("%Y%m%d"):
         cached = _cache.get_stale(cache_key)
         if cached is not None:
             logger.warning(f"Using stale historical cache for immutable query: {cache_key}")
     if cached is not None:
-        return _normalize_fund_price_history(pd.DataFrame(cached), ticker, asset_type)
+        if isinstance(cached, dict) and isinstance(cached.get("records"), list):
+            frame = pd.DataFrame(cached["records"])
+            source_metadata = dict(cached.get("source_metadata") or {})
+            if source_metadata:
+                source_metadata["cache"] = "hit"
+                frame.attrs["source_metadata"] = source_metadata
+        else:
+            # Defensive compatibility for manually populated v2 caches.
+            frame = pd.DataFrame(cached)
+            frame.attrs["source_metadata"] = {
+                "source_id": "unknown",
+                "source_name": "未知历史缓存",
+                "endpoint": "unknown",
+                "fallback": False,
+                "source_chain": ["unknown"],
+                "cache": "legacy_hit",
+            }
+        return _normalize_fund_price_history(frame, ticker, asset_type)
     fail_key = f"fail:{cache_key}"
     if _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
         return pd.DataFrame()
@@ -793,6 +836,12 @@ def get_fund_history(
                 adjust=adjust,
             )
             if not frame.empty:
+                frame.attrs["source_metadata"] = _fund_history_source_metadata(
+                    source_id="eastmoney",
+                    source_name="东方财富（AkShare）",
+                    endpoint=endpoint_name,
+                    fallback=False,
+                )
                 return frame
             if asset_type != "etf":
                 return frame
@@ -806,12 +855,25 @@ def get_fund_history(
             fallback = _fetch_etf_history_sina(ticker, start_date, end_date)
             if fallback.empty:
                 raise primary_exc
+            fallback.attrs["source_metadata"] = _fund_history_source_metadata(
+                source_id="sina",
+                source_name="新浪财经",
+                endpoint="hisdata_klc2",
+                fallback=True,
+                fallback_reason=str(primary_exc),
+            )
             return fallback
 
     try:
         df = _retry_with_backoff(_fetch, breaker, f"{asset_type}_history:{ticker}")
         df = _normalize_fund_price_history(df, ticker, asset_type)
-        _cache.set(cache_key, df.to_dict(orient="records"))
+        _cache.set(
+            cache_key,
+            {
+                "records": df.to_dict(orient="records"),
+                "source_metadata": dict(df.attrs.get("source_metadata") or {}),
+            },
+        )
         return df
     except Exception as e:
         logger.error(f"Failed to fetch {asset_type} history for {ticker}: {e}")

@@ -26,6 +26,7 @@ def prepare_backtest_data(
     start_date: str,
     end_date: str,
     source: str = "akshare",
+    source_metadata: dict[str, Any] | None = None,
     adjustment: str = "provider_default",
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Normalize a provider frame and return a content-addressed data manifest.
@@ -82,6 +83,7 @@ def prepare_backtest_data(
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     metadata = {
         "source": source,
+        "source_metadata": dict(source_metadata or {}),
         "adjustment": adjustment,
         "fetched_at": _utc_now(),
         "ticker": ticker,

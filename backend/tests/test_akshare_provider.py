@@ -11,17 +11,27 @@ def test_historical_fund_query_can_reuse_expired_immutable_cache(monkeypatch):
             return None
 
         def get_stale(self, key):
-            assert key == "fund_hist:etf:510300:20250101:20250105:"
-            return [
-                {
-                    "date": "2025-01-02",
-                    "open": 4.0,
-                    "high": 4.1,
-                    "low": 3.9,
-                    "close": 4.05,
-                    "volume": 100,
-                }
-            ]
+            assert key == "fund_hist:v2:etf:510300:20250101:20250105:"
+            return {
+                "records": [
+                    {
+                        "date": "2025-01-02",
+                        "open": 4.0,
+                        "high": 4.1,
+                        "low": 3.9,
+                        "close": 4.05,
+                        "volume": 100,
+                    }
+                ],
+                "source_metadata": {
+                    "source_id": "sina",
+                    "source_name": "新浪财经",
+                    "endpoint": "hisdata_klc2",
+                    "fallback": True,
+                    "source_chain": ["eastmoney", "sina"],
+                    "cache": "miss",
+                },
+            }
 
     monkeypatch.setattr(provider, "_cache", StaleCache())
     monkeypatch.setattr(
@@ -38,6 +48,8 @@ def test_historical_fund_query_can_reuse_expired_immutable_cache(monkeypatch):
     assert isinstance(result, pd.DataFrame)
     assert result.iloc[0]["close"] == 4.05
     assert result.iloc[0]["pct_chg"] == 0.0
+    assert result.attrs["source_metadata"]["source_id"] == "sina"
+    assert result.attrs["source_metadata"]["cache"] == "hit"
 
 
 def test_etf_history_uses_sina_when_eastmoney_returns_empty(monkeypatch):
@@ -94,6 +106,15 @@ def test_etf_history_uses_sina_when_eastmoney_returns_empty(monkeypatch):
     assert result.iloc[0]["pct_chg"] == 0.0
     assert result.iloc[1]["pct_chg"] == pytest.approx(10.0)
     assert result.iloc[0]["ticker"] == "159667"
+    assert result.attrs["source_metadata"] == {
+        "source_id": "sina",
+        "source_name": "新浪财经",
+        "endpoint": "hisdata_klc2",
+        "fallback": True,
+        "source_chain": ["eastmoney", "sina"],
+        "cache": "miss",
+        "fallback_reason": "etf history returned no rows",
+    }
 
 
 def test_etf_nav_accepts_eastmoney_rows_with_fourteen_fields(monkeypatch):
