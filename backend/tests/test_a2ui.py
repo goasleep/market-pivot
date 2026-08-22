@@ -155,3 +155,76 @@ def test_price_history_collection_unwraps_single_ticker_for_rendering():
     data = messages[2]["updateDataModel"]["value"]
     assert data["prices"] == [4.68]
     assert data["rows"][0]["date"] == "2026-08-21"
+
+
+def test_sandbox_candidate_renders_source_validation_and_backtest_in_one_surface():
+    messages = render_tool_result(
+        "design_and_run_sandbox_strategy",
+        json.dumps(
+            {
+                "candidate_id": "candidate-demo",
+                "status": "validated",
+                "name": "ma_rsi_demo",
+                "version": "1.0.0",
+                "ticker": "510300",
+                "asset_type": "etf",
+                "source_code": "def generate_target_positions(frame):\n    return (frame['close'] > 0).astype(int)",
+                "source_sha256": "a" * 64,
+                "strategy_spec": {
+                    "name": "ma_rsi_demo",
+                    "description": "均线与 RSI 趋势信号",
+                    "entry_conditions": [
+                        {"indicator": "rsi", "operator": "lt", "value": 30, "window": 14}
+                    ],
+                    "exit_conditions": [
+                        {"indicator": "rsi", "operator": "gte", "value": 55, "window": 14}
+                    ],
+                },
+                "validation": {
+                    "passed": True,
+                    "static_checks": {"ast_parse": True, "allowed_imports": True},
+                    "output_checks": {"binary_positions": True, "dsl_signal_equivalent": True},
+                    "deterministic": True,
+                    "causal": True,
+                    "errors": [],
+                },
+                "result": {
+                    "promotion_eligible": True,
+                    "backtest": {
+                        "final_value": 1_120_000,
+                        "total_return": 0.12,
+                        "buy_hold_return": 0.08,
+                        "max_drawdown": 0.04,
+                        "sharpe_ratio": 1.2,
+                        "total_trades": 2,
+                        "equity_curve": [
+                            {"date": "2026-01-01", "value": 1_000_000},
+                            {"date": "2026-08-21", "value": 1_120_000},
+                        ],
+                        "trades": [
+                            {
+                                "date": "2026-01-02",
+                                "action": "buy",
+                                "shares": 100,
+                                "price": 4.0,
+                                "amount": 400,
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+    )
+
+    components = messages[1]["updateComponents"]["components"]
+    data = messages[2]["updateDataModel"]["value"]
+    root = next(component for component in components if component["id"] == "root")
+    code = next(component for component in components if component["id"] == "source-code")
+    chart = next(component for component in components if component["id"] == "chart")
+
+    assert {"performance", "validation", "code"}.issubset(root["children"])
+    assert code["component"] == "CodeBlock"
+    assert chart["points"] == {"path": "/points"}
+    assert "generate_target_positions" in data["sourceCode"]
+    assert data["validationRows"][0]["status"] == "通过"
+    assert data["points"][-1]["value"] == 1_120_000

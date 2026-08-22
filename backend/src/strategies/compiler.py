@@ -190,6 +190,14 @@ def strategy_from_mapping(data: dict[str, Any], *, source: str | None = None) ->
         payload["asset_types"] = [payload["asset_types"]]
     if isinstance(payload.get("indicators"), dict):
         payload["indicators"] = list(payload["indicators"])
+    elif isinstance(payload.get("indicators"), list):
+        payload["indicators"] = [
+            str(item.get("alias") or item.get("name") or item.get("indicator") or "")
+            if isinstance(item, dict)
+            else item
+            for item in payload["indicators"]
+        ]
+        payload["indicators"] = [item for item in payload["indicators"] if item]
     payload["indicator_specs"] = _normalize_indicator_specs(payload.get("indicator_specs"))
     payload["entry_conditions"] = _normalize_conditions(
         payload.get("entry_conditions"), default_operator="gt"

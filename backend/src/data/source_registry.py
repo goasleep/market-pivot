@@ -163,6 +163,13 @@ data_sources = DataSourceRegistry(
             priority=10,
         ),
         DataSourceSpec(
+            "sandbox",
+            "受限策略研究沙盒",
+            "sandbox",
+            ("research.strategy_code", "research.backtest"),
+            priority=10,
+        ),
+        DataSourceSpec(
             "methodology_library",
             "本地投资方法论库",
             "knowledge",

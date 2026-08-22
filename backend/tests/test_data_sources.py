@@ -5,6 +5,7 @@ def test_data_source_registry_resolves_capability_and_aliases():
     source = data_sources.resolve("market.quote")
     assert source.source_id == "akshare"
     assert data_sources.get("Serper / Google Search").source_id == "serper"
+    assert data_sources.resolve("research.strategy_code").source_id == "sandbox"
 
 
 def test_provenance_is_uniform_and_preserves_source_dates():

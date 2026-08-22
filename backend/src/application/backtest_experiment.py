@@ -39,6 +39,16 @@ rebalance_frequency、source。每个条件必须使用受控指标名称、gt/g
 4. asset_types 必须是数组，只能包含 stock、etf、lof；source 必须为 llm。
 5. entry_condition_logic 和 exit_condition_logic 只能是 all 或 any；“并且”使用 all，“或者”使用 any。
    多个入场过滤条件通常使用 all，多个独立退出触发条件通常使用 any。
+6. 指标名称只能来自 available_indicators，不能自行发明 fast_ma、slow_ma、macd_signal 等名称。
+   均线交叉必须表示为一个 ma_spread_pct 指标，例如：
+   indicators=["ma_spread_5_20"]，indicator_specs=[{"name":"ma_spread_pct","alias":"ma_spread_5_20",
+   "source":"close","role":"entry","params":{"fast_window":5,"slow_window":20}}]；
+   入场使用 ma_spread_5_20 gt 0，退出使用 ma_spread_5_20 lte 0。条件的 value 必须是数值，不能用另一个指标名。
+"""
+
+STRATEGY_REPAIR_SYSTEM = STRATEGY_DESIGN_SYSTEM + """
+此前生成的策略未通过受控 DSL 校验。请根据 validation_error 修复整个策略 JSON，只修正结构、受控指标名称及其参数，
+不要改变用户的策略目标。必须重新返回完整 JSON，不要解释，不要绕过或删除实现该目标所必需的入场、退出条件。
 """
 
 PORTFOLIO_DESIGN_SYSTEM = """你是一个严格的组合配置 Agent。请为给定的同一资产类型标的池设计可复现的组合规则。
@@ -128,17 +138,57 @@ async def design_strategy(
             "available_indicators": json.loads(indicator_contract),
         }
     )
-    raw = await get_llm_service().chat_json(prompt, system=STRATEGY_DESIGN_SYSTEM)
+    llm = get_llm_service()
+    raw = await llm.chat_json(prompt, system=STRATEGY_DESIGN_SYSTEM)
     if not isinstance(raw, dict):
         raise ValueError("Agent 策略设计结果不是 JSON 对象")
-    raw["source"] = "llm"
-    raw.setdefault("asset_types", [asset_type.value])
-    raw.setdefault("name", strategy_name or "agent_backtest_strategy")
-    spec = strategy_from_mapping(raw, source="llm")
+    try:
+        spec = _validate_designed_strategy(
+            raw,
+            asset_type=asset_type,
+            strategy_name=strategy_name,
+        )
+    except ValueError as first_error:
+        repair_prompt = _json(
+            {
+                "objective": objective,
+                "asset_type": asset_type.value,
+                "ticker": ticker,
+                "requested_name": strategy_name,
+                "available_indicators": json.loads(indicator_contract),
+                "validation_error": str(first_error),
+                "invalid_strategy": raw,
+            }
+        )
+        repaired = await llm.chat_json(repair_prompt, system=STRATEGY_REPAIR_SYSTEM)
+        if not isinstance(repaired, dict):
+            raise ValueError(f"Agent 策略修复结果不是 JSON 对象；首次错误: {first_error}") from first_error
+        try:
+            spec = _validate_designed_strategy(
+                repaired,
+                asset_type=asset_type,
+                strategy_name=strategy_name,
+            )
+        except ValueError as repair_error:
+            raise ValueError(f"Agent 策略经一次修复后仍未通过校验: {repair_error}") from repair_error
     if asset_type not in spec.asset_types:
         raise ValueError(f"Agent 策略不支持资产类型 {asset_type.value}")
     register_strategy_spec(spec)
     return spec
+
+
+def _validate_designed_strategy(
+    raw: dict[str, Any],
+    *,
+    asset_type: AssetType,
+    strategy_name: str | None,
+) -> StrategySpec:
+    """Validate a copied LLM payload without mutating the model response."""
+    payload = dict(raw)
+    payload["source"] = "llm"
+    payload.setdefault("asset_types", [asset_type.value])
+    payload.setdefault("name", strategy_name or "agent_backtest_strategy")
+    return strategy_from_mapping(payload, source="llm")
 
 
 async def design_portfolio(

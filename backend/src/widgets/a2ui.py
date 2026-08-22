@@ -634,6 +634,301 @@ def render_backtest_result(
     return _surface(surface_id, components, {"points": points, "trades": rows})
 
 
+def render_sandbox_strategy_candidate(
+    payload: dict[str, Any],
+    surface_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Render generated code, sandbox checks, and its trusted-engine backtest."""
+    surface_id = surface_id or f"sandbox-candidate-{uuid4().hex}"
+    result = dict(payload.get("result") or {})
+    backtest = dict(result.get("backtest") or {})
+    strategy = dict(payload.get("strategy_spec") or {})
+    validation = dict(payload.get("validation") or {})
+    source_code = str(payload.get("source_code") or "# 未返回脚本源码")
+    promotion_eligible = result.get("promotion_eligible") is True
+    validation_passed = validation.get("passed") is True
+
+    status = str(payload.get("status") or "draft")
+    status_label = {
+        "draft": "草稿",
+        "validated": "已验证",
+        "approved": "已审核",
+        "rejected": "已拒绝",
+        "deployed": "已部署",
+    }.get(status, status)
+    validation_label = "沙盒验证通过" if validation_passed else "沙盒验证未通过"
+    eligibility_label = "可提交人工审核" if promotion_eligible else "仅限研究"
+
+    check_labels = {
+        "ast_parse": "Python 语法可解析",
+        "source_size": "源码大小符合限制",
+        "allowed_imports": "仅使用允许的依赖",
+        "denied_names": "未使用危险内置函数",
+        "denied_attributes": "未调用危险属性",
+        "function_contract": "目标仓位函数契约正确",
+        "output_length": "输出长度与行情一致",
+        "binary_positions": "仓位输出仅包含 0/1",
+        "deterministic_output": "重复执行结果一致",
+        "causal_output": "未使用未来数据",
+        "dsl_signal_equivalent": "代码信号与 StrategySpec 一致",
+        "minimum_history_5y": "有效历史区间不少于 5 年",
+        "strategy_spec_valid": "结构化 StrategySpec 可执行",
+    }
+    validation_rows = []
+    for category, checks in (
+        ("静态检查", validation.get("static_checks") or {}),
+        ("输出检查", validation.get("output_checks") or {}),
+    ):
+        for name, passed in checks.items():
+            validation_rows.append(
+                {
+                    "category": category,
+                    "check": check_labels.get(str(name), str(name)),
+                    "status": "通过" if passed else "未通过",
+                }
+            )
+    validation_rows.extend(
+        [
+            {
+                "category": "行为检查",
+                "check": "重复执行结果一致",
+                "status": "通过" if validation.get("deterministic") is True else "未通过",
+            },
+            {
+                "category": "行为检查",
+                "check": "未使用未来数据",
+                "status": "通过" if validation.get("causal") is True else "未通过",
+            },
+        ]
+    )
+    errors = [str(item) for item in validation.get("errors") or []]
+
+    rules = []
+    for direction, conditions in (
+        ("入场", strategy.get("entry_conditions") or []),
+        ("退出", strategy.get("exit_conditions") or []),
+    ):
+        for condition in conditions:
+            if not isinstance(condition, dict):
+                continue
+            value = condition.get("value")
+            rules.append(
+                {
+                    "direction": direction,
+                    "indicator": condition.get("indicator", ""),
+                    "operator": condition.get("operator", ""),
+                    "value": json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value,
+                    "window": condition.get("window") or "—",
+                }
+            )
+
+    points = [
+        {"label": str(item.get("date", "")), "value": float(item.get("value", 0) or 0)}
+        for item in backtest.get("equity_curve") or []
+        if isinstance(item, dict) and item.get("date") is not None
+    ]
+    trades = [
+        {
+            "date": trade.get("date", ""),
+            "action": "买入" if str(trade.get("action", "")).lower() == "buy" else "卖出",
+            "shares": trade.get("shares", 0),
+            "price": trade.get("price", 0),
+            "amount": trade.get("amount", 0),
+        }
+        for trade in (backtest.get("trades") or [])[-20:]
+        if isinstance(trade, dict)
+    ]
+
+    root_children = ["header", "meta", "description", "validation-summary"]
+    components: list[dict[str, Any]] = [
+        {"id": "root", "component": "Card", "children": root_children},
+        {"id": "header", "component": "Row", "children": ["title", "status", "eligibility"]},
+        _text("title", f"代码策略候选 · {payload.get('name') or strategy.get('name', '未命名策略')}", "h3"),
+        {
+            "id": "status",
+            "component": "Badge",
+            "text": f"状态：{status_label}",
+            "tone": "buy" if validation_passed else "sell",
+        },
+        {
+            "id": "eligibility",
+            "component": "Badge",
+            "text": eligibility_label,
+            "tone": "buy" if promotion_eligible else "hold",
+        },
+        _text(
+            "meta",
+            (
+                f"{payload.get('candidate_id', '—')} · {payload.get('ticker', '—')} · "
+                f"{str(payload.get('asset_type', '')).upper()} · v{payload.get('version', '—')}"
+            ),
+            "caption",
+        ),
+        _text("description", strategy.get("description") or "Agent 未提供策略说明。", "body"),
+        _text(
+            "validation-summary",
+            f"{validation_label} · {eligibility_label}",
+            "body",
+            tone="positive" if validation_passed else "negative",
+        ),
+    ]
+
+    if backtest.get("final_value") is not None:
+        root_children.append("performance")
+        components.extend(
+            [
+                {
+                    "id": "performance",
+                    "component": "Section",
+                    "title": "可信回测引擎结果",
+                    "children": ["performance-row"],
+                },
+                {
+                    "id": "performance-row",
+                    "component": "Row",
+                    "children": ["final", "return", "benchmark", "drawdown", "sharpe", "trade-count"],
+                },
+                _text("final", f"最终市值 ¥{_number_label(backtest.get('final_value'))}", "caption"),
+                _text("return", f"策略收益 {_percent_label(backtest.get('total_return'))}", "caption"),
+                _text("benchmark", f"买入持有 {_percent_label(backtest.get('buy_hold_return'))}", "caption"),
+                _text(
+                    "drawdown",
+                    f"最大回撤 {_percent_label(backtest.get('max_drawdown'))}",
+                    "caption",
+                    tone="negative",
+                ),
+                _text("sharpe", f"Sharpe {_number_label(backtest.get('sharpe_ratio'))}", "caption"),
+                _text("trade-count", f"交易 {backtest.get('total_trades', len(trades))} 次", "caption"),
+            ]
+        )
+    elif not validation_passed:
+        root_children.append("backtest-unavailable")
+        components.append(
+            _text("backtest-unavailable", "脚本未通过验证，因此没有执行绩效回测。", "body", tone="negative")
+        )
+
+    if points:
+        root_children.append("chart")
+        components.append(
+            {"id": "chart", "component": "LineChart", "points": _ref("/points"), "ariaLabel": "代码策略资金曲线"}
+        )
+    if trades:
+        root_children.append("trades")
+        components.extend(
+            [
+                {
+                    "id": "trades",
+                    "component": "Collapsible",
+                    "title": "最近交易记录",
+                    "defaultExpanded": False,
+                    "children": ["trade-table"],
+                },
+                {
+                    "id": "trade-table",
+                    "component": "DataTable",
+                    "columns": [
+                        {"key": "date", "label": "日期"},
+                        {"key": "action", "label": "方向"},
+                        {"key": "shares", "label": "数量"},
+                        {"key": "price", "label": "价格"},
+                        {"key": "amount", "label": "金额"},
+                    ],
+                    "rows": _ref("/trades"),
+                },
+            ]
+        )
+    if rules:
+        root_children.append("rules")
+        components.extend(
+            [
+                {
+                    "id": "rules",
+                    "component": "Collapsible",
+                    "title": "结构化交易规则",
+                    "defaultExpanded": False,
+                    "children": ["rule-table"],
+                },
+                {
+                    "id": "rule-table",
+                    "component": "DataTable",
+                    "columns": [
+                        {"key": "direction", "label": "阶段"},
+                        {"key": "indicator", "label": "指标"},
+                        {"key": "operator", "label": "关系"},
+                        {"key": "value", "label": "阈值"},
+                        {"key": "window", "label": "窗口"},
+                    ],
+                    "rows": _ref("/rules"),
+                },
+            ]
+        )
+
+    validation_children = ["validation-table"]
+    if errors:
+        validation_children.append("validation-errors")
+    root_children.append("validation")
+    components.extend(
+        [
+            {
+                "id": "validation",
+                "component": "Collapsible",
+                "title": (
+                    f"沙盒验证明细（{sum(row['status'] == '通过' for row in validation_rows)}"
+                    f"/{len(validation_rows)}）"
+                ),
+                "defaultExpanded": not validation_passed,
+                "children": validation_children,
+            },
+            {
+                "id": "validation-table",
+                "component": "DataTable",
+                "columns": [
+                    {"key": "category", "label": "类别"},
+                    {"key": "check", "label": "检查项"},
+                    {"key": "status", "label": "结果"},
+                ],
+                "rows": _ref("/validationRows"),
+            },
+        ]
+    )
+    if errors:
+        components.append(
+            {"id": "validation-errors", "component": "List", "title": "失败原因", "items": _ref("/errors")}
+        )
+
+    root_children.extend(["code", "notice"])
+    components.extend(
+        [
+            {
+                "id": "code",
+                "component": "Collapsible",
+                "title": "Agent 生成的 Python 信号脚本",
+                "defaultExpanded": False,
+                "children": ["source-hash", "source-code"],
+            },
+            _text("source-hash", f"SHA-256：{payload.get('source_sha256', '—')}", "caption"),
+            {"id": "source-code", "component": "CodeBlock", "language": "python", "code": _ref("/sourceCode")},
+            _text(
+                "notice",
+                "脚本仅在受限沙盒中生成目标仓位；成交、费用和绩效统一由可信回测引擎计算。仅用于研究和模拟盘。",
+                "caption",
+            ),
+        ]
+    )
+    return _surface(
+        surface_id,
+        components,
+        {
+            "points": points,
+            "trades": trades,
+            "rules": rules,
+            "validationRows": validation_rows,
+            "errors": errors,
+            "sourceCode": source_code,
+        },
+    )
+
+
 def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None = None) -> list[dict[str, Any]] | None:
     """Turn known tool payloads into native A2UI result surfaces."""
     try:
@@ -655,13 +950,7 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
         return render_backtest_result(payload, surface_id)
 
     if tool_name == "design_and_run_sandbox_strategy":
-        backtest = dict((payload.get("result") or {}).get("backtest") or {})
-        if not backtest:
-            return None
-        backtest["strategy_spec"] = payload.get("strategy_spec")
-        backtest["data_type"] = "backtest_experiment"
-        backtest["experiment_id"] = payload.get("candidate_id")
-        return render_backtest_result(backtest, surface_id)
+        return render_sandbox_strategy_candidate(payload, surface_id)
 
     if tool_name == "compare_strategy_backtests":
         rows = [

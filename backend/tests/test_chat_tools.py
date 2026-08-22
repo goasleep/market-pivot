@@ -446,6 +446,45 @@ def test_compare_strategy_backtests_runs_same_assumptions_for_builtin_strategies
     assert captured["spec"].task_contract.minimum_strategy_count == 7
 
 
+def test_sandbox_strategy_tool_keeps_source_code_for_a2ui(monkeypatch):
+    import application.strategy_candidates as candidate_module
+
+    class FakeCandidate:
+        def model_dump(self, mode="json"):
+            assert mode == "json"
+            return {
+                "candidate_id": "candidate-demo",
+                "status": "validated",
+                "name": "demo",
+                "ticker": "510300",
+                "asset_type": "etf",
+                "source_code": "def generate_target_positions(frame):\n    return [0] * len(frame)",
+                "strategy_spec": {"name": "demo"},
+                "validation": {"passed": True},
+                "result": {"promotion_eligible": True, "backtest": {}},
+            }
+
+    async def fake_generate(**_kwargs):
+        return FakeCandidate()
+
+    monkeypatch.setattr(candidate_module.strategy_candidates, "generate", fake_generate)
+    result = asyncio.run(
+        research.design_and_run_sandbox_strategy.ainvoke(
+            {
+                "objective": "生成一个测试策略",
+                "ticker": "510300",
+                "start_date": "2020-01-01",
+                "end_date": "2026-08-21",
+                "asset_type": "etf",
+            }
+        )
+    )
+    payload = json.loads(result)
+
+    assert "generate_target_positions" in payload["source_code"]
+    assert payload["data_type"] == "sandbox_strategy_candidate"
+
+
 def test_parallel_search_merges_serper_and_ddgs_results(monkeypatch):
     monkeypatch.setattr(serper_provider.settings, "anysearch_api_key", "configured")
     monkeypatch.setattr(serper_provider.settings, "serper_api_key", "configured")

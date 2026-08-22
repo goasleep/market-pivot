@@ -129,7 +129,10 @@ def test_llm_strategy_mapping_normalizes_common_shapes_and_percentages():
         {
             "name": "llm_shape_variants",
             "asset_types": "etf",
-            "indicators": {"rsi": {}, "ma": {}},
+            "indicators": [
+                {"name": "rsi", "window": 14, "calculation": "Wilder RSI"},
+                {"name": "ma", "window": 20, "calculation": "rolling mean"},
+            ],
             "indicator_specs": {
                 "rsi": {"type": "rsi", "period": 14, "source": "close", "role": "momentum"},
                 "ma": {"length": 20, "source": "close", "role": "trend"},
@@ -182,6 +185,65 @@ async def test_agent_strategy_design_is_converted_to_a_validated_spec(monkeypatc
     )
     assert spec.source == "llm"
     assert spec.entry_conditions[0].indicator == "rsi"
+
+
+@pytest.mark.asyncio
+async def test_agent_strategy_design_repairs_invented_moving_average_aliases(monkeypatch):
+    import application.backtest_experiment as experiment_module
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat_json(self, prompt, system):
+            self.calls += 1
+            if self.calls == 1:
+                assert "不能自行发明 fast_ma、slow_ma" in system
+                return {
+                    "name": "broken_ma_cross",
+                    "asset_types": ["etf"],
+                    "indicators": ["fast_ma", "slow_ma"],
+                    "entry_conditions": [{"indicator": "fast_ma", "operator": "gt", "value": 0}],
+                }
+            assert "validation_error" in prompt
+            assert "fast_ma" in prompt
+            assert "修复整个策略 JSON" in system
+            return {
+                "name": "repaired_ma_cross",
+                "asset_types": ["etf"],
+                "indicators": ["ma_spread_5_20"],
+                "indicator_specs": [
+                    {
+                        "name": "ma_spread_pct",
+                        "alias": "ma_spread_5_20",
+                        "source": "close",
+                        "role": "entry",
+                        "params": {"fast_window": 5, "slow_window": 20},
+                    }
+                ],
+                "entry_conditions": [
+                    {"indicator": "ma_spread_5_20", "operator": "gt", "value": 0}
+                ],
+                "exit_conditions": [
+                    {"indicator": "ma_spread_5_20", "operator": "lte", "value": 0}
+                ],
+            }
+
+    fake_llm = FakeLLM()
+    monkeypatch.setattr(experiment_module, "get_llm_service", lambda: fake_llm)
+    monkeypatch.setattr(experiment_module, "register_strategy_spec", lambda spec: spec)
+
+    spec = await experiment_module.design_strategy(
+        objective="设计 MA5/20 均线交叉策略",
+        asset_type=AssetType.ETF,
+        ticker="510300",
+    )
+
+    assert fake_llm.calls == 2
+    assert spec.indicators == ["ma_spread_5_20"]
+    assert spec.indicator_specs[0].name == "ma_spread_pct"
+    assert spec.indicator_specs[0].params == {"fast_window": 5, "slow_window": 20}
+    assert spec.entry_conditions[0].indicator == "ma_spread_5_20"
 
 
 @pytest.mark.asyncio

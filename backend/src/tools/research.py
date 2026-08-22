@@ -239,7 +239,6 @@ async def design_and_run_sandbox_strategy(
         initial_capital=initial_capital,
     )
     payload = candidate.model_dump(mode="json")
-    payload.pop("source_code", None)
     payload.update(
         {
             "data_type": "sandbox_strategy_candidate",

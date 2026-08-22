@@ -98,3 +98,50 @@ def generate_target_positions(frame):
     assert (await service.get(candidate.candidate_id)).status == "deployed"
     experiment = await experiments.get(f"sandbox-{candidate.candidate_id}")
     assert experiment["source_sha256"] == candidate.source_sha256
+
+
+@pytest.mark.asyncio
+async def test_invalid_strategy_spec_is_preserved_as_research_only_candidate(monkeypatch, tmp_path):
+    frame = _history()
+    snapshot = {
+        "sha256": "b" * 64,
+        "actual_start_date": frame.iloc[0]["date"],
+        "actual_end_date": frame.iloc[-1]["date"],
+    }
+
+    class FakeLLM:
+        async def chat_json(self, *_args, **_kwargs):
+            return {
+                "source_code": """
+def generate_target_positions(frame):
+    return (frame["close"].rolling(5).mean() > frame["close"].rolling(20).mean()).fillna(False).astype(int)
+""",
+                "strategy_spec": {
+                    "name": "invalid_aliases",
+                    "asset_types": ["etf"],
+                    "indicators": ["fast_ma", "slow_ma"],
+                    "entry_conditions": [{"indicator": "fast_ma", "operator": "gt", "value": 0}],
+                },
+            }
+
+    async def fake_prepared(**_kwargs):
+        return frame, snapshot
+
+    monkeypatch.setattr(candidate_module, "get_llm_service", lambda: FakeLLM())
+    monkeypatch.setattr(candidate_module, "prepare_single_backtest_data", fake_prepared)
+    service = StrategyCandidateService(tmp_path / "invalid-candidate.sqlite3")
+
+    candidate = await service.generate(
+        objective="测试非法别名",
+        ticker="510300",
+        asset_type="etf",
+        start_date="2016-01-01",
+        end_date="2026-01-01",
+    )
+
+    assert candidate.status == "draft"
+    assert candidate.validation.passed is True
+    assert candidate.validation.output_checks["strategy_spec_valid"] is False
+    assert candidate.result["promotion_eligible"] is False
+    assert candidate.result["backtest"]["final_value"] > 0
+    assert any("StrategySpec" in error for error in candidate.validation.errors)

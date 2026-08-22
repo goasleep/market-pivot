@@ -21,7 +21,7 @@ from data.tortoise_db import init_database
 from engine.backtester import prepare_single_backtest_data
 from engine.strategy_runtime import decision_from_strategy
 from llm.service import get_llm_service
-from models.schemas import AssetType, Decision, Position, StrategySpec
+from models.schemas import AssetType, Decision, Position, StrategyCondition, StrategySpec
 from models.strategy_research import ResearchStrategyCandidate
 from strategies.compiler import available_indicators, strategy_from_mapping
 
@@ -31,6 +31,8 @@ generate_target_positions(frame)，输入列仅有 date/open/high/low/close/volu
 函数必须只使用截至当前行的 rolling/expanding/shift 数据，禁止 iloc[-1] 影响历史行，禁止负数 shift，禁止网络、文件、
 进程、线程、反射、动态执行和随机数。pandas 以 pd、numpy 以 np 预置。
 strategy_spec 必须使用给定受控指标描述与代码完全相同的信号，source=sandbox；只有两者逐日信号完全一致才可进入模拟盘审批。
+指标名称只能来自 available_indicators，不能发明 fast_ma 或 slow_ma。均线交叉必须使用 ma_spread_pct，并在
+indicator_specs.params 中提供 fast_window、slow_window，通过 alias 在入场条件中与数值 0 比较。
 不要计算成交价、订单、资金、费用或绩效，这些由可信交易引擎负责。"""
 
 
@@ -106,7 +108,19 @@ class StrategyCandidateService:
         strategy_payload = dict(raw.get("strategy_spec") or {})
         strategy_payload.setdefault("name", f"sandbox_{ticker}_{uuid4().hex[:6]}")
         strategy_payload.setdefault("asset_types", [kind.value])
-        strategy = strategy_from_mapping(strategy_payload, source="sandbox")
+        strategy_error = ""
+        try:
+            strategy = strategy_from_mapping(strategy_payload, source="sandbox")
+        except (TypeError, ValueError) as exc:
+            strategy_error = str(exc)[:1000]
+            strategy = StrategySpec(
+                name=str(strategy_payload.get("name") or f"sandbox_{ticker}_{uuid4().hex[:6]}"),
+                description="原始结构化策略未通过验证；当前候选仅保留代码研究结果，不能部署。",
+                asset_types=[kind],
+                indicators=["close"],
+                entry_conditions=[StrategyCondition(indicator="close", operator="lt", value=0)],
+                source="sandbox",
+            )
         prepared = await prepare_single_backtest_data(
             ticker=ticker,
             start_date=start_date,
@@ -115,8 +129,8 @@ class StrategyCandidateService:
         )
         frame, snapshot = prepared
         positions, validation = await validate_and_run_signals(source, frame)
-        dsl_positions = _strategy_target_positions(strategy, frame) if validation.passed else []
-        equivalent = bool(positions) and positions == dsl_positions
+        dsl_positions = _strategy_target_positions(strategy, frame) if validation.passed and not strategy_error else []
+        equivalent = bool(positions) and positions == dsl_positions and not strategy_error
         history_years = (
             date.fromisoformat(str(snapshot["actual_end_date"]))
             - date.fromisoformat(str(snapshot["actual_start_date"]))
@@ -124,6 +138,9 @@ class StrategyCandidateService:
         history_sufficient = history_years >= 5 and len(frame) >= 750
         validation.output_checks["dsl_signal_equivalent"] = equivalent
         validation.output_checks["minimum_history_5y"] = history_sufficient
+        validation.output_checks["strategy_spec_valid"] = not strategy_error
+        if strategy_error:
+            validation.errors.append(f"结构化 StrategySpec 未通过验证: {strategy_error}")
         if not equivalent:
             validation.errors.append("代码信号与可部署 StrategySpec 不完全一致，仅可保留为研究候选")
         if not history_sufficient:

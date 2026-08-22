@@ -429,6 +429,20 @@ function RenderComponent({
         </p>
       );
     }
+    case "CodeBlock": {
+      const code = displayValue(resolve(component.code));
+      const language = displayValue(resolve(component.language)) || "text";
+      return (
+        <div className="overflow-hidden rounded-lg border border-slate-700 bg-slate-950 text-slate-100">
+          <div className="border-b border-slate-800 px-3 py-1.5 font-mono text-[11px] uppercase tracking-wide text-slate-400">
+            {language}
+          </div>
+          <pre className="max-h-[32rem] overflow-auto p-3 text-xs leading-relaxed">
+            <code className="font-mono">{code}</code>
+          </pre>
+        </div>
+      );
+    }
     case "Row":
       return <div className="flex flex-wrap items-center gap-3">{renderChildren()}</div>;
     case "Column":
