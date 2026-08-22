@@ -80,3 +80,23 @@ async def test_decision_downgrades_buy_without_price_evidence():
 
     assert decision.decision == Decision.HOLD
     assert "降级为观望" in decision.reasoning
+
+
+@pytest.mark.asyncio
+async def test_decision_hides_provider_error_when_llm_fails():
+    class RejectedLLM:
+        async def chat_json(self, prompt: str, system: str) -> dict:
+            raise RuntimeError("sensitive_words_detected")
+
+    decision = await decide(
+        "510300",
+        {"technical": AgentReport(agent_name="technical", reasoning="test")},
+        current_price=3.9,
+        asset_type=AssetType.ETF,
+        llm=RejectedLLM(),
+    )
+
+    assert decision.decision == Decision.HOLD
+    assert decision.confidence == 0.0
+    assert decision.reasoning == "组合决策模型暂时不可用，本次已降级为观望；结构化行情仍可单独参考。"
+    assert "sensitive_words_detected" not in decision.reasoning

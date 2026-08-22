@@ -412,6 +412,8 @@ Make your final decision as JSON.
         return TradeDecision(
             ticker=ticker,
             asset_type=asset_type,
-            reasoning=f"Decision error: {e}",
+            decision=Decision.HOLD,
+            confidence=0.0,
+            reasoning="组合决策模型暂时不可用，本次已降级为观望；结构化行情仍可单独参考。",
             agent_reports={name: r.reasoning for name, r in agent_reports.items()},
         )

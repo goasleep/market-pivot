@@ -68,34 +68,34 @@ async def debate(
 
 Argue why this stock should be bought. Focus on the strongest evidence.
 """
-    bull_arg = await llm_service.chat(bull_prompt, system=BULL_SYSTEM)
-
     bear_prompt = f"""Based on the following analysis for {asset_label} {ticker}, present your bearish case:
 
 {analysis_summary}
 
 Argue why this stock should be sold. Focus on the strongest evidence.
 """
-    bear_arg = await llm_service.chat(bear_prompt, system=BEAR_SYSTEM)
+    try:
+        bull_arg = await llm_service.chat(bull_prompt, system=BULL_SYSTEM)
+        bear_arg = await llm_service.chat(bear_prompt, system=BEAR_SYSTEM)
 
-    # Round 2: Rebuttal
-    if rounds >= 2:
-        bull_rebuttal_prompt = f"""The bear argues:
+        # Round 2: Rebuttal
+        if rounds >= 2:
+            bull_rebuttal_prompt = f"""The bear argues:
 {bear_arg}
 
 Rebut their arguments and strengthen your bull case for {ticker}.
 """
-        bull_arg = await llm_service.chat(bull_rebuttal_prompt, system=BULL_SYSTEM)
+            bull_arg = await llm_service.chat(bull_rebuttal_prompt, system=BULL_SYSTEM)
 
-        bear_rebuttal_prompt = f"""The bull argues:
+            bear_rebuttal_prompt = f"""The bull argues:
 {bull_arg}
 
 Rebut their arguments and strengthen your bear case for {ticker}.
 """
-        bear_arg = await llm_service.chat(bear_rebuttal_prompt, system=BEAR_SYSTEM)
+            bear_arg = await llm_service.chat(bear_rebuttal_prompt, system=BEAR_SYSTEM)
 
-    # Judge evaluates
-    judge_prompt = f"""Evaluate the bull vs bear debate for {asset_label} {ticker}.
+        # Judge evaluates
+        judge_prompt = f"""Evaluate the bull vs bear debate for {asset_label} {ticker}.
 
 Bull argument:
 {bull_arg}
@@ -108,7 +108,6 @@ Original analysis:
 
 Make your judgment as JSON. Score both sides 0-10 and give final signal.
 """
-    try:
         result = await llm_service.chat_json(judge_prompt, system=JUDGE_SYSTEM)
         return AgentReport(
             agent_name="debate",
@@ -123,8 +122,9 @@ Make your judgment as JSON. Score both sides 0-10 and give final signal.
             },
         )
     except Exception as e:
-        logger.error(f"[DebateRoom] Judge error: {e}")
+        logger.error(f"[DebateRoom] LLM error: {e}")
         return AgentReport(
             agent_name="debate",
-            reasoning=f"Debate judge error: {e}",
+            reasoning="多空辩论模型暂时不可用，已降级为中性结论。",
+            key_data={"degraded": True, "reason": "llm_unavailable"},
         )

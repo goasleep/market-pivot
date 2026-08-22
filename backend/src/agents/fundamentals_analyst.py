@@ -87,4 +87,8 @@ Signal: buy if undervalued with strong fundamentals, sell if overvalued or deter
         )
     except Exception as e:
         logger.error(f"[FundamentalsAgent] LLM error: {e}")
-        return AgentReport(agent_name="fundamentals", reasoning=f"Analysis error: {e}")
+        return AgentReport(
+            agent_name="fundamentals",
+            reasoning="基本面分析模型暂时不可用，已按中性信号降级。",
+            key_data={"degraded": True, "reason": "llm_unavailable"},
+        )

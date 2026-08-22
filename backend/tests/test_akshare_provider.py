@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 import requests
 
 import data.akshare_provider as provider
@@ -36,6 +37,7 @@ def test_historical_fund_query_can_reuse_expired_immutable_cache(monkeypatch):
     )
     assert isinstance(result, pd.DataFrame)
     assert result.iloc[0]["close"] == 4.05
+    assert result.iloc[0]["pct_chg"] == 0.0
 
 
 def test_etf_history_uses_sina_when_eastmoney_returns_empty(monkeypatch):
@@ -58,7 +60,15 @@ def test_etf_history_uses_sina_when_eastmoney_returns_empty(monkeypatch):
                 "low": 0.9,
                 "close": 1.05,
                 "volume": 100,
-            }
+            },
+            {
+                "date": "2025-08-19",
+                "open": 1.05,
+                "high": 1.2,
+                "low": 1.0,
+                "close": 1.155,
+                "volume": 120,
+            },
         ]
     )
     monkeypatch.setattr(provider, "_cache", EmptyCache())
@@ -79,8 +89,10 @@ def test_etf_history_uses_sina_when_eastmoney_returns_empty(monkeypatch):
         end_date="2025-08-20",
     )
 
-    assert len(result) == 1
+    assert len(result) == 2
     assert result.iloc[0]["close"] == 1.05
+    assert result.iloc[0]["pct_chg"] == 0.0
+    assert result.iloc[1]["pct_chg"] == pytest.approx(10.0)
     assert result.iloc[0]["ticker"] == "159667"
 
 

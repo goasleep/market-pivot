@@ -125,4 +125,8 @@ URL 仅用于标识来源，你不能打开 URL，也不能根据 URL 或标题�
         )
     except Exception as e:
         logger.error(f"[SentimentAgent] LLM error: {e}")
-        return AgentReport(agent_name="sentiment", reasoning=f"Analysis error: {e}")
+        return AgentReport(
+            agent_name="sentiment",
+            reasoning="舆情分析模型暂时不可用，已按中性信号降级。",
+            key_data={"degraded": True, "reason": "llm_unavailable"},
+        )

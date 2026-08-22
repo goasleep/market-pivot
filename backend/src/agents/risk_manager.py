@@ -79,4 +79,15 @@ Conservative when signals conflict, more confident when signals align.
         )
     except Exception as e:
         logger.error(f"[RiskManager] LLM error: {e}")
-        return AgentReport(agent_name="risk_manager", reasoning=f"Risk assessment error: {e}")
+        return AgentReport(
+            agent_name="risk_manager",
+            reasoning="风险评估模型暂时不可用，已采用保守风险上限。",
+            key_data={
+                "degraded": True,
+                "reason": "llm_unavailable",
+                "risk_level": "high",
+                "max_position_pct": 0.2,
+                "stop_loss_pct": 0.05,
+                "risk_factors": ["风险评估模型不可用"],
+            },
+        )

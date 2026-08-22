@@ -309,6 +309,39 @@ def _date_string(value: str) -> str:
     return f"{normalized[:4]}-{normalized[4:6]}-{normalized[6:8]}"
 
 
+def _normalize_fund_price_history(frame: pd.DataFrame, ticker: str, asset_type: str) -> pd.DataFrame:
+    """Normalize primary, fallback, and cached fund OHLCV rows to one schema."""
+    frame = frame.rename(
+        columns={
+            "日期": "date",
+            "开盘": "open",
+            "开盘价": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最高价": "high",
+            "最低": "low",
+            "最低价": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+            "涨跌幅": "pct_chg",
+            "换手率": "turnover",
+        }
+    ).copy()
+    if "close" in frame.columns:
+        close = pd.to_numeric(frame["close"], errors="coerce")
+        calculated_change = close.pct_change(fill_method=None).mul(100)
+        if "pct_chg" in frame.columns:
+            reported_change = pd.to_numeric(frame["pct_chg"], errors="coerce")
+            frame["pct_chg"] = reported_change.fillna(calculated_change).fillna(0.0)
+        else:
+            frame["pct_chg"] = calculated_change.fillna(0.0)
+    elif "pct_chg" not in frame.columns:
+        frame["pct_chg"] = 0.0
+    frame["ticker"] = ticker
+    frame["asset_type"] = asset_type
+    return frame
+
+
 def _fetch_etf_nav_history(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     """Fetch ETF NAV pages and preserve the upstream JSON field names.
 
@@ -739,7 +772,7 @@ def get_fund_history(
         if cached is not None:
             logger.warning(f"Using stale historical cache for immutable query: {cache_key}")
     if cached is not None:
-        return pd.DataFrame(cached)
+        return _normalize_fund_price_history(pd.DataFrame(cached), ticker, asset_type)
     fail_key = f"fail:{cache_key}"
     if _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
         return pd.DataFrame()
@@ -777,23 +810,7 @@ def get_fund_history(
 
     try:
         df = _retry_with_backoff(_fetch, breaker, f"{asset_type}_history:{ticker}")
-        col_map = {
-            "日期": "date",
-            "开盘": "open",
-            "开盘价": "open",
-            "收盘": "close",
-            "最高": "high",
-            "最高价": "high",
-            "最低": "low",
-            "最低价": "low",
-            "成交量": "volume",
-            "成交额": "amount",
-            "涨跌幅": "pct_chg",
-            "换手率": "turnover",
-        }
-        df = df.rename(columns=col_map)
-        df["ticker"] = ticker
-        df["asset_type"] = asset_type
+        df = _normalize_fund_price_history(df, ticker, asset_type)
         _cache.set(cache_key, df.to_dict(orient="records"))
         return df
     except Exception as e:

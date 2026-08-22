@@ -59,6 +59,10 @@ async def analyze(
     indicators = calculate_technical_indicators(df.tail(days))
 
     # Build prompt
+    if "pct_chg" not in df.columns:
+        df = df.copy()
+        close = pd.to_numeric(df["close"], errors="coerce")
+        df["pct_chg"] = close.pct_change(fill_method=None).mul(100).fillna(0.0)
     recent_data = df.tail(20)[["date", "close", "volume", "pct_chg"]].to_dict(orient="records")
     asset_label = (
         "A-share stock"
@@ -96,7 +100,11 @@ Signal: buy if technicals suggest upward momentum, sell if downward, hold if mix
         )
     except Exception as e:
         logger.error(f"[TechnicalAgent] LLM error: {e}")
-        return AgentReport(agent_name="technical", reasoning=f"Analysis error: {e}")
+        return AgentReport(
+            agent_name="technical",
+            reasoning="技术分析模型暂时不可用，已按中性信号降级；请以结构化行情和确定性指标为准。",
+            key_data={"degraded": True, "reason": "llm_unavailable"},
+        )
 
 
 def calculate_technical_indicators(df: pd.DataFrame) -> dict:
