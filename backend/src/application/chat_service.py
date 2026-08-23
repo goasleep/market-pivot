@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 from loguru import logger
@@ -33,10 +33,10 @@ class ChatTaskInput:
     task_id: str
     conversation_id: str
     message: str
-    history: list[dict[str, Any]]
     strategy: str | None
     asset_type: Any
     assistant_message_id: str
+    history: list[dict[str, Any]] = field(default_factory=list)
     llm_profile_id: str | None = None
     llm_model: str | None = None
     llm_auto: bool = False

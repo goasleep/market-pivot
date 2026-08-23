@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from application import automation as automation_module
+from application import automation_scheduler as automation_scheduler_module
 from application.automation import AutomationService
 from application.automation_store import AutomationStore
 from application.backtest_experiment import BacktestExperimentStore
@@ -327,10 +328,10 @@ async def test_scheduler_isolates_accounts_and_uses_bounded_parallelism(monkeypa
             account_id,
             config=AutomationTaskConfig(enabled=True, universe=["000001"], schedule_time="15:10"),
         )
-    monkeypatch.setattr(automation_module, "simulation_accounts", accounts)
-    monkeypatch.setattr(automation_module, "automation_store", store)
-    monkeypatch.setattr(automation_module, "is_trading_day", lambda _target: True)
-    monkeypatch.setattr(automation_module.settings, "automation_max_concurrency", 2)
+    monkeypatch.setattr(automation_scheduler_module, "simulation_accounts", accounts)
+    monkeypatch.setattr(automation_scheduler_module, "automation_store", store)
+    monkeypatch.setattr(automation_scheduler_module, "is_trading_day", lambda _target: True)
+    monkeypatch.setattr(automation_scheduler_module.settings, "automation_max_concurrency", 2)
     completed: list[str] = []
 
     class FakeService:
@@ -341,6 +342,6 @@ async def test_scheduler_isolates_accounts_and_uses_bounded_parallelism(monkeypa
         async def run_account(self, account_id, **_kwargs):
             completed.append(account_id)
 
-    scheduler = automation_module.AutomationScheduler(FakeService())
+    scheduler = automation_scheduler_module.AutomationScheduler(FakeService())
     await scheduler.tick(automation_module.datetime(2026, 8, 3, 15, 10, tzinfo=automation_module.SHANGHAI))
     assert completed == ["second"]

@@ -6,6 +6,7 @@ import pytest_asyncio
 
 from application import chat_service
 from application.chat_service import ChatStore, ChatTaskInput, ChatTaskManager
+from data.chat_models import ChatMessageSearch
 
 
 def test_public_task_error_hides_provider_details():
@@ -29,7 +30,6 @@ async def test_chat_store_persists_partial_and_cancelled_turn(store):
         conversation_id="conversation-1",
         task_id="task-1",
         message="分析 ETF 510300",
-        history=[],
     )
 
     await store.append_part(assistant_id, {"type": "text", "content": "开始分析"})
@@ -51,7 +51,6 @@ async def test_chat_store_clears_stale_error_when_task_is_reclaimed(store):
         conversation_id="conversation-reclaim",
         task_id="task-reclaim",
         message="分析 ETF 510300",
-        history=[],
     )
     await store.update_task("task-reclaim", "interrupted", "节点正在关闭")
 
@@ -69,7 +68,6 @@ async def test_chat_store_persists_waiting_interaction_and_answers_once(store):
         conversation_id="conversation-interaction",
         task_id="task-interaction",
         message="510300",
-        history=[],
     )
     interaction = await store.create_interaction(
         "task-interaction",
@@ -100,7 +98,6 @@ async def test_chat_task_pauses_and_resumes_after_interaction(store, monkeypatch
         conversation_id="conversation-pause",
         task_id="task-pause",
         message="510300",
-        history=[],
     )
 
     class FakeAssetAgent:
@@ -129,7 +126,6 @@ async def test_chat_task_pauses_and_resumes_after_interaction(store, monkeypatch
             task_id="task-pause",
             conversation_id="conversation-pause",
             message="510300",
-            history=[],
             strategy=None,
             asset_type="etf",
             assistant_message_id=assistant_id,
@@ -168,7 +164,6 @@ async def test_chat_task_projects_plan_updates_to_stable_a2ui_surface(store, mon
         conversation_id="conversation-plan",
         task_id="task-plan",
         message="分析 600519",
-        history=[],
     )
 
     class FakeAssetAgent:
@@ -209,7 +204,6 @@ async def test_chat_task_projects_plan_updates_to_stable_a2ui_surface(store, mon
             task_id="task-plan",
             conversation_id="conversation-plan",
             message="分析 600519",
-            history=[],
             strategy=None,
             asset_type="stock",
             assistant_message_id=assistant_id,
@@ -235,7 +229,6 @@ async def test_chat_worker_resumes_persisted_interaction_instead_of_restarting(s
         conversation_id="conversation-worker-resume",
         task_id="task-worker-resume",
         message="510300",
-        history=[],
     )
     interaction = await store.create_interaction(
         "task-worker-resume",
@@ -285,25 +278,71 @@ async def test_chat_worker_resumes_persisted_interaction_instead_of_restarting(s
 
 
 @pytest.mark.asyncio
-async def test_chat_store_replaces_history_for_edit(store):
+async def test_chat_store_keeps_persisted_history_by_default(store):
     await store.prepare_task(
         conversation_id="conversation-1",
         task_id="task-1",
         message="第一问",
-        history=[],
     )
     await store.update_task("task-1", "completed")
     await store.prepare_task(
         conversation_id="conversation-1",
         task_id="task-2",
         message="修改后的第一问",
-        history=[],
     )
 
     conversation = await store.get_conversation("conversation-1")
     assert conversation is not None
+    assert [message["role"] for message in conversation["messages"]] == ["user", "assistant", "user", "assistant"]
+    assert conversation["messages"][0]["parts"][0]["content"] == "第一问"
+    assert conversation["messages"][2]["parts"][0]["content"] == "修改后的第一问"
+    state = await store.get_task_state("task-2")
+    assert state is not None
+    assert state["history"][0]["content"] == "第一问"
+
+
+@pytest.mark.asyncio
+async def test_chat_store_edits_a_server_owned_message_branch(store):
+    user_message_id, _ = await store.prepare_task(
+        conversation_id="conversation-edit",
+        task_id="task-edit-1",
+        message="第一问",
+    )
+    await store.update_task("task-edit-1", "completed")
+    await store.prepare_task(
+        conversation_id="conversation-edit",
+        task_id="task-edit-2",
+        message="修改后的第一问",
+        edit_message_id=user_message_id,
+    )
+
+    conversation = await store.get_conversation("conversation-edit")
+    assert conversation is not None
     assert [message["role"] for message in conversation["messages"]] == ["user", "assistant"]
     assert conversation["messages"][0]["parts"][0]["content"] == "修改后的第一问"
+
+
+@pytest.mark.asyncio
+async def test_chat_store_does_not_rebuild_populated_search_index_on_startup(tmp_path):
+    db_path = tmp_path / "incremental-search.sqlite3"
+    first = ChatStore(db_path)
+    await first.init()
+    await first.prepare_task(
+        conversation_id="conversation-search",
+        task_id="task-search",
+        message="原始搜索内容",
+    )
+    await ChatMessageSearch.filter(conversation_id="conversation-search").update(content="index-sentinel")
+    await first.close()
+
+    second = ChatStore(db_path)
+    await second.init()
+    try:
+        row = await ChatMessageSearch.filter(conversation_id="conversation-search").first()
+        assert row is not None
+        assert row.content == "index-sentinel"
+    finally:
+        await second.close()
 
 
 @pytest.mark.asyncio
@@ -312,14 +351,12 @@ async def test_chat_task_creation_is_idempotent_and_events_resume_from_cursor(st
         conversation_id="conversation-1",
         task_id="task-1",
         message="查询 ETF 510300",
-        history=[],
     )
 
     _, retry_assistant_id = await store.prepare_task(
         conversation_id="conversation-1",
         task_id="task-1",
         message="查询 ETF 510300",
-        history=[],
     )
     assert retry_assistant_id == assistant_id
     conversation = await store.get_conversation("conversation-1")
@@ -336,7 +373,6 @@ async def test_chat_task_creation_is_idempotent_and_events_resume_from_cursor(st
             conversation_id="conversation-2",
             task_id="task-1",
             message="冲突请求",
-            history=[],
         )
 
 
@@ -346,7 +382,6 @@ async def test_chat_conversation_streams_history_chart_surface(store, monkeypatc
         conversation_id="conversation-chart",
         task_id="task-chart",
         message="展示 ETF 510300 的历史走势",
-        history=[],
     )
 
     class FakeAssetAgent:
@@ -380,7 +415,6 @@ async def test_chat_conversation_streams_history_chart_surface(store, monkeypatc
             task_id="task-chart",
             conversation_id="conversation-chart",
             message="展示 ETF 510300 的历史走势",
-            history=[],
             strategy=None,
             asset_type="etf",
             assistant_message_id=assistant_id,
@@ -427,7 +461,6 @@ async def test_chat_does_not_repeat_artifacts_already_rendered_in_a2ui_bundle(st
         conversation_id="conversation-artifacts",
         task_id="task-artifacts",
         message="对比策略并生成回测产物",
-        history=[],
     )
     artifact = {
         "artifact_id": "artifact-report",
@@ -459,7 +492,6 @@ async def test_chat_does_not_repeat_artifacts_already_rendered_in_a2ui_bundle(st
             task_id="task-artifacts",
             conversation_id="conversation-artifacts",
             message="对比策略并生成回测产物",
-            history=[],
             strategy=None,
             asset_type="etf",
             assistant_message_id=assistant_id,
@@ -490,7 +522,6 @@ async def test_cancelled_task_rejects_late_parts(store):
         conversation_id="conversation-1",
         task_id="task-1",
         message="查询模拟盘",
-        history=[],
     )
     assert await store.request_cancel("task-1") == "cancel_requested"
     assert not await store.append_part(
@@ -507,14 +538,12 @@ async def test_chat_store_searches_message_content(store):
         conversation_id="conversation-1",
         task_id="task-1",
         message="分析 ETF 510300 的短期趋势，测试标记 SHORT-2026",
-        history=[],
     )
     await store.update_task("task-1", "completed")
     await store.prepare_task(
         conversation_id="conversation-2",
         task_id="task-2",
         message="查询模拟盘账户",
-        history=[],
     )
     await store.update_task("task-2", "completed")
     results = await store.list_conversations(query="短期趋势")

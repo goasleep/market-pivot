@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from application import automation as automation_module
+from application import automation_scheduler as automation_scheduler_module
 from application.automation import AutomationService
 from application.automation_store import AutomationStore
 from engine.simulation_account import SimulationAccountService
@@ -78,9 +79,9 @@ async def test_scheduler_skips_non_trading_day(monkeypatch, tmp_path):
         "default",
         config=AutomationTaskConfig(enabled=True, universe=["000001"], schedule_time="15:10"),
     )
-    monkeypatch.setattr(automation_module, "simulation_accounts", accounts)
-    monkeypatch.setattr(automation_module, "automation_store", store)
-    monkeypatch.setattr(automation_module, "is_trading_day", lambda _target: False)
+    monkeypatch.setattr(automation_scheduler_module, "simulation_accounts", accounts)
+    monkeypatch.setattr(automation_scheduler_module, "automation_store", store)
+    monkeypatch.setattr(automation_scheduler_module, "is_trading_day", lambda _target: False)
 
     called = []
 
@@ -91,7 +92,7 @@ async def test_scheduler_skips_non_trading_day(monkeypatch, tmp_path):
         async def run_account(self, *args, **kwargs):
             called.append("run")
 
-    scheduler = automation_module.AutomationScheduler(FakeService())
+    scheduler = automation_scheduler_module.AutomationScheduler(FakeService())
     await scheduler.tick(automation_module.datetime(2026, 8, 3, 15, 10, tzinfo=automation_module.SHANGHAI))
     assert called == []
 
@@ -101,7 +102,7 @@ async def test_scheduler_stop_is_idempotent_after_task_cancellation():
     class FakeService:
         pass
 
-    scheduler = automation_module.AutomationScheduler(FakeService())
+    scheduler = automation_scheduler_module.AutomationScheduler(FakeService())
     scheduler._task = asyncio.create_task(asyncio.sleep(60))
     scheduler._task.cancel()
     await scheduler.stop()

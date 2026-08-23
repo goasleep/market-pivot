@@ -1,6 +1,5 @@
 """Stock Agent chat API with SSE text and inline widgets."""
 
-from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
@@ -15,19 +14,17 @@ from models.schemas import AssetType
 router = APIRouter()
 
 
-class ChatHistoryItem(BaseModel):
-    role: Literal["user", "assistant"]
-    content: str
-    parts: list[dict] | None = None
-
-
 class ChatRequest(BaseModel):
     message: str = Field(..., description="A stock or exchange-traded fund request")
     strategy: str | None = Field(default=None, description="Strategy override")
-    history: list[ChatHistoryItem] = Field(default_factory=list, description="Recent conversation context")
     conversation_id: str | None = Field(default=None, description="Client-side conversation identifier")
     asset_type: AssetType | None = Field(default=None, description="Optional stock, ETF, or LOF override")
     task_id: str | None = Field(default=None, description="Client-generated task identifier")
+    user_message_id: str | None = Field(default=None, min_length=1, max_length=255)
+    assistant_message_id: str | None = Field(default=None, min_length=1, max_length=255)
+    edit_message_id: str | None = Field(default=None, min_length=1, max_length=255)
+
+    model_config = {"extra": "forbid"}
 
 
 class ConversationUpdate(BaseModel):
@@ -53,18 +50,21 @@ async def chat_send(req: ChatRequest):
     logger.info(f"[AssetAgent] Message: {req.message}")
     conversation_id = req.conversation_id or f"conversation-{uuid4().hex}"
     task_id = req.task_id or f"task-{uuid4().hex}"
-    history = [item.model_dump(exclude_none=True) for item in req.history]
     try:
         _, assistant_message_id = await chat_store.prepare_task(
             conversation_id=conversation_id,
             task_id=task_id,
             message=req.message,
-            history=history,
             strategy=req.strategy,
             asset_type=req.asset_type.value if req.asset_type else None,
+            edit_message_id=req.edit_message_id,
+            user_message_id=req.user_message_id,
+            assistant_message_id=req.assistant_message_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    task_state = await chat_store.get_task_state(task_id) or {}
+    history = list(task_state.get("history") or [])
     task_input = ChatTaskInput(
         task_id=task_id,
         conversation_id=conversation_id,

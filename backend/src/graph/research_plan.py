@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import operator
 import re
@@ -19,6 +18,33 @@ from langgraph.types import Send
 from loguru import logger
 
 from graph.agent_loop import tool_timeout_seconds
+from graph.research_evidence import (
+    _classify_failure,
+    _compact,
+    _comparison_synthesis_text,
+    _deterministic_synthesis_fallback,
+    _evidence,
+    _find_price,
+    _result_summaries,
+    _synthesis_request,
+)
+from graph.research_planning import (
+    DEPTH_BUDGETS,
+    classify_depth,
+    derive_task_contract,
+)
+from graph.research_planning import (
+    effective_max_attempts as _effective_max_attempts,
+)
+from graph.research_planning import (
+    fallback_steps as _fallback_steps,
+)
+from graph.research_planning import (
+    normalize_steps as _normalize_steps,
+)
+from graph.research_planning import (
+    validate_plan_contract as _validate_plan_contract,
+)
 from llm.context import (
     TokenCounter,
     compact_json_value,
@@ -28,7 +54,6 @@ from llm.context import (
 )
 from llm.service import get_llm_service
 from models.research_plan import (
-    EvidenceRef,
     ResearchBudget,
     ResearchPlan,
     ResearchStep,
@@ -37,7 +62,6 @@ from models.research_plan import (
     StepResult,
 )
 from models.schemas import AssetType
-from models.strategy_research import TaskContract, strategy_comparison_contract
 
 
 def merge_step_results(left: dict[str, dict[str, Any]], right: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -74,17 +98,6 @@ class ResearchToolExecutionError(RuntimeError):
         self.tool_args = _compact(args)
 
 
-DEPTH_BUDGETS = {
-    "quick": ResearchBudget(max_steps=3, max_tool_calls=4, max_replans=1, deadline_seconds=300),
-    "standard": ResearchBudget(max_steps=8, max_tool_calls=16, max_replans=1, deadline_seconds=900),
-    "deep": ResearchBudget(max_steps=16, max_tool_calls=32, max_replans=2, deadline_seconds=1800),
-}
-DEPTH_STEP_RANGES = {"quick": (1, 3), "standard": (4, 8), "deep": (9, 16)}
-
-REFLECTABLE_LONG_STEP_KINDS = {"backtest", "comprehensive_analysis"}
-SINGLE_ATTEMPT_STEP_KINDS = {"report"}
-DEEP_TERMS = ("深度", "全面", "系统", "多源", "调研报告", "deep research")
-
 RECOVERY_INPUT_RULES: dict[str, dict[str, str]] = {
     "price_history": {"limit": "20 到 500 的整数"},
     "fund_nav": {"limit": "20 到 500 的整数"},
@@ -111,21 +124,6 @@ RECOVERY_INPUT_RULES: dict[str, dict[str, str]] = {
 }
 
 
-def _effective_max_attempts(step: ResearchStep) -> int:
-    """Upgrade legacy read-only checkpoints without changing write-side steps."""
-    return 2 if step.kind in REFLECTABLE_LONG_STEP_KINDS else step.max_attempts
-
-
-def classify_depth(request: dict[str, Any]) -> str:
-    message = str(request.get("message", "")).lower()
-    intent = str(request.get("intent", "analyze"))
-    if any(term in message for term in DEEP_TERMS):
-        return "deep"
-    if intent in {"quote", "history", "strategies"}:
-        return "quick"
-    return "standard"
-
-
 async def scope_research(state: ResearchPlanState) -> dict[str, Any]:
     depth = classify_depth(state["request"])
     budget = DEPTH_BUDGETS[depth]
@@ -142,196 +140,6 @@ async def scope_research(state: ResearchPlanState) -> dict[str, Any]:
         "needs_replan": False,
         "task_contract": contract.model_dump(mode="json"),
     }
-
-
-def derive_task_contract(request: dict[str, Any]) -> TaskContract:
-    """Translate user wording into terminal acceptance criteria before planning."""
-    message = str(request.get("message", ""))
-    intent = str(request.get("intent", "analyze"))
-    compares_strategies = (
-        intent == "backtest"
-        and "策略" in message
-        and any(term in message for term in ("不同", "多个", "几个", "多种", "对比", "比较"))
-    )
-    if compares_strategies:
-        return strategy_comparison_contract()
-    if intent == "backtest" and any(term in message.lower() for term in ("python", "代码", "沙盒", "自定义因子")):
-        return TaskContract(
-            operation="sandbox_research",
-            comparison_axis="none",
-            minimum_strategy_count=1,
-            required_benchmark="buy_hold",
-            minimum_history_years=5.0,
-            required_metrics=("total_return", "max_drawdown", "sharpe_ratio"),
-            required_outputs=("sandbox_validation", "equity_curves", "deterministic_replay"),
-        )
-    return TaskContract(
-        operation="backtest" if intent == "backtest" else "research",
-        comparison_axis="asset" if intent == "compare" else "none",
-        minimum_strategy_count=1,
-        required_benchmark="buy_hold" if intent == "backtest" else None,
-        minimum_history_years=1.0,
-        required_metrics=("total_return", "max_drawdown") if intent == "backtest" else (),
-        required_outputs=("equity_curves",) if intent == "backtest" else (),
-    )
-
-
-def _step(kind: str, title: str, depends_on: list[str] | None = None, *, attempts: int = 2) -> dict[str, Any]:
-    return {
-        "id": kind,
-        "kind": kind,
-        "title": title,
-        "depends_on": depends_on or [],
-        "inputs": {},
-        "success_criteria": ["返回带来源和数据状态的可审计结果"],
-        "max_attempts": attempts,
-    }
-
-
-def _fallback_steps(request: dict[str, Any], depth: str) -> list[dict[str, Any]]:
-    intent = str(request.get("intent", "analyze"))
-    asset_type = str(request.get("asset_type", "stock"))
-    if intent == "quote" and depth == "quick":
-        return [_step("market_snapshot", "获取最新结构化行情")]
-    if intent == "history" and depth == "quick":
-        return [_step("price_history", "获取历史价格与走势数据")]
-    if intent == "strategies" and depth == "quick":
-        return [_step("methodology", "整理可用策略与方法论")]
-
-    steps: list[dict[str, Any]] = []
-    if depth == "deep" or intent == "news":
-        steps.append(_step("instrument_profile", "核对标的类型与基础资料"))
-    steps.append(_step("market_snapshot", "获取最新行情快照"))
-    if intent in {"analyze", "compare", "backtest"} or depth == "deep":
-        steps.append(_step("price_history", "获取可验证的历史价格序列"))
-    is_fund = asset_type in {"etf", "lof"}
-    if is_fund and depth != "quick":
-        steps.append(_step("fund_nav", "核对基金净值、折溢价和历史表现"))
-    if depth == "deep" or (is_fund and depth == "standard"):
-        steps.append(_step("liquidity", "评估成交量、成交额和流动性风险", ["market_snapshot"]))
-    if intent == "news":
-        steps.append(_step("news", "检索最新资讯、公告与催化"))
-    elif intent == "compare":
-        steps.append(_step("comparison", "对比候选标的行情与差异", ["market_snapshot"]))
-        if not (is_fund and depth == "standard"):
-            steps.append(_step("technical", "比较趋势与技术指标", ["price_history"]))
-        steps.append(_step("news", "比较近期资讯与事件风险"))
-    elif intent == "backtest":
-        steps.extend(
-            [
-                _step("methodology", "确定可复现的策略假设"),
-                _step("backtest", "执行历史回测并保存实验结果", ["price_history", "methodology"]),
-            ]
-        )
-    else:
-        if not (is_fund and depth == "standard"):
-            steps.append(_step("technical", "计算趋势、动量和量价指标", ["price_history"]))
-        if asset_type == "stock":
-            steps.append(_step("fundamentals", "核对股票基本面数据"))
-        if not (is_fund and depth == "standard"):
-            steps.append(_step("news", "检索最新资讯、公告和风险事件"))
-        comprehensive_dependencies = ["market_snapshot"]
-        if not (is_fund and depth == "standard"):
-            comprehensive_dependencies.extend(["technical", "news"])
-        comprehensive_dependencies.append("fundamentals" if asset_type == "stock" else "fund_nav")
-        steps.append(
-            _step(
-                "comprehensive_analysis",
-                "运行多角色综合分析、辩论与风控",
-                comprehensive_dependencies,
-                attempts=2,
-            )
-        )
-    if depth == "deep" and not any(step["kind"] == "technical" for step in steps):
-        steps.append(_step("technical", "核对趋势、动量和量价指标", ["price_history"]))
-    if depth == "deep" and not any(step["kind"] == "news" for step in steps):
-        steps.append(_step("news", "检索最新资讯、公告和风险事件"))
-    if depth == "deep" and not any(step["kind"] == "methodology" for step in steps):
-        steps.append(_step("methodology", "检索并验证适用的投资方法论"))
-    if intent in {"analyze", "compare", "backtest", "news"} or depth == "deep":
-        risk_dependencies = [
-            step["id"] for step in steps if step["kind"] in {"comprehensive_analysis", "backtest", "comparison"}
-        ] or [step["id"] for step in steps if step["kind"] in {"market_snapshot", "news"}]
-        steps.append(_step("risk", "汇总回撤、流动性、仓位和持有期风险", risk_dependencies))
-    steps.append(_step("synthesis", "综合证据并形成短中期研究结论", [step["id"] for step in steps]))
-    if "报告" in str(request.get("message", "")) or "保存" in str(request.get("message", "")):
-        steps.append(_step("report", "生成可预览和下载的研究报告", ["synthesis"], attempts=1))
-    max_steps = DEPTH_STEP_RANGES[depth][1]
-    protected = {"risk", "synthesis", "report"}
-    protected.add(
-        {
-            "quote": "market_snapshot",
-            "history": "price_history",
-            "strategies": "methodology",
-            "news": "news",
-            "compare": "comparison",
-            "backtest": "backtest",
-            "analyze": "comprehensive_analysis",
-        }.get(intent, "synthesis")
-    )
-    if is_fund and depth != "quick":
-        protected.update({"fund_nav", "liquidity"})
-    removable = ["fundamentals", "technical", "news", "instrument_profile", "methodology", "market_snapshot"]
-    for kind in removable:
-        if len(steps) <= max_steps:
-            break
-        if kind in protected:
-            continue
-        removed_ids = {item["id"] for item in steps if item["kind"] == kind}
-        if not removed_ids:
-            continue
-        steps = [item for item in steps if item["id"] not in removed_ids]
-        for item in steps:
-            item["depends_on"] = [dependency for dependency in item["depends_on"] if dependency not in removed_ids]
-    return steps
-
-
-def _normalize_steps(raw: Any, request: dict[str, Any], depth: str) -> list[dict[str, Any]]:
-    candidate = raw.get("steps") if isinstance(raw, dict) else None
-    if not isinstance(candidate, list) or not candidate:
-        return _fallback_steps(request, depth)
-    normalized = []
-    for index, item in enumerate(candidate):
-        if not isinstance(item, dict):
-            continue
-        value = dict(item)
-        value.setdefault("id", f"step-{index + 1}")
-        value.setdefault("title", str(value.get("kind", "研究步骤")))
-        value.setdefault("depends_on", [])
-        value.setdefault("inputs", {})
-        value.setdefault("success_criteria", ["返回带来源和数据状态的可审计结果"])
-        if value.get("kind") in SINGLE_ATTEMPT_STEP_KINDS:
-            value["max_attempts"] = 1
-        elif value.get("kind") in REFLECTABLE_LONG_STEP_KINDS:
-            value["max_attempts"] = 2
-        else:
-            value.setdefault("max_attempts", 2)
-        normalized.append(value)
-    return normalized or _fallback_steps(request, depth)
-
-
-def _validate_plan_contract(
-    plan: ResearchPlan,
-    request: dict[str, Any],
-    budget: ResearchBudget,
-) -> None:
-    minimum, maximum = DEPTH_STEP_RANGES[plan.depth]
-    if not minimum <= len(plan.steps) <= min(maximum, budget.max_steps):
-        raise ValueError(f"研究计划不符合 {plan.depth} 深度的步骤数预算")
-    if any(step.kind in SINGLE_ATTEMPT_STEP_KINDS and step.max_attempts != 1 for step in plan.steps):
-        raise ValueError("带外部写入副作用的报告步骤只允许执行一次")
-    if plan.asset_type in {AssetType.ETF, AssetType.LOF} and any(
-        step.kind in {"technical", "comprehensive_analysis", "backtest", "comparison", "news"} for step in plan.steps
-    ):
-        kinds = {step.kind for step in plan.steps}
-        if not {"fund_nav", "liquidity"} <= kinds:
-            raise ValueError("ETF/LOF 标准或深度研究必须包含 fund_nav 和 liquidity 步骤")
-    if str(request.get("intent")) in {"analyze", "compare", "backtest", "news"}:
-        by_kind = {step.kind: step for step in plan.steps}
-        if not {"risk", "synthesis"} <= set(by_kind):
-            raise ValueError("研究结论计划必须包含 risk 和 synthesis 步骤")
-        if by_kind["risk"].id not in by_kind["synthesis"].depends_on:
-            raise ValueError("synthesis 必须依赖 risk 步骤")
 
 
 async def plan_research(state: ResearchPlanState) -> dict[str, Any]:
@@ -436,416 +244,6 @@ def route_dispatch(state: ResearchPlanState) -> list[Send] | str:
         )
         for step in ready[: min(budget.max_parallel, remaining_calls)]
     ]
-
-
-def _compact(value: Any, *, depth: int = 0) -> Any:
-    if depth == 0 and isinstance(value, dict) and value.get("data_type") == "strategy_backtest_comparison":
-        return _compact_strategy_comparison(value)
-    if depth >= 5:
-        return str(value)[:500]
-    if isinstance(value, dict):
-        return {str(key): _compact(item, depth=depth + 1) for key, item in list(value.items())[:30]}
-    if isinstance(value, list):
-        return [_compact(item, depth=depth + 1) for item in value[:20]]
-    if isinstance(value, str):
-        return value[:4000]
-    return value
-
-
-def _sample_curve(points: Any, maximum: int = 240) -> list[dict[str, Any]]:
-    if not isinstance(points, list):
-        return []
-    rows = [item for item in points if isinstance(item, dict)]
-    if len(rows) <= maximum:
-        return rows
-    step = max(1, (len(rows) - 1) // (maximum - 1) + 1)
-    sampled = rows[::step]
-    if sampled[-1] is not rows[-1]:
-        sampled.append(rows[-1])
-    return sampled[: maximum - 1] + [rows[-1]] if len(sampled) > maximum else sampled
-
-
-def _compact_strategy_comparison(payload: dict[str, Any]) -> dict[str, Any]:
-    """Keep A2UI/audit metadata while bounding checkpoint and SSE payload size."""
-    comparison_fields = {
-        "strategy_name",
-        "display_name",
-        "description",
-        "strategy_spec",
-        "entry_rules",
-        "exit_rules",
-        "total_return",
-        "annualized_return",
-        "annualized_volatility",
-        "max_drawdown",
-        "sharpe_ratio",
-        "sortino_ratio",
-        "calmar_ratio",
-        "win_rate",
-        "profit_factor",
-        "exposure",
-        "turnover",
-        "total_fees",
-        "excess_return",
-        "final_value",
-        "total_trades",
-        "metrics",
-        "diagnostics",
-        "error",
-    }
-    comparisons = []
-    for row in payload.get("comparisons", []):
-        if not isinstance(row, dict):
-            continue
-        compact_row = {key: value for key, value in row.items() if key in comparison_fields}
-        compact_row["equity_curve"] = _sample_curve(row.get("equity_curve"))
-        compact_row["drawdown_curve"] = _sample_curve(row.get("drawdown_curve"))
-        compact_row["signal_curve"] = _sample_curve(row.get("signal_curve"))
-        comparisons.append(compact_row)
-    keep = {
-        "comparison_id",
-        "data_type",
-        "_tool_name",
-        "ticker",
-        "asset_type",
-        "start_date",
-        "end_date",
-        "requested_start_date",
-        "warmup_start_date",
-        "evaluation_start_date",
-        "evaluation_end_date",
-        "warmup_bars",
-        "actual_start_date",
-        "actual_end_date",
-        "history_years",
-        "initial_capital",
-        "strategy_count",
-        "benchmark",
-        "ranking_metric",
-        "ranking_label",
-        "task_contract",
-        "data_snapshot",
-        "execution",
-        "ranking",
-        "cost_scenarios",
-        "cost_consistency",
-        "parameter_sensitivity",
-        "acceptance",
-        "conclusion",
-        "artifacts",
-        "artifact_error",
-        "provenance",
-        "decision_interval",
-    }
-    compact = {key: value for key, value in payload.items() if key in keep}
-    compact["comparisons"] = comparisons
-    validation = dict(payload.get("data_validation") or {})
-    validation["differences"] = (validation.get("differences") or [])[:20]
-    compact["data_validation"] = validation
-    return compact
-
-
-def _evidence(payload: dict[str, Any], kind: str) -> list[EvidenceRef]:
-    now = datetime.now(timezone.utc).isoformat()
-
-    def collect_provenance(value: Any) -> list[dict[str, Any]]:
-        if isinstance(value, list):
-            return [row for item in value for row in collect_provenance(item)]
-        if not isinstance(value, dict):
-            return []
-        found: list[dict[str, Any]] = []
-        provenance = value.get("provenance")
-        if isinstance(provenance, list):
-            found.extend(item for item in provenance if isinstance(item, dict))
-        elif isinstance(provenance, dict):
-            found.append(provenance)
-        for key, child in value.items():
-            if key != "provenance":
-                found.extend(collect_provenance(child))
-        return found
-
-    rows = collect_provenance(payload)
-    source_type = (
-        "web"
-        if kind == "news"
-        else "methodology"
-        if kind == "methodology"
-        else "backtest"
-        if kind == "backtest"
-        else "derived"
-        if kind in {"risk", "synthesis"}
-        else "market_data"
-    )
-    result = []
-    for row in rows or [{}]:
-        result.append(
-            EvidenceRef(
-                source=str(
-                    row.get("name")
-                    or row.get("source")
-                    or row.get("source_id")
-                    or row.get("provider")
-                    or payload.get("data_type")
-                    or kind
-                ),
-                source_type=source_type,
-                as_of=str(
-                    row.get("as_of")
-                    or payload.get("searched_at")
-                    or (row.get("fetched_at") if row.get("freshness") in {"realtime", "latest_available"} else "")
-                    or ""
-                )
-                or None,
-                retrieved_at=str(row.get("fetched_at") or now),
-                data_status=str(row.get("status") or "available"),
-                url=row.get("url"),
-                content_hash=hashlib.sha256(
-                    json.dumps(_compact(payload), sort_keys=True, default=str).encode()
-                ).hexdigest(),
-            )
-        )
-    return result
-
-
-def _result_summaries(results: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "step_id": item.get("step_id"),
-            "status": item.get("status"),
-            "summary": item.get("summary"),
-            "output": _synthesis_output(item.get("output", {})),
-        }
-        for item in results.values()
-    ]
-
-
-def _synthesis_request(request: dict[str, Any]) -> dict[str, Any]:
-    """Keep only current-task fields; cross-turn history is not synthesis evidence."""
-    keys = (
-        "message",
-        "intent",
-        "tickers",
-        "asset_type",
-        "strategy",
-        "as_of_date",
-    )
-    return {key: request.get(key) for key in keys if request.get(key) is not None}
-
-
-def _deterministic_synthesis_fallback(evidence: list[dict[str, Any]]) -> str:
-    completed = [
-        f"- {item.get('step_id')}: {item.get('summary') or '已完成'}"
-        for item in evidence
-        if item.get("status") == "completed"
-    ]
-    failed = [str(item.get("step_id")) for item in evidence if item.get("status") in {"failed", "skipped"}]
-    lines = ["研究证据已完成汇总。", *(completed[:12] or ["- 暂无足够的已完成证据步骤。"])]
-    if failed:
-        lines.append("数据不足或未完成步骤：" + "、".join(failed[:8]) + "。")
-    lines.append("请结合证据日期、数据缺失和风险约束审慎判断；以上仅用于短中期研究与模拟交易，不承诺收益。")
-    return "\n".join(lines)
-
-
-def _synthesis_output(output: Any) -> Any:
-    """Bound the evidence sent to synthesis without weakening the public A2UI payload."""
-    if not isinstance(output, dict) or output.get("data_type") != "strategy_backtest_comparison":
-        return _compact(output)
-    metric_fields = (
-        "strategy_name",
-        "display_name",
-        "total_return",
-        "sharpe_ratio",
-        "max_drawdown",
-        "calmar_ratio",
-        "total_fees",
-        "final_value",
-    )
-    return {
-        "data_type": output.get("data_type"),
-        "ticker": output.get("ticker"),
-        "evaluation_start_date": output.get("evaluation_start_date"),
-        "evaluation_end_date": output.get("evaluation_end_date"),
-        "warmup_bars": output.get("warmup_bars"),
-        "strategy_count": output.get("strategy_count"),
-        "comparisons": [
-            {key: row.get(key) for key in metric_fields}
-            for row in (output.get("comparisons") or [])
-            if isinstance(row, dict)
-        ],
-        "conclusion": output.get("conclusion"),
-        "data_validation": {
-            key: (output.get("data_validation") or {}).get(key)
-            for key in ("status", "selected_source", "selection_reason", "rule_version")
-        },
-        "execution": output.get("execution"),
-        "acceptance": output.get("acceptance"),
-        "artifacts": [
-            {key: artifact.get(key) for key in ("name", "mime_type", "size_bytes")}
-            for artifact in (output.get("artifacts") or [])
-            if isinstance(artifact, dict)
-        ],
-    }
-
-
-def _format_winner_metric(metric: str, value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return "指标缺失"
-    if metric in {"total_return", "max_drawdown", "out_of_sample_return", "stress_total_return"}:
-        sign = "" if metric == "max_drawdown" else "+"
-        return f"{sign}{number:.2%}"
-    return f"{number:.3f}"
-
-
-def _comparison_synthesis_text(payload: dict[str, Any]) -> str:
-    """Render frozen comparison facts without asking an LLM to re-rank strategies."""
-    conclusion = payload.get("conclusion") or {}
-    validation = payload.get("data_validation") or {}
-    execution = payload.get("execution") or {}
-    snapshot = payload.get("data_snapshot") or {}
-    lines = [
-        f"{payload.get('ticker') or '该标的'} 多策略回测已完成。统一评价区间为 "
-        f"{payload.get('evaluation_start_date', '—')} 至 "
-        f"{payload.get('evaluation_end_date', '—')}，热身期 {payload.get('warmup_bars', '—')} 个交易日，"
-        f"共比较 {payload.get('strategy_count') or len(payload.get('comparisons') or [])} 个策略。",
-        (
-            f"行情采用 {snapshot.get('adjustment') or '前复权/数据源声明方式'}；基准成交成本为买入佣金 "
-            f"{float(execution.get('buy_commission_rate') or 0):.3%}、卖出佣金 "
-            f"{float(execution.get('sell_commission_rate') or 0):.3%}、滑点 "
-            f"{float(execution.get('slippage_bps') or 0):g} bps，并按下一交易日开盘执行。"
-        ),
-        "",
-        "程序确定的五类优胜者：",
-    ]
-    winner_labels = (
-        ("absolute_return_winner", "绝对收益"),
-        ("risk_adjusted_winner", "风险收益"),
-        ("drawdown_winner", "回撤控制"),
-        ("out_of_sample_winner", "样本外"),
-        ("robustness_winner", "稳健性"),
-    )
-    winner_count = 0
-    for key, label in winner_labels:
-        winner = conclusion.get(key)
-        if not isinstance(winner, dict):
-            continue
-        winner_count += 1
-        name = winner.get("display_name") or winner.get("strategy_name") or "—"
-        lines.append(
-            f"- {label}：{name}（{winner.get('metric', 'metric')} "
-            f"{_format_winner_metric(str(winner.get('metric') or ''), winner.get('value'))}）"
-        )
-    if not winner_count:
-        lines.append("- 当前数据覆盖或核验状态不足以形成正式优胜者，结果仅作探索性比较。")
-    lines.extend(["", "为什么不存在唯一“最好策略”："])
-    lines.extend(f"- {item}" for item in (conclusion.get("tradeoffs") or ["不同评价维度对应不同交易取舍。"]))
-    lines.extend(
-        [
-            "",
-            f"数据核验状态：{validation.get('status', 'unknown')}；选定数据源："
-            f"{validation.get('selected_source') or '未记录'}。{validation.get('selection_reason') or ''}",
-        ]
-    )
-    warnings = conclusion.get("data_warnings") or []
-    limitations = conclusion.get("limitations") or []
-    if warnings:
-        lines.append("数据警告：" + "；".join(str(item) for item in warnings))
-    if limitations:
-        lines.append("局限：" + "；".join(str(item) for item in limitations))
-    artifacts = payload.get("artifacts") or []
-    lines.append(
-        f"完整可审计成果包已生成，共 {len(artifacts)} 个文件，包含 HTML、XLSX、JSON 与 CSV；可在上方成果区预览或下载。"
-    )
-    lines.append("以上仅用于研究与模拟盘，不构成收益承诺或直接交易建议。")
-    return "\n".join(lines)
-
-
-def _find_price(results: dict[str, dict[str, Any]]) -> float | None:
-    def walk(value: Any) -> float | None:
-        if isinstance(value, dict):
-            quote = value.get("quote")
-            if isinstance(quote, dict):
-                try:
-                    price = float(quote.get("price") or quote.get("最新价") or 0)
-                    if price > 0:
-                        return price
-                except (TypeError, ValueError):
-                    pass
-            for child in value.values():
-                found = walk(child)
-                if found:
-                    return found
-        elif isinstance(value, list):
-            for child in value:
-                found = walk(child)
-                if found:
-                    return found
-        return None
-
-    return walk(results)
-
-
-def _classify_failure(error: str) -> str:
-    """Classify a public tool error before deciding whether reflection is useful."""
-    text = error.lower()
-    if any(
-        token in text
-        for token in (
-            "user_denied",
-            "unauthorized",
-            "forbidden",
-            "permission",
-            "用户拒绝",
-            "没有权限",
-            "权限不足",
-            "工具不可用",
-            "不支持的研究步骤",
-        )
-    ):
-        return "terminal"
-    if any(
-        token in text
-        for token in (
-            "timeout",
-            "timed out",
-            "rate limit",
-            "429",
-            "connection",
-            "temporarily",
-            "service unavailable",
-            "超时",
-            "限流",
-            "网络",
-            "连接失败",
-            "暂时不可用",
-            "服务繁忙",
-        )
-    ):
-        return "transient"
-    if any(
-        token in text
-        for token in (
-            "invalid",
-            "unsupported",
-            "validation",
-            "schema",
-            "required",
-            "missing",
-            "argument",
-            "parameter",
-            "校验",
-            "验证",
-            "参数",
-            "缺少",
-            "不能为空",
-            "不受支持",
-            "指标",
-            "格式",
-        )
-    ):
-        return "correctable"
-    return "unknown"
 
 
 def _bounded_number(value: Any, minimum: float, maximum: float, *, integer: bool = False) -> int | float | None:

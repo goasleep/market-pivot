@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from loguru import logger
 from tortoise import Tortoise
 from tortoise.transactions import in_transaction
 
+from application.chat_search import ChatSearchIndex, parts_text
 from config import settings
 from data.chat_models import (
     ChatConversation,
@@ -40,14 +40,6 @@ def _text_part(content: str) -> dict[str, str]:
     return {"type": "text", "content": content}
 
 
-def _parts_text(parts: list[dict[str, Any]]) -> str:
-    return "\n".join(
-        str(part.get("content", ""))
-        for part in parts
-        if part.get("type") == "text" and part.get("content")
-    ).strip()
-
-
 class ChatStore:
     """Async repository backed by SQLite or PostgreSQL through Tortoise."""
 
@@ -61,22 +53,21 @@ class ChatStore:
         else:
             self.db_url = settings.chat_database_url
         self._initialized = False
-        self._sqlite_fts5_enabled = False
+        self.search_index = ChatSearchIndex()
 
     async def init(self) -> None:
         if self._initialized:
             return
         await init_database(db_url=self.db_url)
         await self._ensure_legacy_tables()
-        await self._ensure_search_indexes()
+        await self.search_index.initialize()
         await self._recover_interrupted_tasks()
-        await self._rebuild_search_index()
         self._initialized = True
 
     async def close(self) -> None:
         await close_database()
         self._initialized = False
-        self._sqlite_fts5_enabled = False
+        self.search_index.reset()
 
     async def _ensure_ready(self) -> None:
         if not self._initialized:
@@ -158,73 +149,6 @@ class ChatStore:
         await self._ensure_ready()
         await self._recover_interrupted_tasks()
 
-    async def _ensure_search_indexes(self) -> None:
-        connection = Tortoise.get_connection("default")
-        dialect = connection.capabilities.dialect
-        if dialect == "sqlite":
-            try:
-                await connection.execute_script(
-                    """
-                    CREATE VIRTUAL TABLE IF NOT EXISTS chat_message_search_fts
-                    USING fts5(message_id UNINDEXED, conversation_id UNINDEXED, content, tokenize='trigram');
-                    """
-                )
-                self._sqlite_fts5_enabled = True
-            except Exception as exc:
-                logger.warning("SQLite FTS5 is unavailable; falling back to ORM content search: {}", exc)
-        elif dialect == "postgres":
-            try:
-                await connection.execute_script(
-                    """
-                    CREATE EXTENSION IF NOT EXISTS pg_trgm;
-                    CREATE INDEX IF NOT EXISTS idx_chat_message_search_content_trgm
-                        ON chat_message_search USING gin (content gin_trgm_ops);
-                    CREATE INDEX IF NOT EXISTS idx_chat_conversations_title_trgm
-                        ON chat_conversations USING gin (title gin_trgm_ops);
-                    """
-                )
-            except Exception as exc:
-                logger.warning(
-                    "PostgreSQL trigram indexes are unavailable; falling back to ORM content search: {}", exc
-                )
-
-    async def _sync_sqlite_fts(self, message_id: str, conversation_id: str, content: str, connection=None) -> None:
-        if not self._sqlite_fts5_enabled:
-            return
-        db = connection or Tortoise.get_connection("default")
-        await db.execute_query("DELETE FROM chat_message_search_fts WHERE message_id = ?", [message_id])
-        if content:
-            await db.execute_query(
-                "INSERT INTO chat_message_search_fts(message_id, conversation_id, content) VALUES (?, ?, ?)",
-                [message_id, conversation_id, content],
-            )
-
-    async def _rebuild_search_index(self) -> None:
-        await ChatMessageSearch.all().delete()
-        messages = await ChatMessage.all().values("message_id", "conversation_id", "parts_json")
-        entries = []
-        for message in messages:
-            parts = json.loads(message["parts_json"])
-            content = _parts_text(parts)
-            if content:
-                entries.append(
-                    ChatMessageSearch(
-                        message_id=message["message_id"],
-                        conversation_id=message["conversation_id"],
-                        content=content,
-                    )
-                )
-        if entries:
-            await ChatMessageSearch.bulk_create(entries)
-        if self._sqlite_fts5_enabled:
-            connection = Tortoise.get_connection("default")
-            await connection.execute_query("DELETE FROM chat_message_search_fts")
-            if entries:
-                await connection.execute_many(
-                    "INSERT INTO chat_message_search_fts(message_id, conversation_id, content) VALUES (?, ?, ?)",
-                    [(entry.message_id, entry.conversation_id, entry.content) for entry in entries],
-                )
-
     @staticmethod
     def _parts(item: dict[str, Any]) -> list[dict[str, Any]]:
         parts = item.get("parts")
@@ -257,47 +181,31 @@ class ChatStore:
         parts: list[dict[str, Any]],
         connection=None,
     ) -> None:
-        content = _parts_text(parts)
-        query = ChatMessageSearch.filter(message_id=message_id)
-        if connection is not None:
-            query = query.using_db(connection)
-        await query.delete()
-        await self._sync_sqlite_fts(message_id, conversation_id, content, connection)
-        if content:
-            await ChatMessageSearch.create(
-                message_id=message_id,
-                conversation_id=conversation_id,
-                content=content,
-                using_db=connection,
-            )
+        await self.search_index.sync(message_id, conversation_id, parts, connection)
 
     async def prepare_task(
         self,
         conversation_id: str,
         task_id: str,
         message: str,
-        history: list[dict[str, Any]],
         strategy: str | None = None,
         asset_type: str | None = None,
         llm_profile_id: str | None = None,
         llm_model: str | None = None,
         llm_auto: bool = False,
+        edit_message_id: str | None = None,
+        user_message_id: str | None = None,
+        assistant_message_id: str | None = None,
     ) -> tuple[str, str]:
+        """Append a task using server-owned history, optionally replacing one branch."""
         await self._ensure_ready()
-        user_message_id = f"msg-{uuid4().hex}"
-        assistant_message_id = f"msg-{uuid4().hex}"
+        user_message_id = user_message_id or f"msg-{uuid4().hex}"
+        assistant_message_id = assistant_message_id or f"msg-{uuid4().hex}"
+        if user_message_id == assistant_message_id:
+            raise ValueError("用户消息和助手消息必须使用不同 ID")
         timestamp = _now()
-        title = next(
-            (
-                part.get("content", "").strip()
-                for item in history + [{"role": "user", "parts": [_text_part(message)]}]
-                if item.get("role") == "user"
-                for part in self._parts(item)
-                if part.get("type") == "text" and str(part.get("content", "")).strip()
-            ),
-            "新对话",
-        )
-        title = title[:30] + ("…" if len(title) > 30 else "")
+        title = message.strip()[:30] + ("…" if len(message.strip()) > 30 else "") or "新对话"
+        pruned_task_ids: list[str] = []
 
         async with in_transaction() as connection:
             existing = await ChatTask.filter(task_id=task_id).using_db(connection).first()
@@ -316,80 +224,91 @@ class ChatStore:
                 .first()
             )
             if active:
-                if active.status == "waiting_user":
-                    await ChatTask.filter(task_id=active.task_id).using_db(connection).update(
-                        status="superseded",
-                        updated_at=timestamp,
-                    )
-                    await ChatMessage.filter(message_id=active.message_id).using_db(connection).update(
-                        status="superseded",
-                        updated_at=timestamp,
-                    )
-                    await ChatTaskInteraction.filter(
-                        task_id=active.task_id,
-                        status="pending",
-                    ).using_db(connection).update(status="cancelled", responded_at=timestamp)
-                else:
+                if active.status != "waiting_user":
                     raise ValueError(f"会话已有正在执行的任务: {active.task_id}")
+                await ChatTask.filter(task_id=active.task_id).using_db(connection).update(
+                    status="superseded",
+                    updated_at=timestamp,
+                )
+                await ChatMessage.filter(message_id=active.message_id).using_db(connection).update(
+                    status="superseded",
+                    updated_at=timestamp,
+                )
+                await ChatTaskInteraction.filter(
+                    task_id=active.task_id,
+                    status="pending",
+                ).using_db(connection).update(status="cancelled", responded_at=timestamp)
 
             conversation = (
                 await ChatConversation.filter(conversation_id=conversation_id).using_db(connection).first()
             )
             if conversation is None:
+                if edit_message_id:
+                    raise ValueError("不能编辑尚未持久化的会话")
                 await ChatConversation.create(
                     conversation_id=conversation_id,
-                    title=title or "新对话",
+                    title=title,
                     created_at=timestamp,
                     updated_at=timestamp,
                     using_db=connection,
                 )
+                persisted_messages = []
             else:
                 await ChatConversation.filter(conversation_id=conversation_id).using_db(connection).update(
                     updated_at=timestamp
                 )
-            old_messages = await (
-                ChatMessage.filter(conversation_id=conversation_id)
-                .using_db(connection)
-                .values("message_id")
-            )
-            old_ids = [item["message_id"] for item in old_messages]
-            if old_ids:
-                await ChatMessageReference.filter(message_id__in=old_ids).using_db(connection).delete()
-                await ChatMessageSearch.filter(message_id__in=old_ids).using_db(connection).delete()
-            await ChatMessage.filter(conversation_id=conversation_id).using_db(connection).delete()
-
-            for position, item in enumerate(history):
-                role = item.get("role", "user")
-                item_timestamp = str(item.get("created_at") or timestamp)
-                message_id = f"msg-{uuid4().hex}"
-                parts = self._parts(item)
-                await ChatMessage.create(
-                    message_id=message_id,
-                    conversation_id=conversation_id,
-                    role=role,
-                    parts_json=_json(parts),
-                    status="completed",
-                    task_id=None,
-                    position=position,
-                    created_at=item_timestamp,
-                    updated_at=item_timestamp,
-                    using_db=connection,
+                persisted_messages = await (
+                    ChatMessage.filter(conversation_id=conversation_id)
+                    .using_db(connection)
+                    .order_by("position")
+                    .values("message_id", "role", "parts_json", "status", "position", "task_id")
                 )
-                await self._sync_search(message_id, conversation_id, parts, connection)
-                references = item.get("references")
-                if isinstance(references, list):
-                    for reference_position, reference in enumerate(references):
-                        if isinstance(reference, dict):
-                            await ChatMessageReference.create(
-                                id=f"{message_id}:{reference_position}",
-                                message_id=message_id,
-                                position=reference_position,
-                                reference_json=_json(reference),
-                                created_at=item_timestamp,
-                                using_db=connection,
-                            )
 
-            user_position = len(history)
+            if edit_message_id:
+                target = next(
+                    (item for item in persisted_messages if item["message_id"] == edit_message_id),
+                    None,
+                )
+                if target is None or target["role"] != "user":
+                    raise ValueError("只能编辑当前会话中已持久化的用户消息")
+                cutoff = int(target["position"])
+                pruned_messages = [item for item in persisted_messages if int(item["position"]) >= cutoff]
+                pruned_message_ids = [str(item["message_id"]) for item in pruned_messages]
+                pruned_task_ids = list(
+                    dict.fromkeys(str(item["task_id"]) for item in pruned_messages if item.get("task_id"))
+                )
+                if pruned_message_ids:
+                    await ChatMessageReference.filter(message_id__in=pruned_message_ids).using_db(connection).delete()
+                    await self.search_index.remove_messages(pruned_message_ids, connection)
+                if pruned_task_ids:
+                    await ChatTaskEvent.filter(task_id__in=pruned_task_ids).using_db(connection).delete()
+                    await ChatTaskInteraction.filter(task_id__in=pruned_task_ids).using_db(connection).delete()
+                    await ChatTaskState.filter(task_id__in=pruned_task_ids).using_db(connection).delete()
+                    await ChatTask.filter(task_id__in=pruned_task_ids).using_db(connection).delete()
+                await ChatMessage.filter(message_id__in=pruned_message_ids).using_db(connection).delete()
+                persisted_messages = [item for item in persisted_messages if int(item["position"]) < cutoff]
+
+            effective_history = []
+            for item in persisted_messages:
+                if item["status"] != "completed" or item["role"] not in {"user", "assistant"}:
+                    continue
+                parts = json.loads(item["parts_json"])
+                effective_history.append(
+                    {"role": item["role"], "content": parts_text(parts), "parts": parts}
+                )
+            user_position = (
+                max(int(item["position"]) for item in persisted_messages) + 1
+                if persisted_messages
+                else 0
+            )
+            duplicate_message = await (
+                ChatMessage.filter(message_id__in=[user_message_id, assistant_message_id])
+                .using_db(connection)
+                .exists()
+            )
+            if duplicate_message:
+                raise ValueError("消息 ID 已被使用")
+
             user_parts = [_text_part(message)]
             await ChatMessage.create(
                 message_id=user_message_id,
@@ -433,7 +352,7 @@ class ChatStore:
                         "task_id": task_id,
                         "conversation_id": conversation_id,
                         "message": message,
-                        "history": history,
+                        "history": effective_history,
                         "strategy": strategy,
                         "asset_type": asset_type,
                         "llm_profile_id": llm_profile_id,
@@ -448,6 +367,12 @@ class ChatStore:
                 updated_at=timestamp,
                 using_db=connection,
             )
+
+        if pruned_task_ids:
+            from graph.checkpointing import checkpoint_manager
+
+            for pruned_task_id in pruned_task_ids:
+                await checkpoint_manager.delete_thread_family(pruned_task_id)
         return user_message_id, assistant_message_id
 
     async def append_part(self, message_id: str, part: dict[str, Any], task_id: str | None = None) -> bool:
@@ -746,7 +671,7 @@ class ChatStore:
         conversations = ChatConversation.all()
         if query and query.strip():
             needle = query.strip()
-            if self._sqlite_fts5_enabled and len(needle) >= 3:
+            if self.search_index.sqlite_fts5_enabled and len(needle) >= 3:
                 connection = Tortoise.get_connection("default")
                 # Search input is user text, not an FTS expression. Quoting it
                 # keeps punctuation such as hyphens from being interpreted as
@@ -806,7 +731,7 @@ class ChatStore:
         message_ids = await ChatMessage.filter(conversation_id=conversation_id).values_list("message_id", flat=True)
         if message_ids:
             await ChatMessageReference.filter(message_id__in=list(message_ids)).delete()
-            await ChatMessageSearch.filter(message_id__in=list(message_ids)).delete()
+            await self.search_index.remove_messages(list(message_ids))
         if task_ids:
             await ChatTaskEvent.filter(task_id__in=task_ids).delete()
             await ChatTaskInteraction.filter(task_id__in=task_ids).delete()
