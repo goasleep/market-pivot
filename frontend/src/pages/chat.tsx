@@ -15,6 +15,7 @@ import {
   conversationSearchText,
   hasRunningTask,
   hydrateServerConversation,
+  isArtifactEmbeddedInA2UI,
   latestConversationReferences,
   loadStore,
   newConversation,
@@ -43,7 +44,10 @@ import {
 
 const SUGGESTIONS = [
   { label: "分析 ETF 510300", text: "分析 ETF 510300，适合我的短中期交易吗？" },
-  { label: "回测 ETF 510300", text: "回测 ETF 510300 最近三年表现，优先控制最大回撤" },
+  {
+    label: "回测 ETF 510300",
+    text: "回测 ETF 510300 最近三年表现，优先控制最大回撤",
+  },
   { label: "查询实时行情", text: "查询 600519 的实时行情" },
   { label: "对比两个基金", text: "对比 ETF 510300 和 ETF 159915 的近期走势" },
   { label: "Agent 能做什么？", text: "你能帮我做哪些事情？" },
@@ -123,7 +127,8 @@ export function ChatPage() {
   // effect remains attached to the conversation that owns the stream.
   const activeConversationSending = Boolean(
     activeConversation?.messages.some(
-      (message) => message.role === "assistant" && message.loading && message.taskId,
+      (message) =>
+        message.role === "assistant" && message.loading && message.taskId,
     ),
   );
 
@@ -145,7 +150,8 @@ export function ChatPage() {
     if (!requestedConversationId) return;
     setStore((current) =>
       current.conversations.some(
-        (conversation) => conversation.conversationId === requestedConversationId,
+        (conversation) =>
+          conversation.conversationId === requestedConversationId,
       ) && current.activeId !== requestedConversationId
         ? { ...current, activeId: requestedConversationId }
         : current,
@@ -171,7 +177,8 @@ export function ChatPage() {
           const merged = conversations.map((serverConversation) => {
             const localConversation = current.conversations.find(
               (conversation) =>
-                conversation.conversationId === serverConversation.conversationId,
+                conversation.conversationId ===
+                serverConversation.conversationId,
             );
             // A live task owns its local message until its stream finishes. The
             // initial server-history request may otherwise replace it with a
@@ -205,7 +212,11 @@ export function ChatPage() {
   useEffect(() => {
     if (!sourcesOpen || selectedReferences.length > 0) return;
     setSourcesOpen(false);
-  }, [activeConversation?.conversationId, selectedReferences.length, sourcesOpen]);
+  }, [
+    activeConversation?.conversationId,
+    selectedReferences.length,
+    sourcesOpen,
+  ]);
 
   const updateConversation = useCallback(
     (conversationId: string, update: (item: Conversation) => Conversation) => {
@@ -309,7 +320,10 @@ export function ChatPage() {
           assistant.parts[assistant.parts.length - 1]?.type === "text"
         ) {
           const previous = assistant.parts[assistant.parts.length - 1];
-          if (typeof previous.content === "string" && typeof part.content === "string") {
+          if (
+            typeof previous.content === "string" &&
+            typeof part.content === "string"
+          ) {
             previous.content += part.content;
           }
         } else if (
@@ -372,13 +386,16 @@ export function ChatPage() {
           }
           if (
             part.type === "artifact" &&
-            typeof (part.content as Record<string, unknown>)?.artifact_id === "string" &&
-            assistant.parts.some(
-              (existingPart) =>
-                existingPart.type === "artifact" &&
-                (existingPart.content as Record<string, unknown>)?.artifact_id ===
-                  (part.content as Record<string, unknown>).artifact_id,
-            )
+            (isArtifactEmbeddedInA2UI(assistant.parts, part.content) ||
+              (typeof (part.content as Record<string, unknown>)?.artifact_id ===
+                "string" &&
+                assistant.parts.some(
+                  (existingPart) =>
+                    existingPart.type === "artifact" &&
+                    (existingPart.content as Record<string, unknown>)
+                      ?.artifact_id ===
+                      (part.content as Record<string, unknown>).artifact_id,
+                )))
           ) {
             return item;
           }
@@ -402,7 +419,8 @@ export function ChatPage() {
     ) => {
       updateConversation(conversationId, (item) => {
         const messageIndex = item.messages.findIndex(
-          (message) => message.role === "assistant" && message.taskId === taskId,
+          (message) =>
+            message.role === "assistant" && message.taskId === taskId,
         );
         if (messageIndex < 0) return item;
         const messages = [...item.messages];
@@ -410,7 +428,10 @@ export function ChatPage() {
         assistant.status = "running";
         const previous = assistant.parts[assistant.parts.length - 1];
         if (part.type === "text" && previous?.type === "text") {
-          if (typeof previous.content === "string" && typeof part.content === "string") {
+          if (
+            typeof previous.content === "string" &&
+            typeof part.content === "string"
+          ) {
             previous.content += part.content;
           }
         } else if (part.type === "a2ui" && previous?.type === "a2ui") {
@@ -469,13 +490,16 @@ export function ChatPage() {
           }
           if (
             part.type === "artifact" &&
-            typeof (part.content as Record<string, unknown>)?.artifact_id === "string" &&
-            assistant.parts.some(
-              (existingPart) =>
-                existingPart.type === "artifact" &&
-                (existingPart.content as Record<string, unknown>)?.artifact_id ===
-                  (part.content as Record<string, unknown>).artifact_id,
-            )
+            (isArtifactEmbeddedInA2UI(assistant.parts, part.content) ||
+              (typeof (part.content as Record<string, unknown>)?.artifact_id ===
+                "string" &&
+                assistant.parts.some(
+                  (existingPart) =>
+                    existingPart.type === "artifact" &&
+                    (existingPart.content as Record<string, unknown>)
+                      ?.artifact_id ===
+                      (part.content as Record<string, unknown>).artifact_id,
+                )))
           ) {
             return item;
           }
@@ -488,7 +512,11 @@ export function ChatPage() {
   );
 
   const setAssistantReferences = useCallback(
-    (conversationId: string, messageIndex: number, references: ChatReference[]) => {
+    (
+      conversationId: string,
+      messageIndex: number,
+      references: ChatReference[],
+    ) => {
       updateConversation(conversationId, (item) => {
         const message = item.messages[messageIndex];
         if (!message || message.role !== "assistant") return item;
@@ -504,7 +532,8 @@ export function ChatPage() {
     (conversationId: string, taskId: string, references: ChatReference[]) => {
       updateConversation(conversationId, (item) => {
         const messageIndex = item.messages.findIndex(
-          (message) => message.role === "assistant" && message.taskId === taskId,
+          (message) =>
+            message.role === "assistant" && message.taskId === taskId,
         );
         if (messageIndex < 0) return item;
         const messages = [...item.messages];
@@ -530,7 +559,10 @@ export function ChatPage() {
           if (part.type !== "interaction") return part;
           const interaction = part.content as ChatInteraction;
           return interaction.status === "pending"
-            ? { ...part, content: { ...interaction, status: "cancelled" as const } }
+            ? {
+                ...part,
+                content: { ...interaction, status: "cancelled" as const },
+              }
             : part;
         }),
       }));
@@ -626,13 +658,19 @@ export function ChatPage() {
               const line = rawLine.trimEnd();
               if (line.startsWith("id:")) {
                 const parsedEventId = Number(line.slice(3).trim());
-                pendingEventId = Number.isFinite(parsedEventId) ? parsedEventId : null;
+                pendingEventId = Number.isFinite(parsedEventId)
+                  ? parsedEventId
+                  : null;
                 continue;
               }
               if (!line.startsWith("data:")) continue;
-              if (pendingEventId !== null && pendingEventId <= lastEventId) continue;
+              if (pendingEventId !== null && pendingEventId <= lastEventId)
+                continue;
               try {
-                const data = JSON.parse(line.slice(5).trim()) as Record<string, unknown>;
+                const data = JSON.parse(line.slice(5).trim()) as Record<
+                  string,
+                  unknown
+                >;
                 appendStreamData(data);
                 if (pendingEventId !== null) {
                   lastEventId = pendingEventId;
@@ -646,11 +684,15 @@ export function ChatPage() {
         };
 
         const getTaskStatus = async () => {
-          const response = await fetch(`/api/chat/tasks/${encodeURIComponent(taskId)}`, {
-            signal: abortController.signal,
-          });
+          const response = await fetch(
+            `/api/chat/tasks/${encodeURIComponent(taskId)}`,
+            {
+              signal: abortController.signal,
+            },
+          );
           if (response.status === 404) return null;
-          if (!response.ok) throw new Error(`任务状态查询失败（${response.status}）`);
+          if (!response.ok)
+            throw new Error(`任务状态查询失败（${response.status}）`);
           return (await response.json()) as { status?: string };
         };
 
@@ -675,7 +717,8 @@ export function ChatPage() {
             }),
             signal: abortController.signal,
           });
-          if (!initialResponse.ok) throw new Error(`请求失败（${initialResponse.status}）`);
+          if (!initialResponse.ok)
+            throw new Error(`请求失败（${initialResponse.status}）`);
           await consumeStream(initialResponse);
         } catch (error) {
           if (abortController.signal.aborted) throw error;
@@ -690,20 +733,36 @@ export function ChatPage() {
           try {
             const task = await getTaskStatus();
             taskStatus = task?.status || null;
-            if (!task || (task.status && TERMINAL_TASK_STATUSES.has(task.status))) break;
+            if (
+              !task ||
+              (task.status && TERMINAL_TASK_STATUSES.has(task.status))
+            )
+              break;
 
-            await waitForReconnect(Math.min(250 * 2 ** reconnectAttempt, 3000), abortController.signal);
-            const response = await fetch(`/api/chat/tasks/${encodeURIComponent(taskId)}/stream`, {
-              signal: abortController.signal,
-              headers: lastEventId ? { "Last-Event-ID": String(lastEventId) } : undefined,
-            });
-            if (!response.ok) throw new Error(`流式重连失败（${response.status}）`);
+            await waitForReconnect(
+              Math.min(250 * 2 ** reconnectAttempt, 3000),
+              abortController.signal,
+            );
+            const response = await fetch(
+              `/api/chat/tasks/${encodeURIComponent(taskId)}/stream`,
+              {
+                signal: abortController.signal,
+                headers: lastEventId
+                  ? { "Last-Event-ID": String(lastEventId) }
+                  : undefined,
+              },
+            );
+            if (!response.ok)
+              throw new Error(`流式重连失败（${response.status}）`);
             await consumeStream(response);
             reconnectAttempt = 0;
           } catch (error) {
             if (abortController.signal.aborted) throw error;
             reconnectAttempt = Math.min(reconnectAttempt + 1, 4);
-            await waitForReconnect(Math.min(250 * 2 ** reconnectAttempt, 3000), abortController.signal);
+            await waitForReconnect(
+              Math.min(250 * 2 ** reconnectAttempt, 3000),
+              abortController.signal,
+            );
           }
         }
       } catch (error) {
@@ -736,7 +795,7 @@ export function ChatPage() {
                           ? "interrupted"
                           : taskStatus === "waiting_user"
                             ? "waiting_user"
-                          : "completed",
+                            : "completed",
                 }
               : message,
           ),
@@ -803,7 +862,9 @@ export function ChatPage() {
             `/api/chat/tasks/${encodeURIComponent(resumedTaskId)}/stream`,
             {
               signal: reconnectController.signal,
-              headers: lastEventId ? { "Last-Event-ID": String(lastEventId) } : undefined,
+              headers: lastEventId
+                ? { "Last-Event-ID": String(lastEventId) }
+                : undefined,
             },
           );
           if (response.status === 404) {
@@ -825,11 +886,14 @@ export function ChatPage() {
             for (const line of lines) {
               if (line.startsWith("id:")) {
                 const parsedEventId = Number(line.slice(3).trim());
-                pendingEventId = Number.isFinite(parsedEventId) ? parsedEventId : null;
+                pendingEventId = Number.isFinite(parsedEventId)
+                  ? parsedEventId
+                  : null;
                 continue;
               }
               if (!line.startsWith("data:")) continue;
-              if (pendingEventId !== null && pendingEventId <= lastEventId) continue;
+              if (pendingEventId !== null && pendingEventId <= lastEventId)
+                continue;
               try {
                 const data = JSON.parse(line.slice(5).trim());
                 if (data.text !== undefined) {
@@ -887,7 +951,8 @@ export function ChatPage() {
             terminalStatus = "interrupted";
             break;
           }
-          if (!taskResponse.ok) throw new Error(`任务状态查询失败（${taskResponse.status}）`);
+          if (!taskResponse.ok)
+            throw new Error(`任务状态查询失败（${taskResponse.status}）`);
           const task = (await taskResponse.json()) as { status?: string };
           if (task.status && TERMINAL_TASK_STATUSES.has(task.status)) {
             terminalStatus = task.status as ChatMessageData["status"];
@@ -1044,14 +1109,17 @@ export function ChatPage() {
     [activeConversation, sendMessage, sending],
   );
 
-  const openReferences = useCallback((references: ChatReference[]) => {
-    if (!activeConversation) return;
-    setReferencesByConversation((current) => ({
-      ...current,
-      [activeConversation.conversationId]: references,
-    }));
-    setSourcesOpen(true);
-  }, [activeConversation]);
+  const openReferences = useCallback(
+    (references: ChatReference[]) => {
+      if (!activeConversation) return;
+      setReferencesByConversation((current) => ({
+        ...current,
+        [activeConversation.conversationId]: references,
+      }));
+      setSourcesOpen(true);
+    },
+    [activeConversation],
+  );
 
   const messages = activeConversation?.messages || [];
 

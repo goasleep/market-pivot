@@ -22,7 +22,9 @@ export interface ChatStore {
   conversations: Conversation[];
 }
 
-export function a2uiMessages(content: A2UIMessage | A2UIMessage[]): A2UIMessage[] {
+export function a2uiMessages(
+  content: A2UIMessage | A2UIMessage[],
+): A2UIMessage[] {
   return Array.isArray(content) ? content : [content];
 }
 
@@ -30,21 +32,88 @@ export function a2uiMessageKey(message: A2UIMessage): string {
   return JSON.stringify(message);
 }
 
+function artifactIdFromUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return value.match(
+    /^\/api\/artifacts\/([A-Za-z0-9_-]+)\/(?:preview|download)$/,
+  )?.[1];
+}
+
+function artifactId(content: unknown): string | undefined {
+  if (!content || typeof content !== "object" || Array.isArray(content))
+    return undefined;
+  const artifact = content as Record<string, unknown>;
+  return (
+    (typeof artifact.artifact_id === "string"
+      ? artifact.artifact_id
+      : undefined) ||
+    artifactIdFromUrl(artifact.preview_url) ||
+    artifactIdFromUrl(artifact.download_url)
+  );
+}
+
+function collectArtifactIds(value: unknown, target: Set<string>): void {
+  if (typeof value === "string") {
+    const id = artifactIdFromUrl(value);
+    if (id) target.add(id);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectArtifactIds(item, target));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  Object.values(value as Record<string, unknown>).forEach((item) =>
+    collectArtifactIds(item, target),
+  );
+}
+
+function embeddedA2UIArtifactIds(parts: ChatMessagePart[]): Set<string> {
+  const messages = parts.flatMap((part) =>
+    part.type === "a2ui"
+      ? a2uiMessages(part.content as A2UIMessage | A2UIMessage[])
+      : [],
+  );
+  const artifactSurfaceIds = new Set(
+    messages.flatMap((message) => {
+      const update = message.updateComponents;
+      return update?.components.some(
+        (component) => component.component === "ArtifactLink",
+      )
+        ? [update.surfaceId]
+        : [];
+    }),
+  );
+  const ids = new Set<string>();
+  messages.forEach((message) => {
+    const update = message.updateDataModel;
+    if (update && artifactSurfaceIds.has(update.surfaceId)) {
+      collectArtifactIds(update.value, ids);
+    }
+  });
+  return ids;
+}
+
+export function isArtifactEmbeddedInA2UI(
+  parts: ChatMessagePart[],
+  content: ChatMessagePart["content"],
+): boolean {
+  const id = artifactId(content);
+  return Boolean(id && embeddedA2UIArtifactIds(parts).has(id));
+}
+
 export function dedupeParts(parts: ChatMessagePart[]): ChatMessagePart[] {
   const artifactIds = new Set<string>();
+  const embeddedArtifactIds = embeddedA2UIArtifactIds(parts);
   const a2uiKeys = new Set<string>();
   const result: ChatMessagePart[] = [];
 
   for (const part of parts) {
     if (part.type === "artifact") {
-      const content = part.content;
-      const artifactId =
-        content && typeof content === "object" && !Array.isArray(content)
-          ? (content as Record<string, unknown>).artifact_id
-          : undefined;
-      if (typeof artifactId === "string") {
-        if (artifactIds.has(artifactId)) continue;
-        artifactIds.add(artifactId);
+      const id = artifactId(part.content);
+      if (id) {
+        if (embeddedArtifactIds.has(id) || artifactIds.has(id)) continue;
+        artifactIds.add(id);
       }
       result.push(part);
       continue;
@@ -55,26 +124,29 @@ export function dedupeParts(parts: ChatMessagePart[]): ChatMessagePart[] {
       continue;
     }
 
-    const content = a2uiMessages(part.content as A2UIMessage | A2UIMessage[]).filter(
-      (message) => {
-        const key = a2uiMessageKey(message);
-        if (a2uiKeys.has(key)) return false;
-        a2uiKeys.add(key);
-        return true;
-      },
-    );
+    const content = a2uiMessages(
+      part.content as A2UIMessage | A2UIMessage[],
+    ).filter((message) => {
+      const key = a2uiMessageKey(message);
+      if (a2uiKeys.has(key)) return false;
+      a2uiKeys.add(key);
+      return true;
+    });
     if (content.length > 0) result.push({ ...part, content });
   }
 
   return result;
 }
 
-export function normalizeConversation(conversation: Conversation): Conversation {
+export function normalizeConversation(
+  conversation: Conversation,
+): Conversation {
   return {
     ...conversation,
     messages: conversation.messages.map((message) => ({
       ...message,
-      createdAt: message.createdAt || conversation.updatedAt || new Date().toISOString(),
+      createdAt:
+        message.createdAt || conversation.updatedAt || new Date().toISOString(),
       references: message.references || [],
       parts: dedupeParts(message.parts),
     })),
@@ -83,7 +155,8 @@ export function normalizeConversation(conversation: Conversation): Conversation 
 
 export function hasRunningTask(conversation: Conversation): boolean {
   return conversation.messages.some(
-    (message) => message.role === "assistant" && message.loading && message.taskId,
+    (message) =>
+      message.role === "assistant" && message.loading && message.taskId,
   );
 }
 
@@ -122,7 +195,9 @@ export function conversationSearchText(conversation: Conversation): string {
     .toLocaleLowerCase();
 }
 
-export function latestConversationReferences(conversation?: Conversation): ChatReference[] {
+export function latestConversationReferences(
+  conversation?: Conversation,
+): ChatReference[] {
   if (!conversation) return [];
   for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
     const references = (conversation.messages[index].references || []).filter(
@@ -146,8 +221,12 @@ export function loadStore(): ChatStore {
       }
     }
 
-    const current = JSON.parse(localStorage.getItem(LEGACY_CURRENT_KEY) || "null");
-    const history = JSON.parse(localStorage.getItem(LEGACY_HISTORY_KEY) || "[]");
+    const current = JSON.parse(
+      localStorage.getItem(LEGACY_CURRENT_KEY) || "null",
+    );
+    const history = JSON.parse(
+      localStorage.getItem(LEGACY_HISTORY_KEY) || "[]",
+    );
     const migrated = [...(Array.isArray(history) ? history : [])];
     if (
       current?.messages?.length &&
@@ -186,7 +265,9 @@ export function saveStore(store: ChatStore): void {
   }
 }
 
-export function hydrateServerConversation(raw: Record<string, unknown>): Conversation {
+export function hydrateServerConversation(
+  raw: Record<string, unknown>,
+): Conversation {
   const rawMessages = Array.isArray(raw.messages) ? raw.messages : [];
   return {
     conversationId: String(raw.conversation_id || crypto.randomUUID()),
@@ -214,7 +295,8 @@ export function hydrateServerConversation(raw: Record<string, unknown>): Convers
           : [],
         loading: Boolean(message.loading),
         status,
-        taskId: typeof message.task_id === "string" ? message.task_id : undefined,
+        taskId:
+          typeof message.task_id === "string" ? message.task_id : undefined,
       };
     }),
   };
