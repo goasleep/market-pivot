@@ -41,6 +41,7 @@ def tool_timeout_seconds(name: str) -> int:
         "design_and_run_backtest",
         "compare_strategy_backtests",
         "design_and_run_sandbox_strategy",
+        "query_market_data",
     }:
         return LONG_RUNNING_TOOL_TIMEOUT_SECONDS
     return TOOL_TIMEOUT_SECONDS
