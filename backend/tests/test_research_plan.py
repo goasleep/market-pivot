@@ -225,6 +225,10 @@ def test_comparison_synthesis_uses_frozen_winners_and_artifact_count():
     assert "同期大盘对比" in text
     assert "超额为 +30.00%" in text
     assert "共 7 个文件" in text
+    assert "Agent 建议（最终由你判断）" in text
+    assert "我的建议：优先把买入持有作为下一轮模拟验证候选" in text
+    assert "为什么不存在唯一" not in text
+    assert "不存在唯一最好策略" not in text
 
 
 def test_comparison_synthesis_treats_no_data_as_observation_not_tool_failure():

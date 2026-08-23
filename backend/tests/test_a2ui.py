@@ -457,9 +457,110 @@ def test_strategy_comparison_labels_limited_data_as_a_conclusion_not_no_conclusi
 
     official = next(item for item in components if item.get("id") == "official")
     winners = next(item for item in components if item.get("id") == "winners")
-    tradeoffs = next(item for item in components if item.get("id") == "tradeoffs")
+    recommendations = next(item for item in components if item.get("id") == "recommendations")
     conclusion = next(item for item in components if item.get("id") == "conclusion")
     assert official["text"] == "当前数据结论（有限置信）"
     assert winners["title"] == "基于当前数据的分维度结论"
-    assert tradeoffs["title"] == "当前数据结论与权衡"
-    assert conclusion["title"] == "结论、风险与局限"
+    assert recommendations["title"] == "Agent 建议（最终由你判断）"
+    assert conclusion["title"] == "Agent 建议与验证边界"
+
+
+def test_strategy_comparison_renders_per_strategy_diagnosis():
+    payload = {
+        "ticker": "510300",
+        "comparisons": [],
+        "acceptance": {"checks": {}},
+        "conclusion": {"recommendations": ["建议优先验证趋势策略。"]},
+        "data_validation": {},
+        "strategy_assessments": [
+            {
+                "rank": 1,
+                "strategy_name": "ma_5_20",
+                "display_name": "MA5/20 趋势",
+                "mechanism": "金叉持有、死叉退出",
+                "why_good": "总收益和夏普排名靠前",
+                "why_bad": "震荡期换手偏高",
+                "suitable_market": "方向明确的趋势行情",
+                "failure_mode": "横盘时反复交叉",
+                "verdict": "优先候选",
+            }
+        ],
+        "market_regime_attribution": {
+            "distribution": [{"label": "上涨趋势", "days": 30, "share": 0.6}],
+            "strategies": [
+                {
+                    "strategy_name": "ma_5_20",
+                    "display_name": "MA5/20 趋势",
+                    "regimes": [
+                        {
+                            "label": "上涨趋势",
+                            "days": 30,
+                            "strategy_return": 0.12,
+                            "benchmark_return": 0.08,
+                            "excess_return": 0.04,
+                            "average_exposure": 0.75,
+                            "worst_day": -0.02,
+                        }
+                    ],
+                }
+            ],
+        },
+        "trade_attribution": {
+            "strategies": [
+                {
+                    "strategy_name": "ma_5_20",
+                    "display_name": "MA5/20 趋势",
+                    "closed_trade_segments": 8,
+                    "realized_pnl": 12_000,
+                    "win_rate": 0.625,
+                    "payoff_ratio": 1.8,
+                    "average_holding_days": 24,
+                    "max_consecutive_losses": 2,
+                    "top3_profit_concentration": 0.48,
+                    "open_shares": 0,
+                }
+            ]
+        },
+        "robustness_assessments": [
+            {
+                "strategy_name": "ma_5_20",
+                "display_name": "MA5/20 趋势",
+                "grade": "moderate",
+                "out_of_sample_return": 0.05,
+                "rolling_positive_ratio": 0.7,
+                "rolling_worst_return": -0.04,
+                "parameter_status": "stable",
+                "stress_total_return": 0.08,
+                "cost_degradation": 0.01,
+            }
+        ],
+        "research_decision": {
+            "preferred_display_name": "MA5/20 趋势",
+            "robustness_grade": "moderate",
+            "falsification_risks": ["优势可能由少数交易贡献。"],
+            "next_experiments": [
+                {"question": "是否依赖少数交易", "method": "移除前三笔盈利", "success_criteria": "仍为正收益"}
+            ],
+            "deployment_gate": {
+                "status": "research_only",
+                "message": "继续模拟验证。",
+                "checks": {"out_of_sample_positive": True},
+            },
+        },
+    }
+
+    messages = render_tool_result("compare_strategy_backtests", json.dumps(payload))
+    components = messages[1]["updateComponents"]["components"]
+    model = messages[2]["updateDataModel"]["value"]
+
+    diagnosis = next(item for item in components if item.get("id") == "assessments")
+    table = next(item for item in components if item.get("id") == "assessment-table")
+    assert diagnosis["title"] == "逐策略诊断：为什么本期表现好或不好"
+    assert [column["label"] for column in table["columns"]][-3:] == ["适合行情", "容易失效", "当前评价"]
+    assert model["assessmentRows"][0]["verdict"] == "优先候选"
+    assert next(item for item in components if item.get("id") == "research-decision")
+    assert next(item for item in components if item.get("id") == "regime-attribution")
+    assert next(item for item in components if item.get("id") == "trade-attribution")
+    assert next(item for item in components if item.get("id") == "stability")
+    assert model["regimeRows"][0]["regime"] == "上涨趋势"
+    assert model["tradeAttributionRows"][0]["lossStreak"] == 2

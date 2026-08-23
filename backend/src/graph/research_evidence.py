@@ -342,6 +342,23 @@ def _format_winner_metric(metric: str, value: Any) -> str:
     return f"{number:.3f}"
 
 
+def _comparison_advice(conclusion: dict[str, Any]) -> list[str]:
+    recommendations = conclusion.get("recommendations") or conclusion.get("interpretations")
+    if recommendations:
+        return [str(item) for item in recommendations if str(item).strip()]
+    for key, dimension in (
+        ("risk_adjusted_winner", "风险调整表现"),
+        ("drawdown_winner", "回撤控制"),
+        ("robustness_winner", "压力成本稳健性"),
+        ("absolute_return_winner", "绝对收益"),
+    ):
+        winner = conclusion.get(key)
+        if isinstance(winner, dict):
+            name = winner.get("display_name") or winner.get("strategy_name") or "该策略"
+            return [f"我的建议：优先把{name}作为下一轮模拟验证候选；依据是它在{dimension}维度领先。"]
+    return ["当前结果不足以形成策略建议，建议先补齐可比较数据。"]
+
+
 def _comparison_synthesis_text(payload: dict[str, Any]) -> str:
     """Render frozen comparison facts without asking an LLM to re-rank strategies."""
     conclusion = payload.get("conclusion") or {}
@@ -397,8 +414,36 @@ def _comparison_synthesis_text(payload: dict[str, Any]) -> str:
         )
     if not winner_count:
         lines.append("- 当前数据覆盖或核验状态不足以形成正式优胜者，结果仅作探索性比较。")
-    lines.extend(["", "为什么不存在唯一“最好策略”："])
-    lines.extend(f"- {item}" for item in (conclusion.get("tradeoffs") or ["不同评价维度对应不同交易取舍。"]))
+    assessments = [
+        item for item in (payload.get("strategy_assessments") or []) if isinstance(item, dict)
+    ]
+    if assessments:
+        lines.extend(["", "排名靠前策略的情况："])
+        for item in assessments[:3]:
+            lines.append(
+                f"- {item.get('display_name') or item.get('strategy_name')}（{item.get('verdict', '待判断')}）："
+                f"策略机制是{item.get('mechanism') or '未记录'}；本期好在{item.get('why_good') or '无突出优势'}；"
+                f"主要问题是{item.get('why_bad') or '未识别'}。适合{item.get('suitable_market') or '信号有效的行情'}；"
+                f"容易在{item.get('failure_mode') or '市场结构变化'}时失效。"
+            )
+    lines.extend(["", "Agent 建议（最终由你判断）："])
+    lines.extend(f"- {item}" for item in _comparison_advice(conclusion))
+    research_decision = payload.get("research_decision") or {}
+    if research_decision:
+        lines.extend(["", "最可能推翻当前建议的证据："])
+        lines.extend(f"- {item}" for item in (research_decision.get("falsification_risks") or [])[:3])
+        lines.extend(["", "建议的下一轮实验："])
+        for experiment in (research_decision.get("next_experiments") or [])[:3]:
+            if isinstance(experiment, dict):
+                lines.append(
+                    f"- {experiment.get('question')} 方法：{experiment.get('method')} "
+                    f"通过标准：{experiment.get('success_criteria')}"
+                )
+        gate = research_decision.get("deployment_gate") or {}
+        lines.append(
+            f"部署准入：{gate.get('status', 'research_only')}。{gate.get('message', '')}"
+            f"未满足：{'、'.join(str(item) for item in gate.get('missing', [])) or '无'}。"
+        )
     lines.extend(
         [
             "",

@@ -108,6 +108,7 @@ class ComparisonConclusion(BaseModel):
     tradeoffs: list[str] = Field(default_factory=list)
     data_warnings: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
     interpretations: list[str] = Field(default_factory=list)
 
 

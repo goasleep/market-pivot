@@ -8,6 +8,23 @@ from uuid import uuid4
 
 from widgets.a2ui import _number_label, _percent_label, _ref, _surface, _text
 
+_RESEARCH_GATE_LABELS = {
+    "task_acceptance": "任务验收通过",
+    "official_sample": "样本长度达到正式标准",
+    "data_cross_validation": "行情交叉核验通过",
+    "out_of_sample_positive": "样本外收益为正",
+    "rolling_positive_majority": "多数滚动窗口为正",
+    "parameters_stable": "相邻参数表现稳定",
+    "stress_cost_positive": "压力成本下收益为正",
+    "trade_sample_sufficient": "闭合交易样本充足",
+    "profit_not_over_concentrated": "盈利不过度集中",
+}
+_RESEARCH_GATE_STATUS_LABELS = {
+    "research_only": "仅限研究与模拟验证",
+    "eligible_for_manual_review": "可提交人工审核",
+}
+_ROBUSTNESS_LABELS = {"strong": "强", "moderate": "中", "weak": "弱", "unknown": "未知"}
+
 
 def render_sandbox_strategy_candidate(
     payload: dict[str, Any],
@@ -362,6 +379,23 @@ def _comparison_winner_rows(conclusion: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _comparison_advice(conclusion: dict[str, Any]) -> list[str]:
+    recommendations = conclusion.get("recommendations") or conclusion.get("interpretations")
+    if recommendations:
+        return [str(item) for item in recommendations if str(item).strip()]
+    for key, dimension in (
+        ("risk_adjusted_winner", "风险调整表现"),
+        ("drawdown_winner", "回撤控制"),
+        ("robustness_winner", "压力成本稳健性"),
+        ("absolute_return_winner", "绝对收益"),
+    ):
+        winner = conclusion.get(key)
+        if isinstance(winner, dict):
+            name = winner.get("display_name") or winner.get("strategy_name") or "该策略"
+            return [f"我的建议：优先把{name}作为下一轮模拟验证候选；依据是它在{dimension}维度领先。"]
+    return ["当前结果不足以形成策略建议，建议先补齐可比较数据。"]
+
+
 def render_strategy_comparison(
     payload: dict[str, Any],
     surface_id: str | None = None,
@@ -565,6 +599,94 @@ def render_strategy_comparison(
         }
         for item in comparisons
     ]
+    assessment_rows = [
+        {
+            "rank": item.get("rank"),
+            "strategy": item.get("display_name") or item.get("strategy_name"),
+            "mechanism": item.get("mechanism"),
+            "strengths": item.get("why_good"),
+            "weaknesses": item.get("why_bad"),
+            "suitable": item.get("suitable_market"),
+            "failure": item.get("failure_mode"),
+            "verdict": item.get("verdict"),
+        }
+        for item in (payload.get("strategy_assessments") or [])
+        if isinstance(item, dict)
+    ]
+    regime_rows = [
+        {
+            "strategy": strategy.get("display_name") or strategy.get("strategy_name"),
+            "regime": regime.get("label") or regime.get("regime"),
+            "days": regime.get("days"),
+            "return": _percent_label(regime.get("strategy_return")),
+            "benchmark": _percent_label(regime.get("benchmark_return")),
+            "excess": _percent_label(regime.get("excess_return")),
+            "exposure": _percent_label(regime.get("average_exposure")),
+            "worstDay": _percent_label(regime.get("worst_day")),
+        }
+        for strategy in (payload.get("market_regime_attribution", {}).get("strategies") or [])
+        if isinstance(strategy, dict)
+        for regime in (strategy.get("regimes") or [])
+        if isinstance(regime, dict)
+    ]
+    regime_distribution = "；".join(
+        f"{item.get('label') or item.get('regime')} {item.get('days', 0)} 日（{float(item.get('share') or 0):.1%}）"
+        for item in (payload.get("market_regime_attribution", {}).get("distribution") or [])
+        if isinstance(item, dict)
+    )
+    trade_attribution_rows = [
+        {
+            "strategy": item.get("display_name") or item.get("strategy_name"),
+            "closed": item.get("closed_trade_segments"),
+            "realizedPnl": f"¥{_number_label(item.get('realized_pnl'))}",
+            "winRate": _percent_label(item.get("win_rate")),
+            "payoff": _number_label(item.get("payoff_ratio")),
+            "holdingDays": _number_label(item.get("average_holding_days")),
+            "lossStreak": item.get("max_consecutive_losses"),
+            "concentration": _percent_label(item.get("top3_profit_concentration")),
+            "openShares": item.get("open_shares"),
+        }
+        for item in (payload.get("trade_attribution", {}).get("strategies") or [])
+        if isinstance(item, dict)
+    ]
+    robustness_rows = [
+        {
+            "strategy": item.get("display_name") or item.get("strategy_name"),
+            "grade": {"strong": "强", "moderate": "中", "weak": "弱"}.get(
+                str(item.get("grade")), str(item.get("grade") or "—")
+            ),
+            "oos": _percent_label(item.get("out_of_sample_return")),
+            "rollingPositive": _percent_label(item.get("rolling_positive_ratio")),
+            "rollingWorst": _percent_label(item.get("rolling_worst_return")),
+            "sensitivity": item.get("parameter_status"),
+            "stress": _percent_label(item.get("stress_total_return")),
+            "costDrag": _percent_label(item.get("cost_degradation"), signed=False),
+        }
+        for item in (payload.get("robustness_assessments") or [])
+        if isinstance(item, dict)
+    ]
+    research_decision = dict(payload.get("research_decision") or {})
+    experiment_rows = [
+        {
+            "question": item.get("question"),
+            "method": item.get("method"),
+            "criteria": item.get("success_criteria"),
+        }
+        for item in (research_decision.get("next_experiments") or [])
+        if isinstance(item, dict)
+    ]
+    gate = dict(research_decision.get("deployment_gate") or {})
+    gate_rows = [
+        {"check": _RESEARCH_GATE_LABELS.get(str(key), str(key)), "status": "通过" if value else "未通过"}
+        for key, value in (gate.get("checks") or {}).items()
+    ]
+    gate_status = _RESEARCH_GATE_STATUS_LABELS.get(
+        str(gate.get("status")), str(gate.get("status") or "仅限研究")
+    )
+    robustness_label = _ROBUSTNESS_LABELS.get(
+        str(research_decision.get("robustness_grade")),
+        str(research_decision.get("robustness_grade") or "未知"),
+    )
     artifact_rows = [
         {
             "name": artifact.get("name"),
@@ -588,19 +710,23 @@ def render_strategy_comparison(
                 "title",
                 "meta",
                 "status-row",
+                "conclusion",
+                *(["research-decision"] if research_decision else []),
                 "winners",
                 "table",
+                *(["assessments"] if assessment_rows else []),
+                *(["regime-attribution"] if regime_rows else []),
+                *(["trade-attribution"] if trade_attribution_rows else []),
                 "equity",
                 *(["trade-points"] if len(price_points) >= 2 else []),
                 *(["market-benchmark"] if market_benchmark else []),
                 "drawdown",
                 *(["exposure"] if exposure_series else []),
                 "costs",
-                "stability",
+                *(["stability"] if robustness_rows else []),
                 "sources",
                 "contract",
                 "definitions",
-                "conclusion",
                 "artifacts",
                 "notice",
             ],
@@ -669,6 +795,144 @@ def render_strategy_comparison(
             ],
             "rows": _ref("/rows"),
         },
+        *(
+            [
+                {
+                    "id": "assessments",
+                    "component": "Collapsible",
+                    "title": "逐策略诊断：为什么本期表现好或不好",
+                    "defaultExpanded": True,
+                    "children": ["assessment-table"],
+                },
+                {
+                    "id": "assessment-table",
+                    "component": "DataTable",
+                    "columns": [
+                        {"key": "rank", "label": "排名"},
+                        {"key": "strategy", "label": "策略"},
+                        {"key": "mechanism", "label": "怎么交易"},
+                        {"key": "strengths", "label": "本期为什么好"},
+                        {"key": "weaknesses", "label": "本期为什么不好"},
+                        {"key": "suitable", "label": "适合行情"},
+                        {"key": "failure", "label": "容易失效"},
+                        {"key": "verdict", "label": "当前评价"},
+                    ],
+                    "rows": _ref("/assessmentRows"),
+                },
+            ]
+            if assessment_rows
+            else []
+        ),
+        *(
+            [
+                {
+                    "id": "research-decision",
+                    "component": "Collapsible",
+                    "title": "研究决策：证伪风险、下一轮实验与准入",
+                    "defaultExpanded": True,
+                    "children": ["decision-summary", "falsification", "experiment-table", "gate-table"],
+                },
+                _text(
+                    "decision-summary",
+                    (
+                        f"当前首选：{research_decision.get('preferred_display_name', '—')} · "
+                        f"稳健性：{robustness_label} · "
+                        f"准入状态：{gate_status}。{gate.get('message', '')}"
+                    ),
+                    "body",
+                ),
+                {
+                    "id": "falsification",
+                    "component": "List",
+                    "title": "最可能推翻当前建议的证据",
+                    "items": _ref("/falsificationRisks"),
+                },
+                {
+                    "id": "experiment-table",
+                    "component": "DataTable",
+                    "columns": [
+                        {"key": "question", "label": "下一步要回答什么"},
+                        {"key": "method", "label": "怎么验证"},
+                        {"key": "criteria", "label": "通过标准"},
+                    ],
+                    "rows": _ref("/experimentRows"),
+                },
+                {
+                    "id": "gate-table",
+                    "component": "DataTable",
+                    "columns": [
+                        {"key": "check", "label": "部署准入检查"},
+                        {"key": "status", "label": "结果"},
+                    ],
+                    "rows": _ref("/gateRows"),
+                },
+            ]
+            if research_decision
+            else []
+        ),
+        *(
+            [
+                {
+                    "id": "regime-attribution",
+                    "component": "Collapsible",
+                    "title": "市场阶段归因：策略在哪里赚钱或失效",
+                    "defaultExpanded": True,
+                    "children": ["regime-note", "regime-table"],
+                },
+                _text("regime-note", regime_distribution or "未生成阶段分布", "caption"),
+                {
+                    "id": "regime-table",
+                    "component": "DataTable",
+                    "columns": [
+                        {"key": "strategy", "label": "策略"},
+                        {"key": "regime", "label": "市场阶段"},
+                        {"key": "days", "label": "天数"},
+                        {"key": "return", "label": "策略收益"},
+                        {"key": "benchmark", "label": "标的收益"},
+                        {"key": "excess", "label": "相对超额"},
+                        {"key": "exposure", "label": "平均仓位"},
+                        {"key": "worstDay", "label": "最差单日"},
+                    ],
+                    "rows": _ref("/regimeRows"),
+                },
+            ]
+            if regime_rows
+            else []
+        ),
+        *(
+            [
+                {
+                    "id": "trade-attribution",
+                    "component": "Collapsible",
+                    "title": "交易级归因：收益质量与亏损路径",
+                    "defaultExpanded": True,
+                    "children": ["trade-attribution-note", "trade-attribution-table"],
+                },
+                _text(
+                    "trade-attribution-note",
+                    "按 FIFO 配对实际成交，并计入成交记录中的佣金、税费和过户费。",
+                    "caption",
+                ),
+                {
+                    "id": "trade-attribution-table",
+                    "component": "DataTable",
+                    "columns": [
+                        {"key": "strategy", "label": "策略"},
+                        {"key": "closed", "label": "闭合交易段"},
+                        {"key": "realizedPnl", "label": "已实现盈亏"},
+                        {"key": "winRate", "label": "胜率"},
+                        {"key": "payoff", "label": "平均盈亏比"},
+                        {"key": "holdingDays", "label": "平均持有天数"},
+                        {"key": "lossStreak", "label": "最长连亏"},
+                        {"key": "concentration", "label": "前三笔盈利占比"},
+                        {"key": "openShares", "label": "未闭合股数"},
+                    ],
+                    "rows": _ref("/tradeAttributionRows"),
+                },
+            ]
+            if trade_attribution_rows
+            else []
+        ),
         {
             "id": "equity",
             "component": "Collapsible",
@@ -809,7 +1073,7 @@ def render_strategy_comparison(
         {
             "id": "stability",
             "component": "Collapsible",
-            "title": "样本外、滚动表现与参数敏感性",
+            "title": "稳健性总览：样本外、滚动、参数与成本压力",
             "defaultExpanded": False,
             "children": ["stability-table"],
         },
@@ -818,12 +1082,15 @@ def render_strategy_comparison(
             "component": "DataTable",
             "columns": [
                 {"key": "strategy", "label": "策略"},
+                {"key": "grade", "label": "证据等级"},
                 {"key": "oos", "label": "样本外收益"},
                 {"key": "rollingPositive", "label": "滚动正收益率"},
+                {"key": "rollingWorst", "label": "最差滚动收益"},
                 {"key": "sensitivity", "label": "敏感性"},
-                {"key": "worst", "label": "最差参数收益"},
+                {"key": "stress", "label": "压力成本收益"},
+                {"key": "costDrag", "label": "成本拖累"},
             ],
-            "rows": _ref("/stabilityRows"),
+            "rows": _ref("/robustnessRows"),
         },
         {
             "id": "sources",
@@ -880,15 +1147,15 @@ def render_strategy_comparison(
         {
             "id": "conclusion",
             "component": "Collapsible",
-            "title": "结论、风险与局限",
+            "title": "Agent 建议与验证边界",
             "defaultExpanded": True,
-            "children": ["tradeoffs", "warnings", "limitations"],
+            "children": ["recommendations", "warnings", "limitations"],
         },
         {
-            "id": "tradeoffs",
+            "id": "recommendations",
             "component": "List",
-            "title": "当前数据结论与权衡",
-            "items": _ref("/tradeoffs"),
+            "title": "Agent 建议（最终由你判断）",
+            "items": _ref("/recommendations"),
         },
         {"id": "warnings", "component": "List", "title": "数据警告", "items": _ref("/warnings")},
         {"id": "limitations", "component": "List", "title": "局限", "items": _ref("/limitations")},
@@ -928,11 +1195,18 @@ def render_strategy_comparison(
         "marketCurveStrategies": market_curve_strategies,
         "costRows": cost_rows,
         "stabilityRows": stability_rows,
+        "robustnessRows": robustness_rows,
+        "regimeRows": regime_rows,
+        "tradeAttributionRows": trade_attribution_rows,
+        "falsificationRisks": research_decision.get("falsification_risks") or [],
+        "experimentRows": experiment_rows,
+        "gateRows": gate_rows,
         "sourceRows": source_rows,
         "acceptanceRows": acceptance_rows,
         "strategyRows": strategy_rows,
+        "assessmentRows": assessment_rows,
         "artifacts": artifact_rows,
-        "tradeoffs": [*(conclusion.get("tradeoffs") or []), *(conclusion.get("interpretations") or [])],
+        "recommendations": _comparison_advice(conclusion),
         "warnings": conclusion.get("data_warnings") or ["未发现额外数据警告"],
         "limitations": conclusion.get("limitations") or [],
     }
