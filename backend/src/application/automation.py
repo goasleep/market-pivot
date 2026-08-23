@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import date, datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -503,8 +504,6 @@ class AutomationService:
         trade_date: str,
         config: AutomationTaskConfig,
     ):
-        import hashlib
-
         account = await simulation_accounts.get_account(account_id)
         if config.daily_loss_limit_pct:
             daily_pnl = await simulation_accounts.daily_pnl(account_id)

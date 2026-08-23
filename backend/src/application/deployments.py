@@ -133,6 +133,7 @@ class DeploymentService:
         strategy = StrategySpec.model_validate(experiment["strategy_spec"])
         plugin_manifest = strategy_plugins_manifest(strategy.components)
         if strategy.source == "sandbox":
+            # Local import breaks the deployment/candidate service initialization cycle.
             from application.strategy_candidates import strategy_candidates
 
             candidate_id = str(experiment.get("candidate_id") or "")

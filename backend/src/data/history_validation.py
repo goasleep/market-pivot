@@ -8,6 +8,7 @@ import json
 from datetime import date
 from typing import Any
 
+import akshare as ak
 import pandas as pd
 
 from data.backtest_data import BacktestDataError, prepare_backtest_data
@@ -44,8 +45,6 @@ def _normalize_tencent(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:
 
 
 def _fetch_tencent_history(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    import akshare as ak
-
     code = ticker.strip().lower().removeprefix("sh").removeprefix("sz").zfill(6)
     market = "sh" if code.startswith(("5", "6", "9")) else "sz"
     frame = ak.stock_zh_a_hist_tx(

@@ -6,6 +6,7 @@ import threading
 import time
 from datetime import date
 
+import akshare as ak
 from loguru import logger
 
 
@@ -35,8 +36,6 @@ class TradingCalendar:
 
     def refresh(self) -> bool:
         try:
-            import akshare as ak
-
             frame = ak.tool_trade_date_hist_sina()
             column = "trade_date" if "trade_date" in frame.columns else frame.columns[0]
             dates = {

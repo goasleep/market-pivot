@@ -11,6 +11,8 @@ import tiktoken
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from loguru import logger
 
+from config import get_llm_config
+
 
 class ContextWindowExceededError(ValueError):
     """Raised when non-compressible context cannot fit in the selected model."""
@@ -220,8 +222,6 @@ def get_context_budget(
     max_output_tokens: int | None = None,
 ) -> ContextBudget:
     """Resolve the effective input budget from the request-scoped LLM profile."""
-    from config import get_llm_config
-
     config = get_llm_config(model=model)
     selected_model = str(model or config["model"])
     context_window = int(config["context_window"])

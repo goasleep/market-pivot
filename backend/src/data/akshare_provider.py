@@ -23,7 +23,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+import akshare as ak
 import pandas as pd
+import requests
 from loguru import logger
 
 from config import settings
@@ -278,8 +280,8 @@ def _fetch_etf_history_sina(ticker: str, start_date: str, end_date: str) -> pd.D
     used directly inside the provider's bounded retry loop.  Reuse its public
     response decoder, but keep the network request under our own timeout.
     """
+    # py_mini_racer is platform-specific; keep this optional fallback dependency isolated.
     import py_mini_racer
-    import requests
     from akshare.stock.cons import hk_js_decode
 
     market = "sh" if ticker.startswith(("5", "6", "9")) else "sz"
@@ -373,8 +375,6 @@ def _fetch_etf_nav_history(ticker: str, start_date: str, end_date: str) -> pd.Da
     returns 14 fields.  Reading the JSON keys directly avoids that brittle
     positional schema and also gives every page a bounded HTTP timeout.
     """
-    import requests
-
     params = {
         "fundCode": ticker,
         "pageIndex": 1,
@@ -476,8 +476,6 @@ def get_stock_history(
     logger.info(f"Fetching history for {ticker} ({start_date} - {end_date})")
 
     def _fetch():
-        import akshare as ak
-
         try:
             frame = ak.stock_zh_a_hist(
                 symbol=ticker,
@@ -570,8 +568,6 @@ def get_stock_realtime(ticker: str) -> dict:
     logger.info(f"Fetching realtime quote for {ticker}")
 
     def _fetch():
-        import akshare as ak
-
         df = ak.stock_zh_a_spot_em()
         row = df[df["代码"] == ticker]
         if row.empty:
@@ -626,8 +622,6 @@ def get_financial_data(ticker: str) -> dict:
     logger.info(f"Fetching financials for {ticker}")
 
     def _fetch():
-        import akshare as ak
-
         result = {"ticker": ticker}
 
         # Financial indicators
@@ -686,8 +680,6 @@ def get_stock_news(ticker: str, limit: int = 10) -> list[dict]:
     logger.info(f"Fetching news for {ticker}")
 
     def _fetch():
-        import akshare as ak
-
         df = ak.stock_news_em(symbol=ticker)
         if df.empty:
             return []
@@ -731,8 +723,6 @@ def get_stock_list() -> list[dict]:
     breaker = _breakers["stock_list"]
 
     def _fetch():
-        import akshare as ak
-
         df = ak.stock_info_a_code_name()
         return df.to_dict(orient="records")
 
@@ -764,8 +754,6 @@ def get_fund_realtime(ticker: str, asset_type: str = "etf") -> dict:
     endpoint_name = "fund_etf_spot_em" if asset_type == "etf" else "fund_lof_spot_em"
 
     def _fetch():
-        import akshare as ak
-
         endpoint = getattr(ak, endpoint_name)
         df = endpoint()
         code_column = "代码"
@@ -858,8 +846,6 @@ def get_fund_history(
     endpoint_name = "fund_etf_hist_em" if asset_type == "etf" else "fund_lof_hist_em"
 
     def _fetch():
-        import akshare as ak
-
         endpoint = getattr(ak, endpoint_name)
         try:
             frame = endpoint(
@@ -943,8 +929,6 @@ def get_fund_nav_history(
     breaker = _breakers["fund_nav"]
 
     def _fetch():
-        import akshare as ak
-
         if asset_type == "etf":
             return _fetch_etf_nav_history(ticker, start_date, end_date)
         return ak.fund_open_fund_info_em(
@@ -1010,8 +994,6 @@ def get_asset_spot(asset_type: str = "stock", limit: int = 1000) -> list[dict]:
     breaker = _breakers["realtime"]
 
     def _fetch():
-        import akshare as ak
-
         return getattr(ak, endpoint_name)()
 
     def _number(row, *names):

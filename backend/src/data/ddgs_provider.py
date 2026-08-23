@@ -59,6 +59,7 @@ def search_web_ddgs(query: str, *, num_results: int = 8, timelimit: str | None =
         return {"available": False, "query": query, "results": [], "error": "DDGS 暂时不可用，请稍后重试"}
 
     try:
+        # Keep the optional search backend inside its failure-isolation boundary.
         from ddgs import DDGS
 
         raw_results = DDGS(timeout=12).text(

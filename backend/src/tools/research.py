@@ -8,7 +8,11 @@ from typing import Any
 
 from langchain_core.tools import tool
 
+import application.strategy_comparison as strategy_comparison
 from agents.technical_analyst import calculate_technical_indicators
+from application.backtest_experiment import run_backtest_experiment
+from application.backtest_service import run_backtest as execute_backtest
+from application.strategy_candidates import strategy_candidates
 from data.backtest_data import BacktestDataError
 from data.fund_provider import async_get_fund_history
 from data.source_registry import provenance
@@ -123,8 +127,6 @@ async def run_backtest(
     decision_interval: int = 1,
 ) -> str:
     """按指定区间和策略运行研究回测；结果仅用于模拟，不执行真实交易。"""
-    from application.backtest_service import run_backtest as execute_backtest
-
     try:
         result = await execute_backtest(
             ticker=ticker,
@@ -174,8 +176,6 @@ async def design_and_run_backtest(
     portfolio_spec: dict | None = None,
 ) -> str:
     """让 Agent 设计策略和组合规则，运行回测并保存完整实验报告附件。"""
-    from application.backtest_experiment import run_backtest_experiment
-
     try:
         experiment = await run_backtest_experiment(
             objective=objective,
@@ -230,16 +230,14 @@ async def compare_strategy_backtests(
     market_benchmark_ticker: str = "000300",
 ) -> str:
     """在共享数据快照上比较标准策略，并完成成本、样本外和稳定性检验。"""
-    from application.strategy_comparison import build_comparison_spec, compare_strategies, standard_strategy_suite
-
     kind = AssetType(asset_type)
-    strategies = standard_strategy_suite(kind)
+    strategies = strategy_comparison.standard_strategy_suite(kind)
     if strategy_names:
         requested = set(strategy_names)
         selected = tuple(item for item in strategies if item.name in requested)
         if len(selected) >= 7:
             strategies = selected
-    spec = build_comparison_spec(
+    spec = strategy_comparison.build_comparison_spec(
         ticker=ticker,
         start_date=start_date,
         end_date=end_date,
@@ -251,7 +249,11 @@ async def compare_strategy_backtests(
         market_benchmark_name="沪深300" if market_benchmark_ticker == "000300" else market_benchmark_ticker,
     )
     try:
-        payload = await compare_strategies(spec, publish_artifacts=True, generate_explanation=True)
+        payload = await strategy_comparison.compare_strategies(
+            spec,
+            publish_artifacts=True,
+            generate_explanation=True,
+        )
     except BacktestDataError as exc:
         payload = {
             "data_type": "strategy_backtest_comparison",
@@ -302,8 +304,6 @@ async def design_and_run_sandbox_strategy(
     initial_capital: float = 1_000_000,
 ) -> str:
     """让代码 Agent 生成受限目标仓位函数，在隔离子进程验证后由可信核心回测。"""
-    from application.strategy_candidates import strategy_candidates
-
     try:
         candidate = await strategy_candidates.generate(
             objective=objective,

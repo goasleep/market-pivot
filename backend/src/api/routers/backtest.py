@@ -1,5 +1,6 @@
 """Backtest router - single-symbol, pool, and portfolio research runs."""
 
+import asyncio
 import json
 
 from fastapi import APIRouter, HTTPException
@@ -127,8 +128,6 @@ async def stream_backtest(
     strategy_spec: dict | None = None,
 ):
     async def event_generator():
-        import asyncio
-
         queue: asyncio.Queue[dict] = asyncio.Queue()
 
         async def progress(stage: str, message: str):

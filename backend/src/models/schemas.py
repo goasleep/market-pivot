@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import time
 from enum import Enum
 from typing import Any, Literal
 
@@ -853,8 +854,6 @@ class AutomationTaskConfig(BaseModel):
     @field_validator("schedule_time")
     @classmethod
     def validate_schedule_time(cls, value: str) -> str:
-        from datetime import time
-
         try:
             time.fromisoformat(value)
         except ValueError as exc:

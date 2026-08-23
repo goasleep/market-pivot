@@ -11,6 +11,7 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 
+from application.comparison_artifacts import create_comparison_artifacts
 from data.history_validation import prepare_cross_validated_backtest_data as prepare_single_backtest_data
 from data.market_index import async_get_market_index_history
 from engine.backtester import run_backtest
@@ -454,8 +455,6 @@ async def compare_strategies(
     payload["conclusion"] = conclusion.model_dump(mode="json")
     payload["artifacts"] = []
     if publish_artifacts:
-        from application.comparison_artifacts import create_comparison_artifacts
-
         try:
             payload["artifacts"] = await create_comparison_artifacts(
                 payload,

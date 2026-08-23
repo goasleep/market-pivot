@@ -24,11 +24,10 @@ from data.chat_models import (
     ChatTaskState,
 )
 from data.tortoise_db import close_database, init_database
+from graph.checkpointing import checkpoint_manager
 
 
 def _now() -> str:
-    from datetime import datetime, timezone
-
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -369,8 +368,6 @@ class ChatStore:
             )
 
         if pruned_task_ids:
-            from graph.checkpointing import checkpoint_manager
-
             for pruned_task_id in pruned_task_ids:
                 await checkpoint_manager.delete_thread_family(pruned_task_id)
         return user_message_id, assistant_message_id
@@ -740,8 +737,6 @@ class ChatStore:
         await ChatTask.filter(conversation_id=conversation_id).delete()
         deleted = await ChatConversation.filter(conversation_id=conversation_id).delete()
         if deleted and task_ids:
-            from graph.checkpointing import checkpoint_manager
-
             for task_id in task_ids:
                 await checkpoint_manager.delete_thread_family(str(task_id))
         return bool(deleted)

@@ -17,6 +17,7 @@ from graph.agent_loop import configure_agent_loop
 from graph.checkpointing import checkpoint_manager
 from graph.research_plan import configure_research_plan_graph
 from graph.workflow import configure_workflow
+from strategies.skill_manager import list_strategies as _list
 
 
 @asynccontextmanager
@@ -83,8 +84,6 @@ app.include_router(market.router, prefix="/api/market", tags=["market"])
 @app.get("/api/strategies", tags=["strategies"])
 async def list_strategies():
     """List all available trading strategies."""
-    from strategies.skill_manager import list_strategies as _list
-
     return {"strategies": await asyncio.to_thread(_list)}
 
 

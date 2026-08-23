@@ -262,6 +262,7 @@ class StrategyCandidateService:
             "data_sha256": candidate.data_sha256,
         }
         await self.experiments.save(experiment_id, "completed", payload)
+        # Local import breaks the candidate/deployment service initialization cycle.
         from application.deployments import deployment_service
 
         deployment = await deployment_service.create_from_experiment(

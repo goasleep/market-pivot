@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
+import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
@@ -89,8 +90,6 @@ class S3ArtifactStorage:
         if bool(self.access_key_id) != bool(self.secret_access_key):
             raise RuntimeError("S3_ACCESS_KEY_ID 和 S3_SECRET_ACCESS_KEY 必须同时设置")
         if self._client is None:
-            import boto3
-
             client_options = {
                 "endpoint_url": self.endpoint_url or None,
                 "region_name": self.region,

@@ -699,6 +699,7 @@ def render_sandbox_strategy_candidate(
     payload: dict[str, Any],
     surface_id: str | None = None,
 ) -> list[dict[str, Any]]:
+    # Strategy renderers import this facade's primitives, so loading them here avoids a cycle.
     from widgets.a2ui_strategy import render_sandbox_strategy_candidate as render
 
     return render(payload, surface_id)
@@ -708,6 +709,7 @@ def render_strategy_comparison(
     payload: dict[str, Any],
     surface_id: str | None = None,
 ) -> list[dict[str, Any]]:
+    # Strategy renderers import this facade's primitives, so loading them here avoids a cycle.
     from widgets.a2ui_strategy import render_strategy_comparison as render
 
     return render(payload, surface_id)
@@ -719,6 +721,7 @@ def render_tool_result(
     surface_id: str | None = None,
 ) -> list[dict[str, Any]] | None:
     """Dispatch known tool payloads through the dedicated renderer module."""
+    # The dispatcher imports this facade's public renderers, so loading it here avoids a cycle.
     from widgets.a2ui_tool_results import render_tool_result as dispatch_tool_result
 
     return dispatch_tool_result(tool_name, raw_result, surface_id)

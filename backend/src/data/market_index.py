@@ -7,6 +7,7 @@ import hashlib
 import json
 from typing import Any
 
+import akshare as ak
 import pandas as pd
 
 DEFAULT_MARKET_BENCHMARK_TICKER = "000300"
@@ -61,8 +62,6 @@ def get_market_index_history(
     end_date: str,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Fetch one broad-market index with a second independent endpoint fallback."""
-    import akshare as ak
-
     code = ticker.strip().lower().removeprefix("sh").removeprefix("sz").zfill(6)
     compact_start = start_date.replace("-", "")
     compact_end = end_date.replace("-", "")

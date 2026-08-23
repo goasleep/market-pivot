@@ -9,6 +9,9 @@ import io
 import json
 from typing import Any
 
+import xlsxwriter
+from xlsxwriter.utility import xl_col_to_name
+
 from artifacts.service import artifact_service
 
 
@@ -218,9 +221,6 @@ def _write_table(
 
 
 def _workbook(payload: dict[str, Any], selected_rows: list[dict[str, Any]]) -> bytes:
-    import xlsxwriter
-    from xlsxwriter.utility import xl_col_to_name
-
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {"in_memory": True, "strings_to_formulas": False})
     summary = workbook.add_worksheet("结果总览")

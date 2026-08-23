@@ -6,6 +6,7 @@ Analyzes news sentiment and market sentiment for a stock.
 from loguru import logger
 
 from agents.prompt_context import INVESTOR_CONTEXT
+from data.stock_provider import async_get_stock_news
 from llm import LLMService, get_llm_service
 from models.schemas import AgentReport, AssetType, Decision, MarketContext
 
@@ -41,8 +42,6 @@ async def analyze(
         )
 
     if context is None:
-        from data.stock_provider import async_get_stock_news
-
         news = await async_get_stock_news(ticker, limit=num_news)
     else:
         news = context.news[:num_news]

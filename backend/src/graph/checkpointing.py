@@ -14,6 +14,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from loguru import logger
 
 from config import settings
+from data.chat_models import ChatTask
 
 CHECKPOINT_ALLOWED_MSGPACK_TYPES = (
     ("models.schemas", "AssetType"),
@@ -110,8 +111,6 @@ class CheckpointManager:
             newest[thread_id] = max(newest.get(thread_id, created_at), created_at)
         stale = [thread_id for thread_id, created_at in newest.items() if created_at < cutoff]
         if stale:
-            from data.chat_models import ChatTask
-
             base_ids = {thread_id.split(":research:", 1)[0] for thread_id in stale}
             terminal_ids = set(
                 await ChatTask.filter(

@@ -8,6 +8,7 @@ import asyncio
 from loguru import logger
 
 from agents.prompt_context import INVESTOR_CONTEXT
+from data.stock_provider import async_get_financial_data, async_get_stock_realtime
 from llm import LLMService, get_llm_service
 from models.schemas import AgentReport, AssetType, Decision, MarketContext
 
@@ -41,8 +42,6 @@ async def analyze(
         )
 
     if context is None:
-        from data.stock_provider import async_get_financial_data, async_get_stock_realtime
-
         fin, rt = await asyncio.gather(
             async_get_financial_data(ticker),
             async_get_stock_realtime(ticker),
