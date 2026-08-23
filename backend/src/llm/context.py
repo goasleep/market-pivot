@@ -16,6 +16,31 @@ class ContextWindowExceededError(ValueError):
     """Raised when non-compressible context cannot fit in the selected model."""
 
 
+def is_context_overflow_error(exc: Exception) -> bool:
+    """Recognize local and common provider context-window failures."""
+    if isinstance(exc, ContextWindowExceededError):
+        return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "context length",
+            "context window",
+            "maximum context",
+            "too many tokens",
+            "token limit",
+            "上下文",
+        )
+    )
+
+
+def context_safe_error(exc: Exception, default: str) -> tuple[str, str]:
+    """Return a stable error code/message without leaking model context details."""
+    if is_context_overflow_error(exc):
+        return "result_unavailable", "本步骤未能形成可靠结果，其他已获取数据不受影响"
+    return "tool_error", default
+
+
 @dataclass(frozen=True)
 class ContextBudget:
     model: str
@@ -35,10 +60,11 @@ class ContextSelection:
     protected_tokens: int
     tool_tokens: int
     dropped_messages: int
+    compacted_messages: int = 0
 
     @property
     def compacted(self) -> bool:
-        return self.dropped_messages > 0
+        return self.dropped_messages > 0 or self.compacted_messages > 0
 
 
 class TokenCounter:
@@ -59,6 +85,14 @@ class TokenCounter:
     def count_text(self, text: str) -> int:
         count = len(self._encoding.encode(text or ""))
         return math.ceil(count * 1.15) if self._approximate else count
+
+    def truncate_text(self, text: str, max_tokens: int) -> str:
+        """Return a tokenizer-safe prefix within the requested estimated budget."""
+        if max_tokens <= 0:
+            return ""
+        raw_limit = math.floor(max_tokens / 1.15) if self._approximate else max_tokens
+        tokens = self._encoding.encode(text or "")
+        return self._encoding.decode(tokens[:raw_limit])
 
     def count_message(self, message: Any) -> int:
         payload = [_message_role(message), _content_text(_message_content(message))]
@@ -97,6 +131,87 @@ class TokenCounter:
         return self.count_text(json.dumps(payloads, ensure_ascii=False, sort_keys=True, default=str)) + 8 * len(
             payloads
         )
+
+
+_CONTEXT_KEY_PRIORITY = (
+    "data_type",
+    "status",
+    "available",
+    "error",
+    "message",
+    "summary",
+    "text",
+    "ticker",
+    "tickers",
+    "asset_type",
+    "as_of",
+    "data_date",
+    "provenance",
+    "decision",
+    "signal",
+    "confidence",
+    "reasoning",
+    "conclusion",
+    "metrics",
+    "key_data",
+    "quote",
+    "acceptance",
+    "artifacts",
+    "results",
+    "news",
+    "history",
+)
+
+
+def compact_json_value(
+    value: Any,
+    max_tokens: int,
+    *,
+    model: str | None = None,
+    counter: TokenCounter | None = None,
+) -> Any:
+    """Create a deterministic JSON-compatible projection within a token budget."""
+    token_counter = counter or TokenCounter(model or get_context_budget().model)
+    original_text = _content_text(value)
+    original_tokens = token_counter.count_text(original_text)
+    if original_tokens <= max_tokens:
+        return value
+
+    levels = (
+        (4, 20, 12, 2000),
+        (3, 14, 8, 1200),
+        (3, 10, 5, 700),
+        (2, 8, 3, 400),
+        (2, 5, 2, 200),
+    )
+    for max_depth, max_dict_items, max_list_items, max_string_chars in levels:
+        projected = _project_json_value(
+            value,
+            depth=0,
+            max_depth=max_depth,
+            max_dict_items=max_dict_items,
+            max_list_items=max_list_items,
+            max_string_chars=max_string_chars,
+        )
+        envelope = {
+            "_context_compacted": True,
+            "original_tokens": original_tokens,
+            "data": projected,
+        }
+        if token_counter.count_text(_content_text(envelope)) <= max_tokens:
+            return envelope
+
+    envelope = {
+        "_context_compacted": True,
+        "original_tokens": original_tokens,
+        "preview": "",
+    }
+    base_tokens = token_counter.count_text(_content_text(envelope))
+    preview_budget = max(0, max_tokens - base_tokens - 8)
+    envelope["preview"] = token_counter.truncate_text(original_text, preview_budget)
+    if token_counter.count_text(_content_text(envelope)) <= max_tokens:
+        return envelope
+    return {"_context_compacted": True, "original_tokens": original_tokens}
 
 
 def get_context_budget(
@@ -183,7 +298,16 @@ def select_messages_for_model(
     counter = TokenCounter(effective_budget.model)
     tool_tokens = counter.count_tools(tools)
     protected_indices = _protected_indices(messages)
-    protected_messages = [message for index, message in enumerate(messages) if index in protected_indices]
+    replacements = _compact_protected_tool_messages(
+        messages,
+        protected_indices=protected_indices,
+        counter=counter,
+        tool_tokens=tool_tokens,
+        input_limit=effective_budget.input_limit,
+    )
+    protected_messages = [
+        replacements.get(index, message) for index, message in enumerate(messages) if index in protected_indices
+    ]
     protected_tokens = counter.count_messages(protected_messages) + tool_tokens
     _require_p0_fits(protected_tokens, effective_budget)
 
@@ -200,7 +324,7 @@ def select_messages_for_model(
         selected_indices.update(candidates)
         used_tokens += candidate_tokens
 
-    selected = [message for index, message in enumerate(messages) if index in selected_indices]
+    selected = [replacements.get(index, message) for index, message in enumerate(messages) if index in selected_indices]
     return _selection(
         messages=selected,
         raw_messages=list(messages),
@@ -210,6 +334,7 @@ def select_messages_for_model(
         budget=effective_budget,
         tool_tokens=tool_tokens,
         dropped_messages=len(messages) - len(selected),
+        compacted_messages=len(replacements),
     )
 
 
@@ -223,6 +348,7 @@ def _selection(
     budget: ContextBudget,
     tool_tokens: int,
     dropped_messages: int,
+    compacted_messages: int = 0,
 ) -> ContextSelection:
     selection = ContextSelection(
         messages=messages,
@@ -233,19 +359,58 @@ def _selection(
         protected_tokens=counter.count_messages(protected_messages) + tool_tokens,
         tool_tokens=tool_tokens,
         dropped_messages=dropped_messages,
+        compacted_messages=compacted_messages,
     )
     log = logger.info if selection.compacted else logger.debug
     log(
-        "LLM context model={} selected={}/{} tokens dropped_messages={} p0={} tools={} limit={}",
+        "LLM context model={} selected={}/{} tokens dropped_messages={} compacted_messages={} p0={} tools={} limit={}",
         selection.model,
         selection.selected_tokens,
         selection.raw_tokens,
         selection.dropped_messages,
+        selection.compacted_messages,
         selection.protected_tokens,
         selection.tool_tokens,
         selection.input_limit,
     )
     return selection
+
+
+def _compact_protected_tool_messages(
+    messages: Sequence[Any],
+    *,
+    protected_indices: set[int],
+    counter: TokenCounter,
+    tool_tokens: int,
+    input_limit: int,
+) -> dict[int, Any]:
+    """Project oversized current tool observations without mutating durable graph state."""
+    tool_indices = [index for index in sorted(protected_indices) if _message_role(messages[index]) == "tool"]
+    if not tool_indices:
+        return {}
+
+    protected = [messages[index] for index in sorted(protected_indices)]
+    if counter.count_messages(protected) + tool_tokens <= input_limit:
+        return {}
+
+    empty_replacements = {index: _replace_message_content(messages[index], "") for index in tool_indices}
+    minimum = [empty_replacements.get(index, messages[index]) for index in sorted(protected_indices)]
+    minimum_tokens = counter.count_messages(minimum) + tool_tokens
+    if minimum_tokens > input_limit:
+        return {}
+
+    content_budget = max(0, input_limit - minimum_tokens - 16 * len(tool_indices))
+    per_message_budget = max(16, content_budget // len(tool_indices))
+    replacements: dict[int, Any] = {}
+    for index in tool_indices:
+        original_content = _message_content(messages[index])
+        compacted = compact_json_value(original_content, per_message_budget, counter=counter)
+        replacements[index] = _replace_message_content(messages[index], _content_text(compacted))
+
+    projected = [replacements.get(index, messages[index]) for index in sorted(protected_indices)]
+    if counter.count_messages(projected) + tool_tokens <= input_limit:
+        return replacements
+    return empty_replacements
 
 
 def _require_p0_fits(protected_tokens: int, budget: ContextBudget) -> None:
@@ -376,3 +541,86 @@ def _content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     return json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _replace_message_content(message: Any, content: str) -> Any:
+    if isinstance(message, dict):
+        return {**message, "content": content}
+    if hasattr(message, "model_copy"):
+        return message.model_copy(update={"content": content})
+    return message
+
+
+def _project_json_value(
+    value: Any,
+    *,
+    depth: int,
+    max_depth: int,
+    max_dict_items: int,
+    max_list_items: int,
+    max_string_chars: int,
+) -> Any:
+    if isinstance(value, str):
+        if depth == 0:
+            try:
+                decoded = json.loads(value)
+            except (TypeError, json.JSONDecodeError):
+                return value[:max_string_chars]
+            return _project_json_value(
+                decoded,
+                depth=depth,
+                max_depth=max_depth,
+                max_dict_items=max_dict_items,
+                max_list_items=max_list_items,
+                max_string_chars=max_string_chars,
+            )
+        return value[:max_string_chars]
+    if depth >= max_depth:
+        if isinstance(value, dict):
+            return {"_omitted_fields": len(value)}
+        if isinstance(value, list):
+            return {"_omitted_items": len(value)}
+        return value
+    if isinstance(value, dict):
+        keys = list(value)
+        ordered = [key for key in _CONTEXT_KEY_PRIORITY if key in value]
+        ordered.extend(key for key in keys if key not in ordered)
+        selected_keys = ordered[:max_dict_items]
+        result = {
+            str(key): _project_json_value(
+                value[key],
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_dict_items=max_dict_items,
+                max_list_items=max_list_items,
+                max_string_chars=max_string_chars,
+            )
+            for key in selected_keys
+        }
+        if len(keys) > len(selected_keys):
+            result["_omitted_fields"] = len(keys) - len(selected_keys)
+        return result
+    if isinstance(value, list):
+        if len(value) <= max_list_items:
+            selected = value
+            omitted = 0
+        else:
+            head_count = (max_list_items + 1) // 2
+            tail_count = max_list_items - head_count
+            selected = [*value[:head_count], *value[-tail_count:]] if tail_count else value[:head_count]
+            omitted = len(value) - len(selected)
+        result = [
+            _project_json_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_dict_items=max_dict_items,
+                max_list_items=max_list_items,
+                max_string_chars=max_string_chars,
+            )
+            for item in selected
+        ]
+        if omitted:
+            result.insert(len(result) // 2, {"_omitted_items": omitted})
+        return result
+    return value

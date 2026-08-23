@@ -8,7 +8,15 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.output_parsers import JsonOutputParser
 from loguru import logger
 
-from llm.context import select_messages_for_model
+from llm.context import (
+    ContextBudget,
+    ContextWindowExceededError,
+    TokenCounter,
+    compact_json_value,
+    get_context_budget,
+    is_context_overflow_error,
+    select_messages_for_model,
+)
 from llm.factory import get_chat_model
 
 _GENERATED_TEXT_REPLACEMENTS = (
@@ -91,6 +99,47 @@ def _to_messages(messages: list[Any]) -> list[Any]:
     return converted
 
 
+def _recovery_budget(*, model: str | None = None, max_tokens: int | None = None) -> ContextBudget:
+    """Reserve extra headroom for one transparent retry after a context rejection."""
+    budget = get_context_budget(model=model, max_output_tokens=max_tokens)
+    reduced_limit = max(
+        1,
+        min(
+            budget.input_limit - 1,
+            max(256, int(budget.input_limit * 0.75)),
+        ),
+    )
+    return ContextBudget(
+        model=budget.model,
+        context_window=budget.context_window,
+        output_reserve=budget.output_reserve,
+        safety_margin=budget.safety_margin + (budget.input_limit - reduced_limit),
+        input_limit=reduced_limit,
+    )
+
+
+def _project_application_prompt(prompt: str, system: str, budget: ContextBudget) -> list[dict[str, str]]:
+    """Project an application-built prompt; the primary Agent's user message does not use this path."""
+    counter = TokenCounter(budget.model)
+    empty_messages: list[dict[str, str]] = []
+    if system:
+        empty_messages.append({"role": "system", "content": system})
+    empty_messages.append({"role": "user", "content": ""})
+    prompt_budget = budget.input_limit - counter.count_messages(empty_messages) - 128
+    if prompt_budget <= 0:
+        raise ContextWindowExceededError(
+            f"固定系统上下文需要至少 {budget.input_limit - prompt_budget} tokens，"
+            f"但模型 {budget.model} 的恢复预算只有 {budget.input_limit} tokens"
+        )
+    projected = compact_json_value(prompt, prompt_budget, counter=counter)
+    content = projected if isinstance(projected, str) else json.dumps(projected, ensure_ascii=False, default=str)
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": content})
+    return select_messages_for_model(messages, budget=budget).messages
+
+
 class LLMService:
     """Stable application interface for chat and JSON model calls.
 
@@ -133,20 +182,30 @@ class LLMService:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        chat_model = self.get_model(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            profile_id=profile_id,
+            route=route,
+        )
         try:
             context = select_messages_for_model(messages, model=model, max_output_tokens=max_tokens)
-            response = await self.get_model(
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                profile_id=profile_id,
-                route=route,
-            ).ainvoke(_to_messages(context.messages))
+            response = await chat_model.ainvoke(_to_messages(context.messages))
+        except Exception as exc:
+            if not is_context_overflow_error(exc):
+                logger.error("LLM call failed: {}", exc)
+                raise
+            logger.warning("LLM context rejected; retrying with projected application prompt: {}", exc)
+            recovery_budget = _recovery_budget(model=model, max_tokens=max_tokens)
+            recovery_messages = _project_application_prompt(prompt, system, recovery_budget)
+            response = await chat_model.ainvoke(_to_messages(recovery_messages))
+        try:
             content = _normalize_generated_financial_text(_message_text(response))
             logger.debug("LLM response ({}): {} chars", model or "configured", len(content))
             return content
         except Exception as exc:
-            logger.error("LLM call failed: {}", exc)
+            logger.error("LLM response normalization failed: {}", exc)
             raise
 
     def chat_sync(
@@ -165,20 +224,30 @@ class LLMService:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        chat_model = self.get_model(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            profile_id=profile_id,
+            route=route,
+        )
         try:
             context = select_messages_for_model(messages, model=model, max_output_tokens=max_tokens)
-            response = self.get_model(
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                profile_id=profile_id,
-                route=route,
-            ).invoke(_to_messages(context.messages))
+            response = chat_model.invoke(_to_messages(context.messages))
+        except Exception as exc:
+            if not is_context_overflow_error(exc):
+                logger.error("Synchronous LLM call failed: {}", exc)
+                raise
+            logger.warning("Synchronous LLM context rejected; retrying with projected application prompt: {}", exc)
+            recovery_budget = _recovery_budget(model=model, max_tokens=max_tokens)
+            recovery_messages = _project_application_prompt(prompt, system, recovery_budget)
+            response = chat_model.invoke(_to_messages(recovery_messages))
+        try:
             content = _normalize_generated_financial_text(_message_text(response))
             logger.debug("Synchronous LLM response ({}): {} chars", model or "configured", len(content))
             return content
         except Exception as exc:
-            logger.error("Synchronous LLM call failed: {}", exc)
+            logger.error("Synchronous LLM response normalization failed: {}", exc)
             raise
 
     async def chat_json(
@@ -225,13 +294,21 @@ class LLMService:
         route: str | None = None,
     ) -> str:
         """Invoke the underlying LangChain model with role/content messages."""
-        context = select_messages_for_model(messages, model=model)
-        response = await self.get_model(
+        chat_model = self.get_model(
             model=model,
             temperature=temperature,
             profile_id=profile_id,
             route=route,
-        ).ainvoke(_to_messages(context.messages))
+        )
+        try:
+            context = select_messages_for_model(messages, model=model)
+            response = await chat_model.ainvoke(_to_messages(context.messages))
+        except Exception as exc:
+            if not is_context_overflow_error(exc):
+                raise
+            logger.warning("LangChain context rejected; retrying with reduced context budget: {}", exc)
+            context = select_messages_for_model(messages, budget=_recovery_budget(model=model))
+            response = await chat_model.ainvoke(_to_messages(context.messages))
         return _normalize_generated_financial_text(_message_text(response))
 
     async def chat_with_tools(
@@ -249,7 +326,6 @@ class LLMService:
         responsible for executing returned tool calls and feeding ToolMessage
         results back into the conversation.
         """
-        context = select_messages_for_model(messages, tools=tools, model=model)
         bound_model = self.get_model(
             model=model,
             temperature=temperature,
@@ -257,7 +333,15 @@ class LLMService:
             profile_id=profile_id,
             route=route,
         ).bind_tools(tools)
-        response = await bound_model.ainvoke(_to_messages(context.messages))
+        try:
+            context = select_messages_for_model(messages, tools=tools, model=model)
+            response = await bound_model.ainvoke(_to_messages(context.messages))
+        except Exception as exc:
+            if not is_context_overflow_error(exc):
+                raise
+            logger.warning("Tool-chat context rejected; retrying with reduced context budget: {}", exc)
+            context = select_messages_for_model(messages, tools=tools, budget=_recovery_budget(model=model))
+            response = await bound_model.ainvoke(_to_messages(context.messages))
         return _normalize_generated_message(response)
 
 

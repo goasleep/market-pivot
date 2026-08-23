@@ -21,8 +21,9 @@ from langchain_core.tools import StructuredTool
 from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
+from loguru import logger
 
-from llm.context import select_messages_for_model
+from llm.context import context_safe_error, is_context_overflow_error
 from llm.service import get_llm_service
 from tools.policies import tool_requires_confirmation
 
@@ -111,15 +112,27 @@ async def decide_next_action(
     runtime: Runtime[AgentLoopContext],
 ) -> dict[str, Any]:
     """Ask the model whether to answer or call one or more tools."""
-    context = select_messages_for_model(state["messages"], tools=runtime.context.tools)
-    response = await asyncio.wait_for(
-        get_llm_service().chat_with_tools(
-            context.messages,
-            runtime.context.tools,
-            temperature=0.2,
-        ),
-        timeout=LLM_TIMEOUT_SECONDS,
-    )
+    try:
+        response = await asyncio.wait_for(
+            get_llm_service().chat_with_tools(
+                state["messages"],
+                runtime.context.tools,
+                temperature=0.2,
+            ),
+            timeout=LLM_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        if not is_context_overflow_error(exc):
+            raise
+        logger.warning("Agent context recovery exhausted; returning a deterministic continuation: {}", exc)
+        has_tool_results = any(isinstance(message, ToolMessage) for message in state["messages"])
+        fallback = (
+            "已完成的数据获取结果保留在上方。本轮不再追加可能失真的综合判断，"
+            "你可以直接基于结构化结果继续追问某个指标或风险点。"
+            if has_tool_results
+            else "为了给出可靠结论，我需要先聚焦分析目标。请告诉我最关注的标的、时间范围或风险指标。"
+        )
+        response = AIMessage(content=fallback)
     step = state.get("step", 0) + 1
     final_response = _content_text(response.content)
     max_steps_reached = bool(response.tool_calls and step >= state.get("max_steps", DEFAULT_MAX_STEPS))
@@ -256,9 +269,10 @@ async def execute_tool_calls(
                     "attempts": attempts,
                 }
             except Exception as exc:  # Tool failures are observations, not model failures.
+                error_code, error_message = context_safe_error(exc, str(exc)[:500])
                 error_payload = {
-                    "code": "tool_error",
-                    "message": str(exc)[:500],
+                    "code": error_code,
+                    "message": error_message,
                     "attempt": attempt + 1,
                     "attempts": attempts,
                 }
@@ -523,9 +537,10 @@ async def resume_agent_loop(
                     "attempts": attempts,
                 }
             except Exception as exc:  # Tool failures are observations, not model failures.
+                error_code, error_message = context_safe_error(exc, str(exc)[:500])
                 error_payload = {
-                    "code": "tool_error",
-                    "message": str(exc)[:500],
+                    "code": error_code,
+                    "message": error_message,
                     "attempt": attempt + 1,
                     "attempts": attempts,
                 }

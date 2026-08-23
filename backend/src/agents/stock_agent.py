@@ -304,6 +304,13 @@ class AssetAgent:
             "llm_auto": request.llm_auto,
         }
 
+    @classmethod
+    def research_request_payload(cls, request: AssetAgentRequest) -> dict[str, Any]:
+        """Return the Research Plan input without unused cross-turn history."""
+        payload = cls.request_payload(request)
+        payload.pop("history", None)
+        return payload
+
     @staticmethod
     def request_from_payload(payload: dict[str, Any]) -> AssetAgentRequest:
         return AssetAgentRequest(
@@ -434,7 +441,7 @@ class AssetAgent:
                 session_id=request.conversation_id,
             )
             async for event in research_plan_service.stream(
-                self.request_payload(request),
+                self.research_request_payload(request),
                 tools,
                 config=research_config,
             ):
@@ -662,7 +669,7 @@ class AssetAgent:
             session_id=request.conversation_id,
         )
         async for event in research_plan_service.resume(
-            self.request_payload(request),
+            self.research_request_payload(request),
             tools,
             config=config,
         ):

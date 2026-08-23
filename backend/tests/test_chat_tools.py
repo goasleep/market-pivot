@@ -3,7 +3,7 @@ import json
 
 import pandas as pd
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
 import graph.agent_loop as agent_loop_module
@@ -21,6 +21,7 @@ from graph.agent_loop import (
     tool_attempts,
     tool_timeout_seconds,
 )
+from llm.context import ContextWindowExceededError
 from models.schemas import AssetType, Decision, MarketContext, TradeDecision
 from tools import artifacts as artifact_tools
 from tools import assets, data, research, simulation
@@ -178,6 +179,31 @@ async def test_agent_loop_pauses_before_confirmed_tool_execution(monkeypatch):
     ]
     assert pending[0]["tool_call_id"] == "call-confirm-1"
     assert called == []
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_context_exhaustion_finishes_with_deterministic_tool_result_handoff(monkeypatch):
+    class OverflowLLM:
+        async def chat_with_tools(self, messages, tools, temperature=0.2):
+            del messages, tools, temperature
+            raise ContextWindowExceededError("context overflow")
+
+    monkeypatch.setattr(agent_loop_module, "get_llm_service", lambda: OverflowLLM())
+    state = await agent_loop_module.run_agent_loop(
+        [
+            {"role": "user", "content": "分析 510300"},
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "quote", "args": {}, "id": "quote-1", "type": "tool_call"}],
+            ),
+            ToolMessage(content='{"price":4.2}', tool_call_id="quote-1"),
+        ],
+        [],
+        max_steps=2,
+    )
+
+    assert "结构化结果" in state["final_response"]
+    assert state["messages"][-1].tool_calls == []
 
 
 def test_chat_agent_exposes_artifact_tool_and_persists_multiple_files(monkeypatch, tmp_path):

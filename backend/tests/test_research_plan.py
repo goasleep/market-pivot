@@ -14,6 +14,8 @@ from graph.research_plan import (
     ResearchPlanContext,
     _call_tool,
     _classify_failure,
+    _compact,
+    _comparison_synthesis_text,
     _execute_step,
     _fallback_steps,
     build_research_plan_graph,
@@ -22,6 +24,7 @@ from graph.research_plan import (
     replan,
     verify_evidence,
 )
+from llm.context import ContextBudget, ContextWindowExceededError, TokenCounter
 from models.research_plan import ResearchPlan, ResearchStep
 from models.schemas import AssetType
 
@@ -69,15 +72,196 @@ def test_multi_strategy_prompt_gets_machine_checkable_completion_contract():
             "message": "请给510300执行不同的几个量化策略并回测，对比盈利情况",
         }
     )
-
     assert contract.operation == "strategy_comparison"
     assert contract.comparison_axis == "strategy"
     assert contract.minimum_strategy_count == 7
     assert contract.required_benchmark == "buy_hold"
     assert contract.minimum_history_years == 5
-    assert {"equity_curves", "drawdown_curves", "out_of_sample", "stability"} <= set(
-        contract.required_outputs
+    assert {"equity_curves", "drawdown_curves", "out_of_sample", "stability"} <= set(contract.required_outputs)
+
+
+def test_comparison_checkpoint_payload_preserves_a2ui_contract_and_downsamples_curves():
+    curve = [{"date": f"2026-01-{index + 1:02d}", "value": index} for index in range(300)]
+    payload = {
+        "data_type": "strategy_backtest_comparison",
+        "_tool_name": "compare_strategy_backtests",
+        "ticker": "510300",
+        "comparisons": [
+            {
+                "strategy_name": "buy_hold",
+                "total_return": 0.1,
+                "equity_curve": curve,
+                "drawdown_curve": curve,
+                "signal_curve": curve,
+                "trades": [{"ignored": True}],
+            }
+        ],
+        "conclusion": {"official": True},
+        "acceptance": {"satisfied": True},
+        "artifacts": [{"artifact_id": "artifact-demo"}],
+        "data_validation": {"status": "verified", "differences": list(range(100))},
+    }
+
+    compact = _compact(payload)
+
+    assert compact["_tool_name"] == "compare_strategy_backtests"
+    assert compact["conclusion"]["official"] is True
+    assert compact["artifacts"][0]["artifact_id"] == "artifact-demo"
+    assert compact["comparisons"][0]["equity_curve"][-1] == curve[-1]
+    assert len(compact["comparisons"][0]["equity_curve"]) <= 240
+    assert "trades" not in compact["comparisons"][0]
+    assert len(compact["data_validation"]["differences"]) == 20
+
+
+def test_comparison_synthesis_uses_frozen_winners_and_artifact_count():
+    text = _comparison_synthesis_text(
+        {
+            "evaluation_start_date": "2016-08-22",
+            "evaluation_end_date": "2026-08-21",
+            "warmup_bars": 252,
+            "strategy_count": 11,
+            "execution": {"buy_commission_rate": 0.0003, "sell_commission_rate": 0.0003, "slippage_bps": 5},
+            "data_snapshot": {"adjustment": "qfq"},
+            "data_validation": {"status": "degraded", "selected_source": "tencent", "selection_reason": "质量分最高"},
+            "conclusion": {
+                "absolute_return_winner": {
+                    "strategy_name": "buy_hold",
+                    "display_name": "买入持有",
+                    "metric": "total_return",
+                    "value": 0.7,
+                },
+                "tradeoffs": ["不存在唯一最好策略。"],
+                "data_warnings": ["一个候选源不可用。"],
+                "limitations": ["历史表现不代表未来。"],
+            },
+            "artifacts": [{"name": str(index)} for index in range(7)],
+        }
     )
+
+    assert "2016-08-22 至 2026-08-21" in text
+    assert "绝对收益：买入持有" in text
+    assert "数据核验状态：degraded" in text
+    assert "共 7 个文件" in text
+
+
+@pytest.mark.asyncio
+async def test_synthesis_step_uses_deterministic_comparison_conclusion_without_llm():
+    step = ResearchStep.model_validate(_step("synthesis", "synthesis"))
+    state = {
+        "request": {"message": "比较 510300 的多个策略", "asset_type": "etf", "tickers": ["510300"]},
+        "plan": _plan([_step("synthesis", "synthesis")]),
+        "step_results": {
+            "backtest": {
+                "step_id": "backtest",
+                "status": "completed",
+                "output": {
+                    "data_type": "strategy_backtest_comparison",
+                    "ticker": "510300",
+                    "evaluation_start_date": "2016-08-22",
+                    "evaluation_end_date": "2026-08-21",
+                    "warmup_bars": 252,
+                    "strategy_count": 11,
+                    "conclusion": {
+                        "absolute_return_winner": {
+                            "strategy_name": "buy_hold",
+                            "display_name": "买入持有",
+                            "metric": "total_return",
+                            "value": 0.7,
+                        }
+                    },
+                },
+            }
+        },
+    }
+
+    result = await _execute_step(step, state, ResearchPlanContext(tools={}))
+
+    assert result["provenance"]["source"] == "deterministic_comparison_conclusion"
+    assert "绝对收益：买入持有" in result["text"]
+
+
+@pytest.mark.asyncio
+async def test_synthesis_omits_cross_turn_history_and_compacts_evidence(monkeypatch):
+    captured: dict[str, str] = {}
+
+    class FakeLLM:
+        async def chat(self, prompt, *, system):
+            captured["prompt"] = prompt
+            captured["system"] = system
+            return "已生成结论"
+
+    budget = ContextBudget(
+        model="gpt-4o-mini",
+        context_window=4096,
+        output_reserve=1024,
+        safety_margin=1024,
+        input_limit=2048,
+    )
+    monkeypatch.setattr(research_graph, "get_context_budget", lambda: budget)
+    monkeypatch.setattr(research_graph, "get_llm_service", lambda: FakeLLM())
+    step = ResearchStep.model_validate(_step("synthesis", "synthesis"))
+    state = {
+        "request": {
+            "message": "分析 600519",
+            "asset_type": "stock",
+            "tickers": ["600519"],
+            "history": [{"role": "user", "content": "HISTORY_SECRET" * 10000}],
+        },
+        "plan": _plan([_step("synthesis", "synthesis")]),
+        "step_results": {
+            "analysis": {
+                "step_id": "analysis",
+                "status": "completed",
+                "summary": "综合分析完成",
+                "output": {
+                    "data_type": "analysis",
+                    "results": [{"reasoning": "大量研究证据" * 1000} for _ in range(20)],
+                },
+            }
+        },
+    }
+
+    result = await _execute_step(step, state, ResearchPlanContext(tools={}))
+
+    assert result["text"] == "已生成结论"
+    assert "HISTORY_SECRET" not in captured["prompt"]
+    counter = TokenCounter(budget.model)
+    assert (
+        counter.count_messages(
+            [
+                {"role": "system", "content": captured["system"]},
+                {"role": "user", "content": captured["prompt"]},
+            ]
+        )
+        <= budget.input_limit
+    )
+
+
+@pytest.mark.asyncio
+async def test_synthesis_context_overflow_falls_back_without_failed_step(monkeypatch):
+    class OverflowLLM:
+        async def chat(self, *_args, **_kwargs):
+            raise ContextWindowExceededError("context overflow")
+
+    monkeypatch.setattr(research_graph, "get_llm_service", lambda: OverflowLLM())
+    step = ResearchStep.model_validate(_step("synthesis", "synthesis"))
+    state = {
+        "request": {"message": "分析 600519", "asset_type": "stock", "tickers": ["600519"]},
+        "plan": _plan([_step("synthesis", "synthesis")]),
+        "step_results": {
+            "risk": {
+                "step_id": "risk",
+                "status": "completed",
+                "summary": "风险测算完成",
+                "output": {"data_type": "risk"},
+            }
+        },
+    }
+
+    result = await _execute_step(step, state, ResearchPlanContext(tools={}))
+
+    assert result["provenance"]["source"] == "deterministic_context_fallback"
+    assert "风险测算完成" in result["text"]
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from llm.context import (
     ContextBudget,
     ContextWindowExceededError,
     TokenCounter,
+    context_safe_error,
     select_conversation_history,
     select_messages_for_model,
 )
@@ -26,6 +27,17 @@ def test_token_counter_counts_chinese_chat_content():
     counter = TokenCounter(MODEL)
 
     assert counter.count_messages([{"role": "user", "content": "分析沪深300短期趋势"}]) > 5
+
+
+def test_context_error_is_sanitized_before_it_reaches_tool_or_plan_events():
+    code, message = context_safe_error(
+        ContextWindowExceededError("不可压缩上下文需要 352732 tokens，模型预算 113408 tokens"),
+        "raw error",
+    )
+
+    assert code == "result_unavailable"
+    assert "token" not in message.lower()
+    assert "模型" not in message
 
 
 def test_conversation_history_uses_token_budget_and_keeps_complete_recent_turn():
@@ -104,6 +116,36 @@ def test_agent_context_keeps_system_current_user_and_latest_tool_exchange():
 
     assert selection.messages == p0
     assert selection.selected_tokens <= selection.input_limit
+
+
+def test_oversized_latest_tool_result_is_projected_without_mutating_durable_message():
+    counter = TokenCounter(MODEL)
+    tool_call = AIMessage(
+        content="",
+        tool_calls=[{"id": "latest", "name": "synthesis", "args": {}}],
+    )
+    original_result = ToolMessage(
+        content='{"data_type":"synthesis","rows":[' + '"大量证据",' * 10000 + '"结束"]}',
+        tool_call_id="latest",
+    )
+    messages = [
+        SystemMessage(content="产品边界与安全规则"),
+        HumanMessage(content="当前问题"),
+        tool_call,
+        original_result,
+    ]
+    fixed = [messages[0], messages[1], tool_call, ToolMessage(content="", tool_call_id="latest")]
+    input_limit = counter.count_messages(fixed) + 300
+
+    selection = select_messages_for_model(messages, budget=_budget(input_limit))
+
+    projected_result = selection.messages[-1]
+    assert isinstance(projected_result, ToolMessage)
+    assert projected_result.tool_call_id == "latest"
+    assert "_context_compacted" in str(projected_result.content)
+    assert selection.compacted_messages == 1
+    assert selection.selected_tokens <= selection.input_limit
+    assert "大量证据" in str(original_result.content)
 
 
 def test_non_compressible_context_never_gets_silently_truncated():
