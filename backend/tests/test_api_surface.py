@@ -9,6 +9,7 @@ def test_agent_entry_is_chat_sse_only():
     paths = set(app.openapi()["paths"])
 
     assert "/api/chat/tasks/{task_id}/stream" in paths
+    assert "/api/chat/conversations/{conversation_id}/branches" in paths
     assert not any(path.startswith("/api/automation") for path in paths)
     assert not any(path.startswith("/api/backtest/experiments") for path in paths)
     assert not any(path.startswith("/api/deployments/experiments") for path in paths)

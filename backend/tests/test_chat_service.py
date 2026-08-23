@@ -323,6 +323,75 @@ async def test_chat_store_edits_a_server_owned_message_branch(store):
 
 
 @pytest.mark.asyncio
+async def test_chat_store_branches_through_completed_assistant_reply(store):
+    _, first_assistant_id = await store.prepare_task(
+        conversation_id="conversation-source",
+        task_id="task-source-1",
+        message="第一问",
+    )
+    await store.append_part(first_assistant_id, {"type": "text", "content": "第一答"})
+    await store.set_references(
+        first_assistant_id,
+        [{"title": "参考资料", "url": "https://example.com/source"}],
+    )
+    await store.update_task("task-source-1", "completed")
+
+    await store.prepare_task(
+        conversation_id="conversation-source",
+        task_id="task-source-2",
+        message="第二问",
+    )
+    await store.update_task("task-source-2", "completed")
+
+    source_before = await store.get_conversation("conversation-source")
+    branch = await store.branch_conversation("conversation-source", first_assistant_id)
+    source_after = await store.get_conversation("conversation-source")
+
+    assert source_before == source_after
+    assert branch["conversation_id"] != "conversation-source"
+    assert branch["title"].endswith("（分支）")
+    assert [message["role"] for message in branch["messages"]] == ["user", "assistant"]
+    assert [message["parts"][0]["content"] for message in branch["messages"]] == ["第一问", "第一答"]
+    assert all(message["task_id"] is None for message in branch["messages"])
+    assert {message["id"] for message in branch["messages"]}.isdisjoint(
+        {message["id"] for message in source_before["messages"]}
+    )
+    assert branch["messages"][1]["references"] == [
+        {"title": "参考资料", "url": "https://example.com/source"}
+    ]
+    assert branch["messages"][0]["created_at"] == source_before["messages"][0]["created_at"]
+
+    await store.prepare_task(
+        conversation_id=branch["conversation_id"],
+        task_id="task-branch-follow-up",
+        message="分支追问",
+    )
+    state = await store.get_task_state("task-branch-follow-up")
+    assert state is not None
+    assert [message["content"] for message in state["history"]] == ["第一问", "第一答"]
+
+    matches = await store.list_conversations(query="第一答")
+    assert {item["conversation_id"] for item in matches} == {
+        "conversation-source",
+        branch["conversation_id"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_chat_store_rejects_invalid_branch_target(store):
+    user_message_id, assistant_message_id = await store.prepare_task(
+        conversation_id="conversation-invalid-branch",
+        task_id="task-invalid-branch",
+        message="尚未完成的问题",
+    )
+
+    with pytest.raises(ValueError, match="助手回复"):
+        await store.branch_conversation("conversation-invalid-branch", user_message_id)
+    with pytest.raises(ValueError, match="已完成"):
+        await store.branch_conversation("conversation-invalid-branch", assistant_message_id)
+
+
+@pytest.mark.asyncio
 async def test_chat_store_does_not_rebuild_populated_search_index_on_startup(tmp_path):
     db_path = tmp_path / "incremental-search.sqlite3"
     first = ChatStore(db_path)
