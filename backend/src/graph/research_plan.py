@@ -17,6 +17,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Send
 from loguru import logger
 
+from application.financial_task_planner import compile_financial_task_spec
 from graph.agent_loop import tool_timeout_seconds
 from graph.research_evidence import (
     _classify_failure,
@@ -82,6 +83,7 @@ class ResearchPlanState(TypedDict, total=False):
     needs_replan: bool
     final_response: str
     task_contract: dict[str, Any]
+    financial_task_spec: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,7 @@ async def scope_research(state: ResearchPlanState) -> dict[str, Any]:
     budget = DEPTH_BUDGETS[depth]
     deadline = datetime.now(timezone.utc) + timedelta(seconds=budget.deadline_seconds)
     contract = derive_task_contract(state["request"])
+    financial_spec = compile_financial_task_spec(state["request"])
     return {
         "depth": depth,
         "budget": budget.model_dump(mode="json"),
@@ -143,6 +146,7 @@ async def scope_research(state: ResearchPlanState) -> dict[str, Any]:
         "tool_calls": 0,
         "needs_replan": False,
         "task_contract": contract.model_dump(mode="json"),
+        "financial_task_spec": financial_spec.model_dump(mode="json") if financial_spec else {},
     }
 
 
@@ -150,7 +154,48 @@ async def plan_research(state: ResearchPlanState) -> dict[str, Any]:
     request = state["request"]
     depth = state["depth"]
     budget = ResearchBudget.model_validate(state["budget"])
-    prompt = json.dumps(
+    financial_spec = state.get("financial_task_spec") or {}
+    if financial_spec:
+        steps = [
+            {
+                "id": "data_catalog",
+                "kind": "data_catalog",
+                "title": "解析数据集、字段与口径",
+                "depends_on": [],
+                "inputs": {},
+                "success_criteria": ["找到满足任务字段与时间口径的数据集"],
+                "max_attempts": 2,
+            },
+            {
+                "id": "data_query",
+                "kind": "data_query",
+                "title": "查询结构化数据并执行确定性变换",
+                "depends_on": ["data_catalog"],
+                "inputs": {},
+                "success_criteria": ["返回覆盖率、预览、来源与完整结果产物"],
+                "max_attempts": 2,
+            },
+            {
+                "id": "data_validation",
+                "kind": "data_validation",
+                "title": "核验业务验收条件",
+                "depends_on": ["data_query"],
+                "inputs": {},
+                "success_criteria": ["明确 satisfied、partial、data_unavailable 或 invalid_result"],
+                "max_attempts": 1,
+            },
+            {
+                "id": "synthesis",
+                "kind": "synthesis",
+                "title": "生成带口径与覆盖说明的结果表",
+                "depends_on": ["data_validation"],
+                "inputs": {},
+                "success_criteria": ["回答只引用已通过验收的程序结果"],
+                "max_attempts": 1,
+            },
+        ]
+    else:
+        prompt = json.dumps(
         {
             "objective": request.get("message"),
             "intent": request.get("intent"),
@@ -169,18 +214,18 @@ async def plan_research(state: ResearchPlanState) -> dict[str, Any]:
         },
         ensure_ascii=False,
     )
-    try:
-        raw = await get_llm_service().chat_json(
-            prompt,
-            system=(
-                "你是市场研究 Planner。仅返回 JSON 对象："
-                "{steps:[{id,kind,title,depends_on,inputs,success_criteria,max_attempts}]}。"
-            ),
-        )
-        steps = _normalize_steps(raw, request, depth)
-    except Exception as exc:
-        logger.warning("Research planner fell back to deterministic template: {}", exc)
-        steps = _fallback_steps(request, depth)
+        try:
+            raw = await get_llm_service().chat_json(
+                prompt,
+                system=(
+                    "你是市场研究 Planner。仅返回 JSON 对象："
+                    "{steps:[{id,kind,title,depends_on,inputs,success_criteria,max_attempts}]}。"
+                ),
+            )
+            steps = _normalize_steps(raw, request, depth)
+        except Exception as exc:
+            logger.warning("Research planner fell back to deterministic template: {}", exc)
+            steps = _fallback_steps(request, depth)
 
     plan_kwargs = {
         "plan_id": f"research-{uuid4().hex[:16]}",
@@ -244,6 +289,7 @@ def route_dispatch(state: ResearchPlanState) -> list[Send] | str:
                 "replan_count": state.get("replan_count", 0),
                 "tool_calls": state.get("tool_calls", 0),
                 "task_contract": state.get("task_contract", {}),
+                "financial_task_spec": state.get("financial_task_spec", {}),
             },
         )
         for step in ready[: min(budget.max_parallel, remaining_calls)]
@@ -467,6 +513,38 @@ async def _execute_step(
     ticker = tickers[0] if tickers else ""
     asset_type = str(request.get("asset_type", "stock"))
     common = {"ticker": ticker, "asset_type": asset_type}
+    if step.kind == "data_catalog":
+        return await _call_tool(
+            context,
+            "search_market_data_catalog",
+            {"query": str(request.get("message") or ""), "asset_type": asset_type, "limit": 5},
+        )
+    if step.kind == "data_query":
+        spec = state.get("financial_task_spec") or {}
+        if not spec:
+            raise ValueError("结构化数据步骤缺少 FinancialTaskSpec")
+        return await _call_tool(context, "query_market_data", {"task_spec": spec})
+    if step.kind == "data_validation":
+        query_output = next(
+            (
+                item.get("output")
+                for item in state.get("step_results", {}).values()
+                if isinstance(item, dict)
+                and isinstance(item.get("output"), dict)
+                and item["output"].get("data_type") == "market_dataset"
+            ),
+            {},
+        )
+        acceptance = query_output.get("acceptance") or {}
+        return {
+            "data_type": "task_acceptance",
+            "outcome_status": acceptance.get("status", "invalid_result"),
+            "satisfied": acceptance.get("satisfied", False),
+            "checks": acceptance.get("checks", []),
+            "issues": acceptance.get("issues", []),
+            "coverage": query_output.get("coverage", {}),
+            "provenance": query_output.get("provenance", []),
+        }
     if step.kind in {"instrument_profile", "fundamentals"}:
         return await _call_tool(context, "get_fundamentals", common)
     if step.kind in {"market_snapshot", "liquidity"}:
@@ -658,6 +736,63 @@ async def _execute_step(
             },
         )
     if step.kind == "synthesis":
+        dataset_result = next(
+            (
+                item.get("output")
+                for item in state.get("step_results", {}).values()
+                if isinstance(item, dict)
+                and isinstance(item.get("output"), dict)
+                and item["output"].get("data_type") == "market_dataset"
+            ),
+            None,
+        )
+        if dataset_result is not None:
+            acceptance = dataset_result.get("acceptance") or {}
+            coverage = dataset_result.get("coverage") or {}
+            preview = [item for item in dataset_result.get("preview", []) if isinstance(item, dict)]
+            columns = [str(item) for item in dataset_result.get("schema_fields", [])]
+            periods = [str(item) for item in coverage.get("requested_periods", [])]
+            status = str(acceptance.get("status") or "invalid_result")
+            if status != "satisfied":
+                issues = "；".join(str(item) for item in acceptance.get("issues", [])) or "业务验收条件未全部满足"
+                text = (
+                    f"本次结构化查询已执行，但业务结果状态为 `{status}`，因此不输出可能误导的完整排名。\n\n"
+                    f"覆盖情况：请求 {periods or '—'}，实际返回 {coverage.get('returned_periods') or '—'}；{issues}。"
+                )
+            else:
+                headers = columns or (list(preview[0]) if preview else [])
+                lines = [
+                    "结构化筛选与业务验收均已通过。以下按近6个完整财年的累计税前每股现金分红从高到低排列：",
+                    "",
+                    "| 排名 | " + " | ".join(headers) + " |",
+                    "| ---: | " + " | ".join("---" for _ in headers) + " |",
+                ]
+                for rank, row in enumerate(preview, 1):
+                    values = []
+                    for column in headers:
+                        value = row.get(column, "")
+                        values.append(f"{value:.4f}" if isinstance(value, float) else str(value))
+                    lines.append(f"| {rank} | " + " | ".join(values) + " |")
+                artifacts = dataset_result.get("artifacts") or []
+                lines.extend(
+                    [
+                        "",
+                        f"覆盖：{coverage.get('requested_periods')}；源记录 {coverage.get('source_rows', 0)} 条；"
+                        f"满足连续分红条件 {coverage.get('result_rows', 0)} 只。",
+                        "口径：仅统计已实施的税前现金分红，单位为元/股；同一报告年度多次实施方案合并求和；"
+                        "送股、转增和仅预案未实施的方案不计入。",
+                        "来源：AkShare / 东方财富结构化分红数据。"
+                        + (f"完整 CSV 已生成（{len(artifacts)} 个产物）。" if artifacts else "本次未生成完整 CSV。"),
+                    ]
+                )
+                text = "\n".join(lines)
+            return {
+                "data_type": "synthesis",
+                "text": text,
+                "outcome_status": status,
+                "acceptance": acceptance,
+                "provenance": {"source": "deterministic_dataset_synthesis"},
+            }
         comparison = next(
             (
                 item.get("output")
@@ -821,6 +956,9 @@ async def verify_evidence(state: ResearchPlanState) -> dict[str, Any]:
         "backtest",
         "comparison",
         "comprehensive_analysis",
+        "data_catalog",
+        "data_query",
+        "data_validation",
     }
     updates: dict[str, dict[str, Any]] = {}
     for step in plan.steps:
@@ -907,6 +1045,22 @@ async def verify_evidence(state: ResearchPlanState) -> dict[str, Any]:
             if not output.get("candidate_id") or sandbox_backtest.get("final_value") is None:
                 unavailable = True
                 issues.append("沙盒候选缺少可信回测结果")
+        elif step.kind == "data_catalog":
+            if not output.get("matches"):
+                unavailable = True
+                issues.append("数据目录未找到匹配数据集")
+        elif step.kind == "data_query":
+            acceptance = output.get("acceptance") or {}
+            if acceptance.get("status") == "data_unavailable":
+                unavailable = True
+                issues.append("结构化数据源没有返回请求周期数据")
+            elif acceptance.get("status") != "satisfied":
+                issues.extend(str(item) for item in acceptance.get("issues", []))
+        elif step.kind == "data_validation":
+            if output.get("outcome_status") == "data_unavailable":
+                unavailable = True
+            elif output.get("outcome_status") != "satisfied":
+                issues.extend(str(item) for item in output.get("issues", []))
         requires_as_of = step.kind in {"market_snapshot", "price_history", "fund_nav", "news", "comparison"}
         has_as_of = not requires_as_of or all(item.as_of for item in result.evidence)
         if not has_as_of:

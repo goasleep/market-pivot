@@ -59,6 +59,16 @@ def _plan_snapshot(
     )
     if status == "completed" and has_gaps:
         status = "completed_with_gaps"
+    validation_result = next(
+        (
+            result.output
+            for step in plan.steps
+            if step.kind == "data_validation"
+            and (result := results.get(step.id)) is not None
+            and result.status == "completed"
+        ),
+        {},
+    )
     return {
         "plan_id": plan.plan_id,
         "objective": plan.objective,
@@ -69,6 +79,8 @@ def _plan_snapshot(
         "revision": plan.revision,
         "task_contract": plan.task_contract.model_dump(mode="json") if plan.task_contract else None,
         "status": status,
+        "outcome_status": validation_result.get("outcome_status") if validation_result else None,
+        "acceptance": validation_result if validation_result else None,
         "progress": round(completed / len(steps) * 100) if steps else 0,
         "steps": steps,
     }
@@ -189,6 +201,9 @@ class ResearchPlanService:
                     "backtest": "design_and_run_backtest",
                     "comparison": "compare_quotes",
                     "comprehensive_analysis": "run_fund_or_stock_analysis",
+                    "data_catalog": "search_market_data_catalog",
+                    "data_query": "query_market_data",
+                    "data_validation": "task_acceptance",
                     "risk": "calculate_risk_metrics",
                     "report": "save_artifacts",
                 }.get(step.kind, step.kind)
