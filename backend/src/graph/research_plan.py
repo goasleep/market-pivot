@@ -99,7 +99,11 @@ class ResearchToolExecutionError(RuntimeError):
 
 
 RECOVERY_INPUT_RULES: dict[str, dict[str, str]] = {
-    "price_history": {"limit": "20 到 500 的整数"},
+    "price_history": {
+        "limit": "20 到 500 的整数",
+        "start_date": "YYYY-MM-DD，必须早于或等于 end_date",
+        "end_date": "YYYY-MM-DD，必须晚于或等于 start_date",
+    },
     "fund_nav": {"limit": "20 到 500 的整数"},
     "technical": {"limit": "20 到 500 的整数"},
     "news": {
@@ -278,6 +282,19 @@ def _sanitize_recovery_patch(
         value = _bounded_number(patch["limit"], *limit_ranges[step.kind], integer=True)
         if value is not None:
             sanitized["limit"] = value
+    if step.kind == "price_history":
+        proposed_start = patch.get("start_date")
+        proposed_end = patch.get("end_date")
+        try:
+            start = date.fromisoformat(str(proposed_start)) if proposed_start else None
+            end = date.fromisoformat(str(proposed_end)) if proposed_end else None
+        except ValueError:
+            start = None
+            end = None
+        if start is not None and (end is None or start <= end):
+            sanitized["start_date"] = start.isoformat()
+        if end is not None and (start is None or start <= end):
+            sanitized["end_date"] = end.isoformat()
     if step.kind == "news":
         if isinstance(patch.get("query"), str) and patch["query"].strip():
             sanitized["query"] = patch["query"].strip()[:500]
@@ -458,12 +475,17 @@ async def _execute_step(
         return await _call_tool(context, "get_realtime_quote", common)
     if step.kind == "price_history":
         limit = int(step.inputs.get("limit") or 120)
+        date_args = {
+            key: value
+            for key in ("start_date", "end_date")
+            if (value := request.get(key) or step.inputs.get(key))
+        }
         payloads = await asyncio.gather(
             *(
                 _call_tool(
                     context,
                     "get_historical_prices",
-                    {"ticker": item, "asset_type": asset_type, "limit": limit},
+                    {"ticker": item, "asset_type": asset_type, "limit": limit, **date_args},
                 )
                 for item in tickers[:10]
             )

@@ -396,6 +396,57 @@ def test_compare_quotes_uses_one_market_snapshot(monkeypatch):
     assert payload["provenance"][0]["source_id"] == "akshare"
 
 
+def test_historical_prices_passes_explicit_date_range_to_stock_provider(monkeypatch):
+    captured = {}
+    schema = assets.get_historical_prices.args_schema.model_json_schema()
+    assert {"start_date", "end_date"} <= set(schema["properties"])
+
+    async def history(ticker, *, start_date, end_date):
+        captured.update({"ticker": ticker, "start_date": start_date, "end_date": end_date})
+        return pd.DataFrame(
+            [
+                {"date": "2025-01-02", "close": 10.0},
+                {"date": "2025-01-03", "close": 10.2},
+            ]
+        )
+
+    monkeypatch.setattr(assets, "async_get_stock_history", history)
+    result = asyncio.run(
+        assets.get_historical_prices.ainvoke(
+            {
+                "ticker": "600000",
+                "asset_type": "stock",
+                "start_date": "2025-01-01",
+                "end_date": "2025-01-10",
+            }
+        )
+    )
+    payload = json.loads(result)
+
+    assert captured == {"ticker": "600000", "start_date": "20250101", "end_date": "20250110"}
+    assert payload["requested_range"] == {"start_date": "20250101", "end_date": "20250110"}
+    assert [item["date"] for item in payload["history"]] == ["2025-01-02", "2025-01-03"]
+
+
+def test_historical_prices_rejects_reversed_or_invalid_date_range():
+    with pytest.raises(ValueError, match="start_date 必须早于"):
+        asyncio.run(
+            assets.get_historical_prices.ainvoke(
+                {
+                    "ticker": "600000",
+                    "start_date": "2025-01-10",
+                    "end_date": "2025-01-01",
+                }
+            )
+        )
+    with pytest.raises(ValueError, match="end_date 必须是"):
+        asyncio.run(
+            assets.get_historical_prices.ainvoke(
+                {"ticker": "600000", "start_date": "2025-01-01", "end_date": "not-a-date"}
+            )
+        )
+
+
 def test_realtime_quote_falls_back_to_latest_history(monkeypatch):
     async def empty_realtime(ticker, *, asset_type):
         return {}

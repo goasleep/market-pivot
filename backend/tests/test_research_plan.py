@@ -65,6 +65,73 @@ def test_depth_classifier_and_fallback_budgets():
     assert "fund_nav" in {step["kind"] for step in deep_etf}
 
 
+def test_asset_request_extracts_and_serializes_explicit_history_range():
+    request = StockAgent().prepare("查询 600000 从 2025年1月1日 到 2025-01-10 的历史走势")
+    payload = StockAgent.request_payload(request)
+    restored = StockAgent.request_from_payload(payload)
+
+    assert request.start_date == "2025-01-01"
+    assert request.end_date == "2025-01-10"
+    assert payload["start_date"] == "2025-01-01"
+    assert restored.start_date == request.start_date
+    assert restored.end_date == request.end_date
+
+
+@pytest.mark.asyncio
+async def test_price_history_step_forwards_request_date_range_to_tool():
+    captured = []
+
+    @tool
+    async def get_historical_prices(
+        ticker: str,
+        asset_type: str = "stock",
+        limit: int = 120,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> str:
+        """Get history for an explicit range."""
+        captured.append(
+            {
+                "ticker": ticker,
+                "asset_type": asset_type,
+                "limit": limit,
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+        )
+        return json.dumps({"history": [{"date": start_date, "close": 10}]})
+
+    result = await _execute_step(
+        ResearchStep(
+            id="history",
+            kind="price_history",
+            title="获取指定区间历史价格",
+            inputs={"start_date": "2024-01-01", "end_date": "2024-01-10"},
+            success_criteria=["有历史价格"],
+        ),
+        {
+            "request": {
+                "tickers": ["600000"],
+                "asset_type": "stock",
+                "start_date": "2025-01-01",
+                "end_date": "2025-01-10",
+            }
+        },
+        ResearchPlanContext(tools={"get_historical_prices": get_historical_prices}),
+    )
+
+    assert captured == [
+        {
+            "ticker": "600000",
+            "asset_type": "stock",
+            "limit": 120,
+            "start_date": "2025-01-01",
+            "end_date": "2025-01-10",
+        }
+    ]
+    assert result["items"][0]["history"][0]["date"] == "2025-01-01"
+
+
 def test_multi_strategy_prompt_gets_machine_checkable_completion_contract():
     contract = derive_task_contract(
         {

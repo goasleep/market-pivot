@@ -109,6 +109,37 @@ S3_ARTIFACTS_PREFIX=a-share-agent/artifacts
 
 单元测试可以显式注入本地存储适配器；生产环境应配置 S3 兼容对象存储。
 
+历史行情永久缓存使用另一套独立的 S3 兼容存储配置，不与报告产物共享桶、凭据或生命周期策略：
+
+```dotenv
+MARKET_HISTORY_CACHE_ENABLED=false
+MARKET_HISTORY_S3_ENDPOINT_URL=
+MARKET_HISTORY_S3_BUCKET=
+MARKET_HISTORY_S3_REGION=us-east-1
+MARKET_HISTORY_S3_ACCESS_KEY_ID=
+MARKET_HISTORY_S3_SECRET_ACCESS_KEY=
+MARKET_HISTORY_S3_SESSION_TOKEN=
+MARKET_HISTORY_S3_ADDRESSING_STYLE=path
+MARKET_HISTORY_S3_PREFIX=a-share-agent/market-history/v1
+```
+
+缓存按“标的 + 数据类型 + 复权方式 + 年份”保存不可变 Parquet，读取时由 boto3 下载命中的年度对象到内存，再由 Polars 解码，不会永久写入本地磁盘。北京时间最近 3 天的数据不会进入永久缓存。
+
+应用仍然通过现有的 `get_stock_history()`、`get_fund_history()` 和 `get_fund_nav_history()` 使用历史数据，不需要业务调用方直接操作对象存储。缓存会先读取 `manifest.json` 定位年度对象，只下载请求覆盖到的对象并在内存中完成日期过滤、合并和去重，最终继续返回 Pandas DataFrame。DuckDB 不属于生产依赖；它只用于兼容性烟测，以及未来可能出现的全市场大文件分析。
+
+对象布局如下；Manifest 中仅引用每个年度的当前快照，旧 Manifest 和旧 Parquet 首期均保留：
+
+```text
+{prefix}/
+  manifest.json
+  manifest-archive/manifest-{timestamp}-{sha256}.json
+  data/{dataset}/{asset_type}/{ticker}/{adjustment}/{year}/snapshot-{sha256}.parquet
+```
+
+七牛 Kodo 当前不提供可依赖的 AWS S3 Bucket Versioning，[兼容公共头文档](https://developer.qiniu.com/kodo/4091/s3-compatible-header)将 `x-amz-version-id` 标记为暂不支持，[兼容 API 文档](https://developer.qiniu.com/kodo/4087/compatible-s3-api)也未承诺支持 `If-Match`/`If-None-Match` 条件覆盖。因此固定的 `manifest.json` 不使用版本 ID 或基于 ETag 的 CAS，而是采用进程内写锁串行更新，并在覆盖前保存不可变归档。**启用该缓存时只能运行一个后端进程，禁止启用多 worker 或多副本。**如需横向扩容，必须先改用追加式索引或外部分布式锁。七牛配置应使用区域 S3 Endpoint、Signature V4、path-style 和长期 AK/SK，`MARKET_HISTORY_S3_SESSION_TOKEN` 保持为空，也不要为该桶启用对象锁定。
+
+`GET /api/system/status` 的 `history_cache` 字段会返回启用状态、运行模式、Manifest SHA/ETag、条目数量和最近错误，不会返回 Endpoint、桶名或凭据。
+
 ### 启动开发服务器
 
 ```bash

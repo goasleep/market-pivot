@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from datetime import date
 from typing import Any
 
 from langchain_core.tools import tool
@@ -31,6 +32,19 @@ def _as_of(records: list[dict[str, Any]]) -> str | None:
         return None
     latest = records[-1]
     return str(latest.get("date") or latest.get("日期") or latest.get("trade_date") or "") or None
+
+
+def _history_date(value: str, field_name: str) -> str:
+    """Normalize an optional public tool date without changing provider semantics."""
+    if not value:
+        return ""
+    normalized = value.strip().replace("/", "-")
+    if len(normalized) == 8 and normalized.isdigit():
+        normalized = f"{normalized[:4]}-{normalized[4:6]}-{normalized[6:]}"
+    try:
+        return date.fromisoformat(normalized).strftime("%Y%m%d")
+    except ValueError as exc:
+        raise ValueError(f"{field_name} 必须是 YYYY-MM-DD 或 YYYYMMDD 格式") from exc
 
 
 def _positive_number(value: Any) -> float | None:
@@ -141,14 +155,29 @@ async def get_realtime_quote(ticker: str, asset_type: str = "stock") -> str:
 
 
 @tool
-async def get_historical_prices(ticker: str, asset_type: str = "stock", limit: int = 60) -> str:
-    """获取结构化市场数据：股票、ETF或LOF的历史日线价格，用于走势和技术分析。"""
+async def get_historical_prices(
+    ticker: str,
+    asset_type: str = "stock",
+    limit: int = 60,
+    start_date: str = "",
+    end_date: str = "",
+) -> str:
+    """获取股票、ETF或LOF历史日线；指定区间时传 YYYY-MM-DD 格式的 start_date 和 end_date。"""
     kind = AssetType(asset_type)
+    normalized_start = _history_date(start_date, "start_date")
+    normalized_end = _history_date(end_date, "end_date")
+    if normalized_start and normalized_end and normalized_start > normalized_end:
+        raise ValueError("start_date 必须早于或等于 end_date")
     try:
         history = (
-            await async_get_stock_history(ticker)
+            await async_get_stock_history(ticker, start_date=normalized_start, end_date=normalized_end)
             if kind == AssetType.STOCK
-            else await async_get_fund_history(ticker, asset_type=kind.value)
+            else await async_get_fund_history(
+                ticker,
+                asset_type=kind.value,
+                start_date=normalized_start,
+                end_date=normalized_end,
+            )
         )
         records = history.tail(max(1, min(limit, 250))).to_dict("records")
     except Exception as exc:
@@ -161,6 +190,10 @@ async def get_historical_prices(ticker: str, asset_type: str = "stock", limit: i
             "ticker": ticker,
             "asset_type": kind.value,
             "available": bool(records),
+            "requested_range": {
+                "start_date": normalized_start or None,
+                "end_date": normalized_end or None,
+            },
             "error": None if records else {"code": "market_history_unavailable", "message": "历史价格数据不可用"},
             "history": records,
             "provenance": provenance("akshare", as_of=_as_of(records), freshness="historical", status=status),

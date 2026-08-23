@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
+from datetime import date
 from enum import Enum
 from typing import Any, Sequence
 
@@ -29,6 +30,8 @@ class AssetAgentRequest:
     intent: AssetIntent
     tickers: tuple[str, ...]
     asset_type: AssetType = AssetType.STOCK
+    start_date: str | None = None
+    end_date: str | None = None
     strategy: str | None = None
     conversation_id: str | None = None
     task_id: str | None = None
@@ -50,6 +53,9 @@ class AssetRequestResolver:
     """Route conversational requests to common asset research capabilities."""
 
     _ticker_pattern = re.compile(r"(?<!\d)(?:(?:sh|sz|bj)\s*)?(\d{6})(?!\d)", re.IGNORECASE)
+    _date_pattern = re.compile(
+        r"(?<!\d)(?:(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?|(\d{8}))(?!\d)"
+    )
 
     _keyword_groups = {
         AssetIntent.BACKTEST: ("回测", "回测一下", "策略测试", "历史测试", "backtest"),
@@ -82,6 +88,26 @@ class AssetRequestResolver:
                     found.append(ticker)
         return tuple(found)
 
+    @classmethod
+    def extract_date_range(cls, *texts: str) -> tuple[str | None, str | None]:
+        """Extract the first explicit start/end pair from conversational text."""
+        for text in texts:
+            found: list[str] = []
+            for match in cls._date_pattern.finditer(text or ""):
+                compact = match.group(4)
+                try:
+                    parsed = (
+                        date(int(compact[:4]), int(compact[4:6]), int(compact[6:]))
+                        if compact
+                        else date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                    )
+                except ValueError:
+                    continue
+                found.append(parsed.isoformat())
+                if len(found) == 2:
+                    return found[0], found[1]
+        return None, None
+
     def resolve(
         self,
         message: str,
@@ -95,6 +121,10 @@ class AssetRequestResolver:
         current_tickers = self.extract_tickers(message)
         history_tickers = self.extract_tickers(*(item.get("content", "") for item in reversed(history_items)))
         tickers = current_tickers or history_tickers[:1]
+        start_date, end_date = self.extract_date_range(
+            message,
+            *(item.get("content", "") for item in reversed(history_items)),
+        )
         intent = self._infer_intent(message, len(current_tickers))
         asset_type = AssetType(asset_type) if asset_type else self._infer_asset_type(message, history_items)
         return AssetAgentRequest(
@@ -103,6 +133,8 @@ class AssetRequestResolver:
             intent=intent,
             tickers=tickers,
             asset_type=asset_type,
+            start_date=start_date,
+            end_date=end_date,
             strategy=strategy,
             conversation_id=conversation_id,
         )
@@ -228,6 +260,10 @@ class AssetRequestResolver:
         history_items = list(history or [])
         current_tickers = self.extract_tickers(message)
         history_tickers = self.extract_tickers(*(item.get("content", "") for item in reversed(history_items)))
+        start_date, end_date = self.extract_date_range(
+            message,
+            *(item.get("content", "") for item in reversed(history_items)),
+        )
         return AssetAgentRequest(
             message=message,
             history=history_items,
@@ -238,6 +274,8 @@ class AssetRequestResolver:
                 if kwargs.get("asset_type")
                 else self._infer_asset_type(message, history_items)
             ),
+            start_date=start_date,
+            end_date=end_date,
             strategy=kwargs.get("strategy"),
             conversation_id=kwargs.get("conversation_id"),
             task_id=kwargs.get("task_id"),
@@ -255,6 +293,8 @@ class AssetRequestResolver:
             "intent": request.intent.value,
             "tickers": list(request.tickers),
             "asset_type": request.asset_type.value,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
             "strategy": request.strategy,
             "conversation_id": request.conversation_id,
             "task_id": request.task_id,
@@ -280,6 +320,8 @@ class AssetRequestResolver:
             intent=AssetIntent(str(payload.get("intent", AssetIntent.ANALYZE.value))),
             tickers=tuple(str(item) for item in payload.get("tickers", []) if item),
             asset_type=AssetType(str(payload.get("asset_type", AssetType.STOCK.value))),
+            start_date=payload.get("start_date"),
+            end_date=payload.get("end_date"),
             strategy=payload.get("strategy"),
             conversation_id=payload.get("conversation_id"),
             task_id=payload.get("task_id"),

@@ -29,6 +29,7 @@ import requests
 from loguru import logger
 
 from config import settings
+from data.history_cache import HistorySeries, history_cache
 
 # ---------------------------------------------------------------------------
 # Circuit Breaker
@@ -423,55 +424,7 @@ def _fetch_etf_nav_history(ticker: str, start_date: str, end_date: str) -> pd.Da
     )
 
 
-def get_stock_history(
-    ticker: str,
-    start_date: str = "",
-    end_date: str = "",
-    adjust: str = "qfq",
-) -> pd.DataFrame:
-    """Get historical daily OHLCV data via AkShare.
-
-    Uses circuit breaker + multi-layer cache + retry with backoff.
-    """
-    ticker = _format_ticker(ticker)
-    if not start_date:
-        start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
-    else:
-        start_date = start_date.replace("-", "")
-    if not end_date:
-        end_date = datetime.now().strftime("%Y%m%d")
-    else:
-        end_date = end_date.replace("-", "")
-
-    cache_key = f"hist:v2:{ticker}:{start_date}:{end_date}:{adjust}"
-    cached = _cache.get(cache_key, ttl=TTL_DAILY)
-    if cached is None and end_date < datetime.now().strftime("%Y%m%d"):
-        cached = _cache.get_stale(cache_key)
-        if cached is not None:
-            logger.warning(f"Using stale historical cache for immutable query: {cache_key}")
-    if cached is not None:
-        logger.debug(f"Cache hit: {cache_key}")
-        if isinstance(cached, dict) and isinstance(cached.get("records"), list):
-            frame = pd.DataFrame(cached["records"])
-            frame.attrs["source_metadata"] = dict(cached.get("source_metadata") or {}) | {"cache": "hit"}
-            return frame
-        frame = pd.DataFrame(cached)
-        frame.attrs["source_metadata"] = {
-            "source_id": "unknown",
-            "source_name": "未知历史缓存",
-            "endpoint": "unknown",
-            "fallback": False,
-            "source_chain": ["unknown"],
-            "cache": "legacy_hit",
-        }
-        return frame
-
-    # Check failure cache to avoid hammering a broken source
-    fail_key = f"fail:{cache_key}"
-    if _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
-        logger.debug(f"Failure cache hit: {cache_key}")
-        return pd.DataFrame()
-
+def _fetch_stock_history_upstream(ticker: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
     breaker = _breakers["history"]
     logger.info(f"Fetching history for {ticker} ({start_date} - {end_date})")
 
@@ -519,21 +472,68 @@ def get_stock_history(
             except Exception:
                 raise primary_exc
 
+    df = _retry_with_backoff(_fetch, breaker, f"history:{ticker}")
+    source_metadata = dict(df.attrs.get("source_metadata") or {})
+    col_map = {
+        "日期": "date",
+        "开盘": "open",
+        "收盘": "close",
+        "最高": "high",
+        "最低": "low",
+        "成交量": "volume",
+        "成交额": "amount",
+        "涨跌幅": "pct_chg",
+        "换手率": "turnover",
+    }
+    df = df.rename(columns=col_map)
+    df["ticker"] = ticker
+    df.attrs["source_metadata"] = source_metadata
+    return df
+
+
+def get_stock_history(
+    ticker: str,
+    start_date: str = "",
+    end_date: str = "",
+    adjust: str = "qfq",
+) -> pd.DataFrame:
+    """Get historical daily OHLCV data via AkShare."""
+    ticker = _format_ticker(ticker)
+    start_date = (start_date or (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")).replace("-", "")
+    end_date = (end_date or datetime.now().strftime("%Y%m%d")).replace("-", "")
+    cache_key = f"hist:v2:{ticker}:{start_date}:{end_date}:{adjust}"
+    fail_key = f"fail:{cache_key}"
+    if not history_cache.enabled and _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
+        logger.debug(f"Failure cache hit: {cache_key}")
+        return pd.DataFrame()
+
+    if history_cache.enabled:
+        try:
+            return history_cache.get_or_fetch(
+                HistorySeries(dataset="price", asset_type="stock", ticker=ticker, adjustment=adjust or "none"),
+                start_date,
+                end_date,
+                lambda fetch_start, fetch_end: _fetch_stock_history_upstream(
+                    ticker, fetch_start, fetch_end, adjust
+                ),
+            )
+        except Exception as exc:
+            logger.error(f"Failed to fetch history for {ticker}: {exc}")
+            _cache.set(fail_key, {"error": str(exc)})
+            return pd.DataFrame()
+
+    cached = _cache.get(cache_key, ttl=TTL_DAILY)
+    if cached is None and end_date < datetime.now().strftime("%Y%m%d"):
+        cached = _cache.get_stale(cache_key)
+    if cached is not None:
+        if isinstance(cached, dict) and isinstance(cached.get("records"), list):
+            frame = pd.DataFrame(cached["records"])
+            frame.attrs["source_metadata"] = dict(cached.get("source_metadata") or {}) | {"cache": "hit"}
+            return frame
+        return pd.DataFrame(cached)
+
     try:
-        df = _retry_with_backoff(_fetch, breaker, f"history:{ticker}")
-        col_map = {
-            "日期": "date",
-            "开盘": "open",
-            "收盘": "close",
-            "最高": "high",
-            "最低": "low",
-            "成交量": "volume",
-            "成交额": "amount",
-            "涨跌幅": "pct_chg",
-            "换手率": "turnover",
-        }
-        df = df.rename(columns=col_map)
-        df["ticker"] = ticker
+        df = _fetch_stock_history_upstream(ticker, start_date, end_date, adjust)
         _cache.set(
             cache_key,
             {
@@ -542,9 +542,9 @@ def get_stock_history(
             },
         )
         return df
-    except Exception as e:
-        logger.error(f"Failed to fetch history for {ticker}: {e}")
-        _cache.set(fail_key, {"error": str(e)})
+    except Exception as exc:
+        logger.error(f"Failed to fetch history for {ticker}: {exc}")
+        _cache.set(fail_key, {"error": str(exc)})
         return pd.DataFrame()
 
 
@@ -791,57 +791,13 @@ def get_fund_realtime(ticker: str, asset_type: str = "etf") -> dict:
         return {}
 
 
-def get_fund_history(
+def _fetch_fund_history_upstream(
     ticker: str,
-    asset_type: str = "etf",
-    start_date: str = "",
-    end_date: str = "",
-    adjust: str = "",
+    asset_type: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
 ) -> pd.DataFrame:
-    """Get daily historical data for an exchange-traded ETF/LOF."""
-    ticker = _format_ticker(ticker)
-    if asset_type not in {"etf", "lof"}:
-        raise ValueError("asset_type must be etf or lof")
-    if not start_date:
-        start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
-    else:
-        start_date = start_date.replace("-", "")
-    if not end_date:
-        end_date = datetime.now().strftime("%Y%m%d")
-    else:
-        end_date = end_date.replace("-", "")
-
-    # v2 persists actual upstream provenance together with the rows. Keeping a
-    # versioned key prevents a legacy row-only cache from being mislabeled.
-    cache_key = f"fund_hist:v2:{asset_type}:{ticker}:{start_date}:{end_date}:{adjust}"
-    cached = _cache.get(cache_key, ttl=TTL_DAILY)
-    if cached is None and end_date < datetime.now().strftime("%Y%m%d"):
-        cached = _cache.get_stale(cache_key)
-        if cached is not None:
-            logger.warning(f"Using stale historical cache for immutable query: {cache_key}")
-    if cached is not None:
-        if isinstance(cached, dict) and isinstance(cached.get("records"), list):
-            frame = pd.DataFrame(cached["records"])
-            source_metadata = dict(cached.get("source_metadata") or {})
-            if source_metadata:
-                source_metadata["cache"] = "hit"
-                frame.attrs["source_metadata"] = source_metadata
-        else:
-            # Defensive compatibility for manually populated v2 caches.
-            frame = pd.DataFrame(cached)
-            frame.attrs["source_metadata"] = {
-                "source_id": "unknown",
-                "source_name": "未知历史缓存",
-                "endpoint": "unknown",
-                "fallback": False,
-                "source_chain": ["unknown"],
-                "cache": "legacy_hit",
-            }
-        return _normalize_fund_price_history(frame, ticker, asset_type)
-    fail_key = f"fail:{cache_key}"
-    if _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
-        return pd.DataFrame()
-
     breaker = _breakers["history"]
     endpoint_name = "fund_etf_hist_em" if asset_type == "etf" else "fund_lof_hist_em"
 
@@ -884,9 +840,61 @@ def get_fund_history(
             )
             return fallback
 
+    df = _retry_with_backoff(_fetch, breaker, f"{asset_type}_history:{ticker}")
+    return _normalize_fund_price_history(df, ticker, asset_type)
+
+
+def get_fund_history(
+    ticker: str,
+    asset_type: str = "etf",
+    start_date: str = "",
+    end_date: str = "",
+    adjust: str = "",
+) -> pd.DataFrame:
+    """Get daily historical data for an exchange-traded ETF/LOF."""
+    ticker = _format_ticker(ticker)
+    if asset_type not in {"etf", "lof"}:
+        raise ValueError("asset_type must be etf or lof")
+    start_date = (start_date or (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")).replace("-", "")
+    end_date = (end_date or datetime.now().strftime("%Y%m%d")).replace("-", "")
+    cache_key = f"fund_hist:v2:{asset_type}:{ticker}:{start_date}:{end_date}:{adjust}"
+    fail_key = f"fail:{cache_key}"
+    if not history_cache.enabled and _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
+        return pd.DataFrame()
+
+    if history_cache.enabled:
+        try:
+            return history_cache.get_or_fetch(
+                HistorySeries(
+                    dataset="price",
+                    asset_type=asset_type,
+                    ticker=ticker,
+                    adjustment=adjust or "none",
+                ),
+                start_date,
+                end_date,
+                lambda fetch_start, fetch_end: _fetch_fund_history_upstream(
+                    ticker, asset_type, fetch_start, fetch_end, adjust
+                ),
+            )
+        except Exception as exc:
+            logger.error(f"Failed to fetch {asset_type} history for {ticker}: {exc}")
+            _cache.set(fail_key, {"error": str(exc)})
+            return pd.DataFrame()
+
+    cached = _cache.get(cache_key, ttl=TTL_DAILY)
+    if cached is None and end_date < datetime.now().strftime("%Y%m%d"):
+        cached = _cache.get_stale(cache_key)
+    if cached is not None:
+        if isinstance(cached, dict) and isinstance(cached.get("records"), list):
+            frame = pd.DataFrame(cached["records"])
+            frame.attrs["source_metadata"] = dict(cached.get("source_metadata") or {}) | {"cache": "hit"}
+        else:
+            frame = pd.DataFrame(cached)
+        return _normalize_fund_price_history(frame, ticker, asset_type)
+
     try:
-        df = _retry_with_backoff(_fetch, breaker, f"{asset_type}_history:{ticker}")
-        df = _normalize_fund_price_history(df, ticker, asset_type)
+        df = _fetch_fund_history_upstream(ticker, asset_type, start_date, end_date, adjust)
         _cache.set(
             cache_key,
             {
@@ -895,37 +903,18 @@ def get_fund_history(
             },
         )
         return df
-    except Exception as e:
-        logger.error(f"Failed to fetch {asset_type} history for {ticker}: {e}")
-        _cache.set(fail_key, {"error": str(e)})
+    except Exception as exc:
+        logger.error(f"Failed to fetch {asset_type} history for {ticker}: {exc}")
+        _cache.set(fail_key, {"error": str(exc)})
         return pd.DataFrame()
 
 
-def get_fund_nav_history(
+def _fetch_fund_nav_history_upstream(
     ticker: str,
-    asset_type: str = "etf",
-    start_date: str = "",
-    end_date: str = "",
+    asset_type: str,
+    start_date: str,
+    end_date: str,
 ) -> pd.DataFrame:
-    """Get historical NAV data for an exchange-traded fund via AkShare.
-
-    ETF NAV uses ``fund_etf_fund_info_em``.  LOF codes are commonly available
-    through the public-fund ``fund_open_fund_info_em`` endpoint, so the
-    adapter normalizes both responses into the same small schema.
-    """
-    ticker = _format_ticker(ticker)
-    if asset_type not in {"etf", "lof"}:
-        raise ValueError("asset_type must be etf or lof")
-    start_date = (start_date or "20000101").replace("-", "")
-    end_date = (end_date or datetime.now().strftime("%Y%m%d")).replace("-", "")
-    cache_key = f"fund_nav:{asset_type}:{ticker}:{start_date}:{end_date}"
-    cached = _cache.get(cache_key, ttl=TTL_DAILY)
-    if cached is not None:
-        return pd.DataFrame(cached)
-    fail_key = f"fail:{cache_key}"
-    if _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
-        return pd.DataFrame()
-
     breaker = _breakers["fund_nav"]
 
     def _fetch():
@@ -936,37 +925,82 @@ def get_fund_nav_history(
             indicator="单位净值走势",
         )
 
+    df = _retry_with_backoff(_fetch, breaker, f"{asset_type}_nav:{ticker}")
+    if df.empty:
+        return pd.DataFrame()
+    col_map = {
+        "净值日期": "date",
+        "日期": "date",
+        "单位净值": "unit_nav",
+        "累计净值": "cumulative_nav",
+        "日增长率": "pct_chg",
+    }
+    df = df.rename(columns=col_map)
+    if "date" not in df.columns:
+        return pd.DataFrame()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    df = df[df["date"].notna()]
+    df = df[
+        (df["date"] >= f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}")
+        & (df["date"] <= f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}")
+    ]
+    keep = [name for name in ("date", "unit_nav", "cumulative_nav", "pct_chg") if name in df.columns]
+    result = df[keep].copy()
+    for name in keep:
+        if name != "date":
+            result[name] = pd.to_numeric(result[name], errors="coerce")
+    result = result.sort_values("date").reset_index(drop=True)
+    result.attrs["source_metadata"] = _fund_history_source_metadata(
+        source_id="eastmoney",
+        source_name="东方财富",
+        endpoint="fund_etf_fund_info_em" if asset_type == "etf" else "fund_open_fund_info_em",
+        fallback=False,
+    )
+    return result
+
+
+def get_fund_nav_history(
+    ticker: str,
+    asset_type: str = "etf",
+    start_date: str = "",
+    end_date: str = "",
+) -> pd.DataFrame:
+    """Get historical NAV data for an exchange-traded fund via AkShare."""
+    ticker = _format_ticker(ticker)
+    if asset_type not in {"etf", "lof"}:
+        raise ValueError("asset_type must be etf or lof")
+    start_date = (start_date or "20000101").replace("-", "")
+    end_date = (end_date or datetime.now().strftime("%Y%m%d")).replace("-", "")
+    cache_key = f"fund_nav:{asset_type}:{ticker}:{start_date}:{end_date}"
+    fail_key = f"fail:{cache_key}"
+    if not history_cache.enabled and _cache.get(fail_key, ttl=TTL_FAILURE) is not None:
+        return pd.DataFrame()
+
+    if history_cache.enabled:
+        try:
+            return history_cache.get_or_fetch(
+                HistorySeries(dataset="nav", asset_type=asset_type, ticker=ticker),
+                start_date,
+                end_date,
+                lambda fetch_start, fetch_end: _fetch_fund_nav_history_upstream(
+                    ticker, asset_type, fetch_start, fetch_end
+                ),
+            )
+        except Exception as exc:
+            logger.error(f"Failed to fetch {asset_type} NAV for {ticker}: {exc}")
+            _cache.set(fail_key, {"error": str(exc)})
+            return pd.DataFrame()
+
+    cached = _cache.get(cache_key, ttl=TTL_DAILY)
+    if cached is not None:
+        return pd.DataFrame(cached)
     try:
-        df = _retry_with_backoff(_fetch, breaker, f"{asset_type}_nav:{ticker}")
-        if df.empty:
-            return pd.DataFrame()
-        col_map = {
-            "净值日期": "date",
-            "日期": "date",
-            "单位净值": "unit_nav",
-            "累计净值": "cumulative_nav",
-            "日增长率": "pct_chg",
-        }
-        df = df.rename(columns=col_map)
-        if "date" not in df.columns:
-            return pd.DataFrame()
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        df = df[df["date"].notna()]
-        if start_date:
-            df = df[df["date"] >= f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"]
-        if end_date:
-            df = df[df["date"] <= f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"]
-        keep = [name for name in ("date", "unit_nav", "cumulative_nav", "pct_chg") if name in df.columns]
-        result = df[keep].copy()
-        for name in keep:
-            if name != "date":
-                result[name] = pd.to_numeric(result[name], errors="coerce")
-        result = result.sort_values("date").reset_index(drop=True)
+        result = _fetch_fund_nav_history_upstream(ticker, asset_type, start_date, end_date)
         _cache.set(cache_key, result.to_dict(orient="records"))
         return result
-    except Exception as e:
-        logger.error(f"Failed to fetch {asset_type} NAV for {ticker}: {e}")
-        _cache.set(fail_key, {"error": str(e)})
+    except Exception as exc:
+        logger.error(f"Failed to fetch {asset_type} NAV for {ticker}: {exc}")
+        _cache.set(fail_key, {"error": str(exc)})
         return pd.DataFrame()
 
 

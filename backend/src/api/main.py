@@ -12,6 +12,8 @@ from api.routers import artifacts, automation, backtest, chat, config, deploymen
 from application.automation import automation_scheduler
 from application.backtest_jobs import backtest_jobs
 from application.chat_service import chat_store, chat_task_manager
+from data.akshare_provider import get_breaker_status
+from data.history_cache import get_history_cache_status
 from data.tortoise_db import close_database, init_database
 from graph.agent_loop import configure_agent_loop
 from graph.checkpointing import checkpoint_manager
@@ -90,6 +92,8 @@ async def list_strategies():
 @app.get("/api/system/status", tags=["system"])
 async def system_status():
     """Get system status including circuit breaker states."""
-    from data.akshare_provider import get_breaker_status
-
-    return {"circuit_breakers": await asyncio.to_thread(get_breaker_status)}
+    circuit_breakers, history_cache = await asyncio.gather(
+        asyncio.to_thread(get_breaker_status),
+        asyncio.to_thread(get_history_cache_status),
+    )
+    return {"circuit_breakers": circuit_breakers, "history_cache": history_cache}

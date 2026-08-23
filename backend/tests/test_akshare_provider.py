@@ -5,6 +5,12 @@ import requests
 import data.akshare_provider as provider
 
 
+@pytest.fixture(autouse=True)
+def disable_external_history_cache(monkeypatch):
+    """Keep provider unit tests independent from a developer's local Qiniu config."""
+    monkeypatch.setattr(provider.history_cache.store, "enabled", False)
+
+
 def test_historical_fund_query_can_reuse_expired_immutable_cache(monkeypatch):
     class StaleCache:
         def get(self, key, ttl=3600):
