@@ -187,20 +187,11 @@ GET /api/artifacts/{artifact_id}/download
 
 在 `.env` 中配置 `LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY` 和可选的 `LANGFUSE_BASE_URL` 后，Stock Agent 对话、研究分析及回测中的 LangGraph/LLM 调用会发送到 Langfuse。每次根调用都会创建独立 callback，并附带标的、日期、策略和会话元数据；未配置 key 时自动跳过。API Key 只通过环境变量读取，不会显示在前端。
 
-### 无人值守 Agent 模拟交易
+### 当前 Agent 入口边界
 
-启动后打开前端的 **Agent 自动化** 页面，选择一个模拟账户并配置：
+后端只通过 Chat 任务及其 SSE 流暴露 Agent 能力。回测实验、策略研究、报告生成和明确要求的纸面交易操作都由 Chat 工具发起；不提供独立的 Agent 实验 API 或无人值守自动化 API，应用启动时也不会启动自动化调度器。
 
-- 股票池、运行日和每日运行时间（默认 15:10，上海时区）
-- `observe` 只记录决策、`confirm` 前端逐条确认、`auto` 自动生成模拟订单
-- `next_open` 下一交易日开盘成交、`same_close` 当日收盘成交、`manual` 手动成交
-- 单日亏损熔断、每次最大股票数和最大订单数
-
-任务默认关闭，paper 模式下所有订单只写入 ORM 管理的模拟账户，不连接真实券商。调度器会读取 A 股交易日历，数据源不可用时退化为周一至周五并记录警告。Portfolio 页面展示持仓、订单来源、日级净值快照和 WebSocket 事件；Chat 中的 Agent 决策可以在用户明确要求后提交到模拟账户。
-
-实盘模式需要同时满足 `LIVE_TRADING_ENABLED=true`、自动化任务 `execution_mode=live` 且 `live_armed=true`、账户配置启用 `custom_http` Adapter。Adapter 对接一个由用户自行维护的交易网关：`POST /orders` 接收标准化订单，`DELETE /orders/{id}` 撤单，`GET /sync?account_id=...` 返回现金和持仓快照。默认配置和未实现的 provider 都会 fail-closed；未完成券商适配、风控和人工审批前，不应启用真实账户。
-
-回测实验完成后，可在“回测与部署”页面把实验部署为独立的内部模拟账户。每次部署保存不可变的 `StrategySpec`、组合规则、标的池、成本参数和版本哈希；默认使用 `confirm` 模式，确定性策略先生成买卖提案，再由 Agent 对买入、卖出及止损退出逐项审核。多个活动账户由调度器并发运行，并通过 `AUTOMATION_MAX_CONCURRENCY` 限制并发数。
+“策略回测”页面只执行已注册 `StrategySpec` 的确定性回测，不在历史循环中调用 LLM。Portfolio 页面只展示纸面账户、持仓、订单、日级净值快照和 WebSocket 事件，不提供 Agent 自动化控制入口。所有模拟盘操作仍受确定性仓位、费用和风险规则约束，不代表真实交易。
 
 Chat 中的回测支持股票池，例如 `回测 000737,600519`。批量回测会让每个股票使用各自的历史 as-of 上下文，并合并到同一个组合中计算资金曲线和交易成本。
 
@@ -215,18 +206,13 @@ cd backend && uv run ruff check src
 pnpm build:frontend
 ```
 
-自动化接口包括：
+Chat Agent 入口包括：
 
 ```text
-GET  /api/automation/accounts/{account_id}
-PUT  /api/automation/accounts/{account_id}
-POST /api/automation/accounts/{account_id}/run
-POST /api/automation/accounts/{account_id}/settle
-POST /api/automation/accounts/{account_id}/live-sync
-GET  /api/automation/accounts/{account_id}/runs
-GET  /api/automation/accounts/{account_id}/decisions
-POST /api/automation/accounts/{account_id}/decisions/{decision_id}/confirm
-PUT  /api/portfolio/accounts/{account_id}/live
+POST /api/chat/send
+GET  /api/chat/tasks/{task_id}/stream
+POST /api/chat/tasks/{task_id}/respond
+POST /api/chat/tasks/{task_id}/cancel
 ```
 
 ### 一键安装与启动
@@ -246,7 +232,7 @@ make down
 Docker 启动后访问 http://localhost:5173，后端健康检查地址为
 http://localhost:8000/api/health。`DATABASE_URL` 为空时，会话历史、任务状态和其他持久化数据
 使用本地 SQLite，适合单节点部署；设置 `DATABASE_URL` 后，聊天数据、任务协调、事件日志和
-账户、自动化、回测实验、制品索引、缓存、配置和 Agent checkpoint 统一使用 PostgreSQL，例如：
+账户、研究产物索引、缓存、配置和 Agent checkpoint 统一使用 PostgreSQL，例如：
 `postgres://postgres:password@localhost:5432/a_share_agent`。可通过 `FRONTEND_PORT` 和
 `BACKEND_PORT` 修改映射端口。
 

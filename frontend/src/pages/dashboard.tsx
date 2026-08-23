@@ -20,8 +20,6 @@ import {
 } from "lucide-react";
 import { MetricCard, PageHeader, PageShell } from "@/components/layout/Page";
 import {
-  getAutomationRuns,
-  getAutomationTask,
   getMarketQuote,
   getPortfolio,
   getStrategies,
@@ -29,12 +27,7 @@ import {
   openSimulationStream,
   type StrategyInfo,
 } from "@/api";
-import type {
-  AgentRunSummary,
-  AssetType,
-  AutomationTask,
-  Portfolio,
-} from "@/types";
+import type { AssetType, Portfolio } from "@/types";
 
 interface WatchItem {
   ticker: string;
@@ -46,8 +39,6 @@ export function DashboardPage() {
   const [strategies, setStrategies] = useState<StrategyInfo[]>([]);
   const [breakers, setBreakers] = useState<Record<string, string>>({});
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
-  const [automation, setAutomation] = useState<AutomationTask | null>(null);
-  const [runs, setRuns] = useState<AgentRunSummary[]>([]);
   const [watchlist, setWatchlist] = useState<WatchItem[]>(() => {
     try {
       const parsed = JSON.parse(
@@ -120,19 +111,13 @@ export function DashboardPage() {
       getPortfolio()
         .then(setPortfolio)
         .catch(() => {});
-      getAutomationTask()
-        .then(setAutomation)
-        .catch(() => {});
-      getAutomationRuns()
-        .then(setRuns)
-        .catch(() => {});
     };
     refresh();
     const socket = openSimulationStream("default", (event) => {
       if (
-        event.type.startsWith("agent.") ||
+        event.type.startsWith("order.") ||
         event.type === "daily.settled" ||
-        event.type === "automation.updated"
+        event.type === "account.updated"
       )
         refresh();
     });
@@ -158,7 +143,7 @@ export function DashboardPage() {
       <PageHeader
         eyebrow="Workspace Overview"
         title="研究工作台"
-        description="聚合模拟账户、Agent 运行状态与关注标的，快速判断今天需要研究什么。"
+        description="聚合模拟账户、Chat Agent 入口与关注标的，快速判断今天需要研究什么。"
         icon={Radar}
       />
 
@@ -194,17 +179,13 @@ export function DashboardPage() {
           icon={Activity}
         />
         <MetricCard
-          label="Agent 状态"
+          label="Agent 入口"
           value={
-            <Badge
-              variant={automation?.config.enabled ? "success" : "secondary"}
-            >
-              {automation?.config.enabled ? "运行中" : "未启用"}
-            </Badge>
+            <Badge variant="success">Chat SSE</Badge>
           }
-          detail={`${automation?.config.mode || "observe"} · ${runs[0]?.status || "暂无运行"}`}
+          detail="研究与任务统一从对话发起"
           icon={Brain}
-          tone={automation?.config.enabled ? "positive" : "default"}
+          tone="positive"
         />
       </div>
 

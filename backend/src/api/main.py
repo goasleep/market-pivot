@@ -8,8 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
-from api.routers import artifacts, automation, backtest, chat, config, deployments, health, market, portfolio
-from application.automation import automation_scheduler
+from api.routers import artifacts, backtest, chat, config, deployments, health, market, portfolio
 from application.backtest_jobs import backtest_jobs
 from application.chat_service import chat_store, chat_task_manager
 from data.akshare_provider import get_breaker_status
@@ -33,11 +32,9 @@ async def lifespan(_app: FastAPI):
     await checkpoint_manager.prune_stale_threads()
     await chat_task_manager.start_worker()
     await backtest_jobs.start()
-    await automation_scheduler.start()
     try:
         yield
     finally:
-        await automation_scheduler.stop()
         await backtest_jobs.stop()
         await chat_task_manager.stop_worker()
         configure_agent_loop(None)
@@ -75,7 +72,6 @@ async def key_error_handler(request: Request, exc: KeyError):
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(artifacts.router, prefix="/api/artifacts", tags=["artifacts"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
-app.include_router(automation.router, prefix="/api/automation", tags=["automation"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(deployments.router, prefix="/api/deployments", tags=["deployments"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])

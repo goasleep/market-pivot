@@ -97,17 +97,6 @@ export interface BacktestResult {
   error?: string | null;
 }
 
-export interface BacktestExperimentResult {
-  experiment_id: string;
-  status: string;
-  objective: string;
-  mode?: BacktestMode;
-  strategy_spec: Record<string, unknown>;
-  portfolio_spec?: PortfolioSpec | null;
-  result: BacktestResult;
-  artifacts: Artifact[];
-}
-
 export interface TradeRecord {
   date: string;
   action: "buy" | "sell";
@@ -269,98 +258,6 @@ export interface SimulationOrder {
   deployment_id?: string | null;
   decision_id?: string | null;
   fill_policy?: "next_open" | "same_close" | "manual";
-}
-
-export type AutomationMode = "observe" | "confirm" | "auto";
-
-export interface AutomationTaskConfig {
-  enabled: boolean;
-  mode: AutomationMode;
-  execution_mode: "paper" | "live";
-  live_armed: boolean;
-  schedule_time: string;
-  weekdays: number[];
-  universe: string[];
-  asset_type: AssetType;
-  strategy_name: string | null;
-  deployment_id: string | null;
-  max_symbols_per_run: number;
-  max_orders_per_run: number;
-  daily_loss_limit_pct: number;
-  data_max_age_seconds: number;
-  fill_time: "next_open" | "same_close" | "manual";
-  simulation_only: boolean;
-}
-
-export interface AutomationTask {
-  account_id: string;
-  config: AutomationTaskConfig;
-  status: string;
-  last_run_id: string | null;
-  last_run_date: string | null;
-  last_error: string | null;
-  created_at: string | null;
-  updated_at: string | null;
-}
-
-export interface AgentRunSummary {
-  run_id: string;
-  account_id: string;
-  run_date: string;
-  trigger: "schedule" | "manual" | "retry" | "settlement";
-  status:
-    "queued" | "running" | "completed" | "failed" | "cancelled" | "skipped";
-  mode: AutomationMode;
-  strategy_name: string | null;
-  deployment_id: string | null;
-  strategy_sha256: string | null;
-  llm_runtime: Record<string, unknown>;
-  symbols_total: number;
-  symbols_processed: number;
-  decisions_count: number;
-  orders_count: number;
-  started_at: string | null;
-  completed_at: string | null;
-  error: string | null;
-  idempotency_key: string;
-}
-
-export interface AgentDecisionAudit {
-  decision_id: string;
-  run_id: string;
-  account_id: string;
-  ticker: string;
-  decision: AnalysisResult;
-  current_price: number;
-  risk_status: "pending" | "approved" | "rejected";
-  risk_reason: string | null;
-  order_id: string | null;
-  signal_source: "agent" | "deployed_strategy";
-  strategy_evaluation: Record<string, unknown>;
-  agent_gate: Record<string, unknown>;
-  proposed_order: Record<string, unknown> | null;
-  confirmation_status:
-    "none" | "pending" | "confirmed" | "rejected" | "expired";
-  created_at: string;
-}
-
-export interface StrategyDeployment {
-  deployment_id: string;
-  experiment_id: string;
-  account_id: string;
-  status: "active" | "paused" | "archived";
-  strategy_name: string;
-  strategy_version: string;
-  strategy_sha256: string;
-  strategy_spec: Record<string, unknown>;
-  portfolio_spec?: PortfolioSpec | null;
-  universe: string[];
-  asset_type: AssetType;
-  execution: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-  activated_at?: string | null;
-  archived_at?: string | null;
 }
 
 // --- Chat / A2UI types ---
