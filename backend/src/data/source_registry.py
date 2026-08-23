@@ -113,7 +113,14 @@ data_sources = DataSourceRegistry(
             "akshare",
             "AkShare / 东方财富",
             "market_data",
-            ("market.quote", "market.history", "market.fundamentals", "market.news", "market.screen"),
+            (
+                "market.quote",
+                "market.history",
+                "market.fundamentals",
+                "market.news",
+                "market.screen",
+                "market.dividends",
+            ),
             priority=10,
         ),
         DataSourceSpec(
@@ -187,7 +194,7 @@ data_sources = DataSourceRegistry(
             "sandbox",
             "受限策略研究沙盒",
             "sandbox",
-            ("research.strategy_code", "research.backtest"),
+            ("research.strategy_code", "research.backtest", "research.data_transform"),
             priority=10,
         ),
         DataSourceSpec(
