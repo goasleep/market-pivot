@@ -123,6 +123,40 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
         ]
         return _surface(surface_id, components, {"rows": rows})
 
+    if tool_name == "query_market_data":
+        rows = [item for item in payload.get("preview", []) if isinstance(item, dict)]
+        fields = [str(item) for item in payload.get("schema_fields", [])]
+        labels = {"ticker": "代码", "name": "简称", "six_year_total": "六年累计每股分红"}
+        columns = [
+            {"key": field, "label": labels.get(field, f"{field} 每股分红" if field.isdigit() else field)}
+            for field in fields
+        ]
+        coverage = payload.get("coverage") or {}
+        acceptance = payload.get("acceptance") or {}
+        surface_id = surface_id or f"market-dataset-{uuid4().hex}"
+        components = [
+            {"id": "root", "component": "Card", "children": ["title", "status", "coverage", "table"]},
+            _text("title", f"结构化筛选结果（前 {len(rows)} 行）", "h3"),
+            {"id": "status", "component": "Badge", "text": _ref("/statusLabel"), "tone": _ref("/statusTone")},
+            _text("coverage", _ref("/coverageLabel"), "caption"),
+            {"id": "table", "component": "DataTable", "columns": columns, "rows": _ref("/rows")},
+        ]
+        status = str(acceptance.get("status") or "invalid_result")
+        return _surface(
+            surface_id,
+            components,
+            {
+                "rows": rows,
+                "statusLabel": f"业务验收：{status}",
+                "statusTone": "positive" if status == "satisfied" else "negative",
+                "coverageLabel": (
+                    f"请求周期 {coverage.get('requested_periods') or '—'} · "
+                    f"返回周期 {coverage.get('returned_periods') or '—'} · "
+                    f"结果 {coverage.get('result_rows', 0)} 行"
+                ),
+            },
+        )
+
     if tool_name == "get_historical_prices":
         if payload.get("data_type") == "price_history_collection":
             items = [item for item in payload.get("items", []) if isinstance(item, dict)]
