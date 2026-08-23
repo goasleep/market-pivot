@@ -65,10 +65,7 @@ export function WidgetRenderer({ html, className }: WidgetRendererProps) {
   return (
     <iframe
       ref={iframeRef}
-      className={cn(
-        "w-full border-0 transition-all",
-        className
-      )}
+      className={cn("w-full border-0 transition-all", className)}
       style={{ minHeight: "50px", pointerEvents: "auto" }}
       sandbox="allow-scripts"
       title="widget"

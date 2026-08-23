@@ -1,82 +1,116 @@
-import { createBrowserRouter, Outlet, NavLink } from "react-router";
-import { LayoutDashboard, Wallet, MessageSquare, Settings, Bot, Sparkles, Archive, FlaskConical } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { DashboardPage } from "@/pages/dashboard";
-import { PortfolioPage } from "@/pages/portfolio";
-import { ChatPage } from "@/pages/chat";
-import { SettingsPage } from "@/pages/settings";
-import { AutomationPage } from "@/pages/automation";
-import { RecordsPage } from "@/pages/records";
-import { BacktestPage } from "@/pages/backtest";
+import { lazy, Suspense, type ReactNode } from "react";
+import { createBrowserRouter } from "react-router";
+import { AppShell } from "@/components/layout/AppShell";
 
-const navItems = [
-  { to: "/", label: "Dashboard", icon: LayoutDashboard },
-  { to: "/chat", label: "Chat", icon: MessageSquare },
-  { to: "/portfolio", label: "Portfolio", icon: Wallet },
-  { to: "/automation", label: "Agent 自动化", icon: Bot },
-  { to: "/backtest", label: "回测与部署", icon: FlaskConical },
-  { to: "/records", label: "研究报告", icon: Archive },
-  { to: "/settings", label: "Settings", icon: Settings },
-];
+const DashboardPage = lazy(() =>
+  import("@/pages/dashboard").then((module) => ({
+    default: module.DashboardPage,
+  })),
+);
+const PortfolioPage = lazy(() =>
+  import("@/pages/portfolio").then((module) => ({
+    default: module.PortfolioPage,
+  })),
+);
+const ChatPage = lazy(() =>
+  import("@/pages/chat").then((module) => ({ default: module.ChatPage })),
+);
+const SettingsPage = lazy(() =>
+  import("@/pages/settings").then((module) => ({
+    default: module.SettingsPage,
+  })),
+);
+const AutomationPage = lazy(() =>
+  import("@/pages/automation").then((module) => ({
+    default: module.AutomationPage,
+  })),
+);
+const RecordsPage = lazy(() =>
+  import("@/pages/records").then((module) => ({ default: module.RecordsPage })),
+);
+const BacktestPage = lazy(() =>
+  import("@/pages/backtest").then((module) => ({
+    default: module.BacktestPage,
+  })),
+);
 
-function Layout() {
+function RouteElement({ children }: { children: ReactNode }) {
   return (
-    <div className="app-grid flex h-screen w-full overflow-hidden bg-background">
-      {/* Sidebar */}
-      <aside className="app-sidebar relative flex w-64 shrink-0 flex-col overflow-hidden border-r border-[#C9DDF5]/80 bg-gradient-to-b from-[#EAF3FF] via-[#F4F8FF] to-[#E7F2FF] text-[#16325C] shadow-2xl shadow-[#5D8FD1]/10">
-        <div className="pointer-events-none absolute -right-20 -top-20 h-52 w-52 rounded-full bg-[#8CB7FF]/25 blur-3xl" />
-        <div className="relative flex h-[76px] items-center gap-3 border-b border-[#C9DDF5]/80 px-6">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-300 via-blue-500 to-violet-500 shadow-lg shadow-blue-500/30">
-            <Sparkles className="h-4 w-4 text-white" />
-          </div>
-          <div className="app-brand-copy">
-            <span className="block text-sm font-semibold tracking-wide">A-Share Agent</span>
+    <Suspense
+      fallback={
+        <div className="flex h-full min-h-64 items-center justify-center">
+          <div className="flex items-center gap-3 rounded-2xl border border-white/80 bg-white/75 px-5 py-3 text-sm text-muted-foreground shadow-[var(--shadow-soft)] backdrop-blur-xl">
+            <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-primary" />
+            正在加载工作区…
           </div>
         </div>
-        <nav className="relative flex-1 space-y-1 p-4">
-          <p className="app-nav-heading mb-3 px-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-[#6A82A5]/75">Workspace</p>
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === "/"}
-              className={({ isActive }) =>
-                cn(
-                  "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200",
-                  isActive
-                    ? "bg-[#0376FF] text-white shadow-lg shadow-[#0376FF]/25"
-                    : "text-[#36577F] hover:bg-white/70 hover:text-[#102C55]"
-                )
-              }
-            >
-              <item.icon className="h-4 w-4 opacity-80 transition-transform group-hover:scale-110" />
-              <span className="app-nav-label">{item.label}</span>
-            </NavLink>
-          ))}
-        </nav>
-      </aside>
-
-      {/* Main content */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        <main className="min-h-0 flex-1 overflow-y-auto">
-          <Outlet />
-        </main>
-      </div>
-    </div>
+      }
+    >
+      {children}
+    </Suspense>
   );
 }
 
 export const router = createBrowserRouter([
   {
-    element: <Layout />,
+    element: <AppShell />,
     children: [
-      { path: "/", element: <DashboardPage /> },
-      { path: "/chat", element: <ChatPage /> },
-      { path: "/portfolio/:accountId?", element: <PortfolioPage /> },
-      { path: "/automation/:accountId?", element: <AutomationPage /> },
-      { path: "/backtest", element: <BacktestPage /> },
-      { path: "/records", element: <RecordsPage /> },
-      { path: "/settings", element: <SettingsPage /> },
+      {
+        path: "/",
+        element: (
+          <RouteElement>
+            <DashboardPage />
+          </RouteElement>
+        ),
+      },
+      {
+        path: "/chat",
+        element: (
+          <RouteElement>
+            <ChatPage />
+          </RouteElement>
+        ),
+      },
+      {
+        path: "/portfolio/:accountId?",
+        element: (
+          <RouteElement>
+            <PortfolioPage />
+          </RouteElement>
+        ),
+      },
+      {
+        path: "/automation/:accountId?",
+        element: (
+          <RouteElement>
+            <AutomationPage />
+          </RouteElement>
+        ),
+      },
+      {
+        path: "/backtest",
+        element: (
+          <RouteElement>
+            <BacktestPage />
+          </RouteElement>
+        ),
+      },
+      {
+        path: "/records",
+        element: (
+          <RouteElement>
+            <RecordsPage />
+          </RouteElement>
+        ),
+      },
+      {
+        path: "/settings",
+        element: (
+          <RouteElement>
+            <SettingsPage />
+          </RouteElement>
+        ),
+      },
     ],
   },
 ]);

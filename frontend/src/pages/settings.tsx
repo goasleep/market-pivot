@@ -10,6 +10,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { PageHeader, PageShell } from "@/components/layout/Page";
 
 const environmentVariables = [
   ["LLM_PROVIDER", "Provider adapter"],
@@ -55,13 +56,13 @@ export function SettingsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6 p-6">
-      <div>
-        <h1 className="text-2xl font-bold">Settings</h1>
-        <p className="text-sm text-muted-foreground">
-          LLM 配置由环境变量统一管理，此页面仅展示当前生效状态。
-        </p>
-      </div>
+    <PageShell width="default" className="max-w-3xl">
+      <PageHeader
+        eyebrow="Runtime Configuration"
+        title="运行设置"
+        description="LLM 与连接配置由服务端环境变量统一管理；这里展示当前生效状态，不保存密钥。"
+        icon={Settings}
+      />
 
       {error && (
         <div className="flex items-center gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-600">
@@ -142,11 +143,17 @@ export function SettingsPage() {
           ))}
         </CardContent>
       </Card>
-    </div>
+    </PageShell>
   );
 }
 
-function StatusRow({ label, children }: { label: string; children: ReactNode }) {
+function StatusRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
   return (
     <div className="flex items-center justify-between gap-4 border-b py-2 last:border-b-0">
       <span className="text-sm text-muted-foreground">{label}</span>

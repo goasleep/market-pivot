@@ -93,7 +93,9 @@ export function ChatPage() {
   const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(
     null,
   );
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(() =>
+    window.matchMedia("(min-width: 768px)").matches,
+  );
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [referencesByConversation, setReferencesByConversation] = useState<
     Record<string, ChatReference[]>
@@ -120,6 +122,15 @@ export function ChatPage() {
       .catch(() => {
         // Chat still uses the backend's environment-owned model if status loading fails.
       });
+  }, []);
+
+  useEffect(() => {
+    const desktop = window.matchMedia("(min-width: 768px)");
+    const syncSidebar = (event: MediaQueryListEvent) => {
+      if (event.matches) setSidebarOpen(true);
+    };
+    desktop.addEventListener("change", syncSidebar);
+    return () => desktop.removeEventListener("change", syncSidebar);
   }, []);
 
   // `sending` represents the single task running on this chat page. Navigation
@@ -702,18 +713,14 @@ export function ChatPage() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               message: text.trim(),
-              history: supersededBaseMessages.map((message) => ({
-                role: message.role,
-                created_at: message.createdAt,
-                references: message.references || [],
-                content: message.parts
-                  .filter((part) => part.type === "text")
-                  .map((part) => part.content)
-                  .join("\n"),
-                parts: message.parts,
-              })),
               conversation_id: conversationId,
               task_id: taskId,
+              user_message_id: userMessage.id,
+              assistant_message_id: assistantMessage.id,
+              edit_message_id:
+                editedIndex === null
+                  ? undefined
+                  : activeConversation.messages[editedIndex]?.id,
             }),
             signal: abortController.signal,
           });
@@ -1124,19 +1131,19 @@ export function ChatPage() {
   const messages = activeConversation?.messages || [];
 
   return (
-    <div className="flex h-full min-h-0 bg-background">
+    <div className="flex h-full min-h-0 bg-transparent">
       {sidebarOpen && (
         <div
-          className="fixed inset-0 z-20 bg-black/20 md:hidden"
+          className="fixed inset-0 z-20 bg-[#020817]/45 backdrop-blur-sm md:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
       <aside
-        className={`absolute inset-y-0 left-0 z-30 flex w-[292px] shrink-0 flex-col border-r bg-card transition-transform md:relative md:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full md:-translate-x-full"}`}
+        className={`absolute inset-y-0 left-0 z-30 flex w-[292px] shrink-0 flex-col border-r border-white/80 bg-white/82 shadow-xl backdrop-blur-2xl transition-transform md:relative md:translate-x-0 md:shadow-none ${sidebarOpen ? "translate-x-0" : "-translate-x-full md:-translate-x-full"}`}
       >
         <div className="flex h-16 items-center justify-between border-b px-4">
           <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-400 via-blue-500 to-violet-500 text-white shadow-lg shadow-blue-500/20">
               <Sparkles className="h-4 w-4" />
             </div>
             <div>
@@ -1189,7 +1196,7 @@ export function ChatPage() {
             visibleConversations.map((conversation) => (
               <div
                 key={conversation.conversationId}
-                className={`group mb-1 flex items-center gap-1 rounded-lg px-2 py-2 ${conversation.conversationId === store.activeId ? "bg-primary/10 text-primary" : "hover:bg-accent"}`}
+                className={`group mb-1 flex items-center gap-1 rounded-xl border px-2 py-2 transition-colors ${conversation.conversationId === store.activeId ? "border-blue-100 bg-blue-50/80 text-primary" : "border-transparent hover:border-blue-100/60 hover:bg-white"}`}
               >
                 {renamingId === conversation.conversationId ? (
                   <Input
@@ -1248,14 +1255,14 @@ export function ChatPage() {
         <div className="border-t px-4 py-3 text-[11px] leading-relaxed text-muted-foreground">
           <div className="flex items-center gap-2">
             <Archive className="h-3.5 w-3.5" />
-            会话自动保存在本机浏览器
+            会话与任务状态会自动保存
           </div>
-          <p className="mt-1">不会同步到服务器，也不会作为投资承诺。</p>
+          <p className="mt-1">刷新后可继续恢复；研究结论不构成收益承诺。</p>
         </div>
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-16 shrink-0 items-center gap-3 border-b px-4 md:px-6">
+        <header className="flex h-16 shrink-0 items-center gap-3 border-b border-white/80 bg-white/60 px-4 backdrop-blur-xl md:px-6">
           <Button
             variant="ghost"
             size="icon"
@@ -1304,7 +1311,7 @@ export function ChatPage() {
           {messages.length === 0 ? (
             <EmptyState onSuggestion={(text) => sendMessage(text)} />
           ) : (
-            <div className="mx-auto max-w-4xl px-3 py-6 md:px-8">
+            <div className="mx-auto max-w-5xl px-3 py-6 md:px-8">
               {messages.map((message, index) => (
                 <ChatMessage
                   key={`${activeConversation.conversationId}-${index}`}
@@ -1335,8 +1342,8 @@ export function ChatPage() {
             </div>
           )}
         </div>
-        <div className="border-t bg-card/80 p-3 md:p-5">
-          <div className="mx-auto max-w-4xl">
+        <div className="border-t border-white/80 bg-white/72 p-3 backdrop-blur-xl md:p-5">
+          <div className="mx-auto max-w-5xl">
             {editingMessageIndex !== null && (
               <div className="mb-2 flex items-center justify-between rounded-lg bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
                 <span>正在编辑最后一条消息，提交后会重新生成回复</span>
@@ -1351,7 +1358,7 @@ export function ChatPage() {
                 </Button>
               </div>
             )}
-            <div className="flex items-end gap-2 rounded-xl border bg-background p-2 shadow-sm">
+            <div className="flex items-end gap-2 rounded-2xl border border-blue-100/80 bg-white/85 p-2 shadow-[0_16px_40px_rgba(8,26,74,0.1)]">
               <div
                 className="hidden max-w-[180px] shrink-0 items-center gap-1.5 border-r pr-2 text-xs sm:flex"
                 title="模型由 LLM_MODEL 环境变量配置"
@@ -1470,22 +1477,31 @@ function EmptyState({
   onSuggestion: (text: string) => void;
 }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center px-4">
-      <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
-        <MessageSquare className="h-7 w-7 text-primary" />
+    <div className="flex h-full flex-col items-center justify-center overflow-y-auto px-4 py-10">
+      <div className="relative">
+        <div className="absolute inset-0 rounded-3xl bg-blue-500/25 blur-2xl" />
+        <div className="relative flex h-16 w-16 items-center justify-center rounded-3xl border border-white bg-gradient-to-br from-cyan-400 via-blue-500 to-violet-500 text-white shadow-xl shadow-blue-500/20">
+          <MessageSquare className="h-7 w-7" />
+        </div>
       </div>
-      <h2 className="mt-4 text-lg font-semibold">今天想研究什么？</h2>
-      <p className="mt-1 text-center text-sm text-muted-foreground">
-        行情、历史、新闻和综合分析都可以直接问
+      <p className="eyebrow mt-6">AI Research Workspace</p>
+      <h2 className="mt-2 text-center text-2xl font-semibold tracking-[-0.035em] text-[#0b1730]">
+        今天想研究什么？
+      </h2>
+      <p className="mt-2 max-w-lg text-center text-sm leading-6 text-muted-foreground">
+        查询结构化行情、核对资讯、比较基金或设计回测。Agent
+        会展示研究计划、数据来源和风险边界。
       </p>
-      <div className="mt-6 grid w-full max-w-xl gap-2 sm:grid-cols-2">
+      <div className="mt-7 grid w-full max-w-2xl gap-2.5 sm:grid-cols-2">
         {SUGGESTIONS.map((suggestion) => (
           <button
             key={suggestion.label}
             onClick={() => onSuggestion(suggestion.text)}
-            className="rounded-xl border bg-card px-4 py-3 text-left text-sm transition-colors hover:border-primary/40 hover:bg-primary/5"
+            className="group rounded-2xl border border-white/90 bg-white/75 px-4 py-3.5 text-left text-sm shadow-[0_10px_30px_rgba(8,26,74,0.05)] backdrop-blur transition-all hover:-translate-y-0.5 hover:border-blue-200 hover:bg-white hover:shadow-[var(--shadow-soft)]"
           >
-            {suggestion.label}
+            <span className="font-medium text-[#172642] group-hover:text-primary">
+              {suggestion.label}
+            </span>
             <span className="mt-1 block text-xs text-muted-foreground">
               {suggestion.text}
             </span>

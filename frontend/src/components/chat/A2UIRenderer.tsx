@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import * as echarts from "echarts";
 import type { EChartsOption } from "echarts";
+import type { ECharts } from "echarts/core";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -47,7 +47,10 @@ export interface A2UIAction {
   context: Record<string, unknown>;
 }
 
-export function createMarkdownSurface(text: string, surfaceId: string): A2UIMessage[] {
+export function createMarkdownSurface(
+  text: string,
+  surfaceId: string,
+): A2UIMessage[] {
   return [
     {
       version: "v0.9",
@@ -60,7 +63,9 @@ export function createMarkdownSurface(text: string, surfaceId: string): A2UIMess
       version: "v0.9",
       updateComponents: {
         surfaceId,
-        components: [{ id: "root", component: "Markdown", text: { path: "/text" } }],
+        components: [
+          { id: "root", component: "Markdown", text: { path: "/text" } },
+        ],
       },
     },
     {
@@ -94,8 +99,8 @@ type Binding = { path: string } | { literalString: string };
 function isBinding(value: unknown): value is Binding {
   return Boolean(
     value &&
-      typeof value === "object" &&
-      ("path" in value || "literalString" in value),
+    typeof value === "object" &&
+    ("path" in value || "literalString" in value),
   );
 }
 
@@ -116,7 +121,11 @@ function getAtPath(value: unknown, path: string, scope?: unknown): unknown {
     }, source);
 }
 
-function resolveValue(value: unknown, model: unknown, scope?: unknown): unknown {
+function resolveValue(
+  value: unknown,
+  model: unknown,
+  scope?: unknown,
+): unknown {
   if (!isBinding(value)) return value;
   if ("literalString" in value) return value.literalString;
   return getAtPath(model, value.path, scope);
@@ -129,7 +138,11 @@ function displayValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function cloneAndSet(root: Record<string, unknown>, path: string, value: unknown) {
+function cloneAndSet(
+  root: Record<string, unknown>,
+  path: string,
+  value: unknown,
+) {
   const next = structuredClone(root);
   const keys = path.replace(/^\//, "").split("/").filter(Boolean);
   if (!keys.length) return (value || {}) as Record<string, unknown>;
@@ -179,9 +192,10 @@ function buildSurfaces(messages: A2UIMessage[]): SurfaceState[] {
         components: new Map<string, A2UIComponent>(),
         model: {},
       };
-      surface.model = update.path && update.path !== "/"
-        ? cloneAndSet(surface.model, update.path, update.value)
-        : ((update.value || {}) as Record<string, unknown>);
+      surface.model =
+        update.path && update.path !== "/"
+          ? cloneAndSet(surface.model, update.path, update.value)
+          : ((update.value || {}) as Record<string, unknown>);
       surfaces.set(update.surfaceId, surface);
     }
     if (message.deleteSurface) surfaces.delete(message.deleteSurface.surfaceId);
@@ -191,11 +205,15 @@ function buildSurfaces(messages: A2UIMessage[]): SurfaceState[] {
 
 export function A2UIRenderer({ messages, onAction }: A2UIRendererProps) {
   const baseSurfaces = useMemo(() => buildSurfaces(messages), [messages]);
-  const [models, setModels] = useState<Record<string, Record<string, unknown>>>({});
+  const [models, setModels] = useState<Record<string, Record<string, unknown>>>(
+    {},
+  );
 
   useEffect(() => {
     setModels(
-      Object.fromEntries(baseSurfaces.map((surface) => [surface.id, surface.model])),
+      Object.fromEntries(
+        baseSurfaces.map((surface) => [surface.id, surface.model]),
+      ),
     );
   }, [baseSurfaces]);
 
@@ -236,7 +254,11 @@ function SurfaceRenderer({
   const root = surface.components.get("root");
   if (!root) return null;
   return (
-    <div className="animate-in fade-in slide-in-from-bottom-1 duration-300" data-a2ui-surface={surface.id} data-a2ui-catalog={surface.catalogId}>
+    <div
+      className="animate-in fade-in slide-in-from-bottom-1 duration-300"
+      data-a2ui-surface={surface.id}
+      data-a2ui-catalog={surface.catalogId}
+    >
       <RenderComponent
         component={root}
         surface={surface}
@@ -279,8 +301,15 @@ function CollapsibleRenderer({
         aria-expanded={expanded}
         onClick={() => setExpanded((current) => !current)}
       >
-        <span className="text-base font-semibold">{String(component.title || "查看详情")}</span>
-        <ChevronDown className={cn("h-5 w-5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-180")} />
+        <span className="text-base font-semibold">
+          {String(component.title || "查看详情")}
+        </span>
+        <ChevronDown
+          className={cn(
+            "h-5 w-5 shrink-0 text-muted-foreground transition-transform",
+            expanded && "rotate-180",
+          )}
+        />
       </button>
       {expanded && (
         <div className="border-t px-4 py-4">
@@ -316,17 +345,31 @@ export function EChart({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
-    const chart = echarts.init(container, undefined, { renderer: "canvas" });
-    chart.setOption(option);
-    const resize = () => chart.resize();
-    window.addEventListener("resize", resize);
+    let cancelled = false;
+    let chart: ECharts | undefined;
+    const resize = () => chart?.resize();
+    void import("@/lib/echarts").then(({ init }) => {
+      if (cancelled) return;
+      chart = init(container, undefined, { renderer: "canvas" });
+      chart.setOption(option);
+      window.addEventListener("resize", resize);
+    });
     return () => {
+      cancelled = true;
       window.removeEventListener("resize", resize);
-      chart.dispose();
+      chart?.dispose();
     };
   }, [option]);
 
-  return <div ref={containerRef} className="w-full" style={{ height }} role="img" aria-label={ariaLabel} />;
+  return (
+    <div
+      ref={containerRef}
+      className="w-full"
+      style={{ height }}
+      role="img"
+      aria-label={ariaLabel}
+    />
+  );
 }
 
 function LineChart({ points }: { points: unknown }) {
@@ -338,34 +381,41 @@ function LineChart({ points }: { points: unknown }) {
       if (!Number.isFinite(value)) return null;
       return { label: String(record.label || ""), value };
     })
-    .filter((point): point is { label: string; value: number } => point !== null);
+    .filter(
+      (point): point is { label: string; value: number } => point !== null,
+    );
 
   if (validPoints.length < 2) {
     return <p className="text-xs text-muted-foreground">暂无足够的走势数据</p>;
   }
 
   const values = validPoints.map((point) => point.value);
-  const option = useMemo<EChartsOption>(() => ({
-    animation: false,
-    tooltip: { trigger: "axis" },
-    grid: { left: 52, right: 20, top: 18, bottom: 42 },
-    xAxis: {
-      type: "category",
-      boundaryGap: false,
-      data: validPoints.map((point) => point.label),
-      axisLabel: { hideOverlap: true },
-    },
-    yAxis: { type: "value", scale: true },
-    series: [{
-      type: "line",
-      data: values,
-      smooth: true,
-      showSymbol: false,
-      lineStyle: { width: 3, color: "#2563eb" },
-      itemStyle: { color: "#2563eb" },
-      areaStyle: { color: "#2563eb", opacity: 0.12 },
-    }],
-  }), [validPoints, values]);
+  const option = useMemo<EChartsOption>(
+    () => ({
+      animation: false,
+      tooltip: { trigger: "axis" },
+      grid: { left: 52, right: 20, top: 18, bottom: 42 },
+      xAxis: {
+        type: "category",
+        boundaryGap: false,
+        data: validPoints.map((point) => point.label),
+        axisLabel: { hideOverlap: true },
+      },
+      yAxis: { type: "value", scale: true },
+      series: [
+        {
+          type: "line",
+          data: values,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 3, color: "#2563eb" },
+          itemStyle: { color: "#2563eb" },
+          areaStyle: { color: "#2563eb", opacity: 0.12 },
+        },
+      ],
+    }),
+    [validPoints, values],
+  );
 
   return (
     <div className="rounded-lg border border-border/70 bg-background/50 p-2">
@@ -379,7 +429,13 @@ function LineChart({ points }: { points: unknown }) {
   );
 }
 
-function MultiLineChart({ series, ariaLabel }: { series: unknown; ariaLabel: string }) {
+function MultiLineChart({
+  series,
+  ariaLabel,
+}: {
+  series: unknown;
+  ariaLabel: string;
+}) {
   const palette = ["#2563eb", "#7c3aed", "#0891b2", "#ea580c"];
   const validSeries = (Array.isArray(series) ? series : [])
     .map((item, seriesIndex) => {
@@ -393,44 +449,58 @@ function MultiLineChart({ series, ariaLabel }: { series: unknown; ariaLabel: str
           if (!Number.isFinite(value)) return null;
           return { label: String(pointRecord.label || ""), value };
         })
-        .filter((point): point is { label: string; value: number } => point !== null);
+        .filter(
+          (point): point is { label: string; value: number } => point !== null,
+        );
       if (points.length < 2) return null;
       return { name: String(record.name || `策略 ${seriesIndex + 1}`), points };
     })
-    .filter((item): item is { name: string; points: Array<{ label: string; value: number }> } => item !== null);
+    .filter(
+      (
+        item,
+      ): item is {
+        name: string;
+        points: Array<{ label: string; value: number }>;
+      } => item !== null,
+    );
 
   const labels = validSeries[0]?.points.map((point) => point.label) || [];
-  const option = useMemo<EChartsOption>(() => ({
-    animation: false,
-    color: palette,
-    tooltip: { trigger: "axis" },
-    legend: {
-      type: "scroll",
-      top: 4,
-      left: 8,
-      right: 8,
-      textStyle: { fontSize: 11 },
-    },
-    grid: { left: 54, right: 20, top: 52, bottom: 44 },
-    xAxis: {
-      type: "category",
-      boundaryGap: false,
-      data: labels,
-      axisLabel: { hideOverlap: true },
-    },
-    yAxis: { type: "value", scale: true },
-    series: validSeries.map((item) => ({
-      name: item.name,
-      type: "line",
-      data: item.points.map((point) => point.value),
-      smooth: false,
-      showSymbol: false,
-      lineStyle: { width: 2 },
-    })),
-  }), [labels, validSeries]);
+  const option = useMemo<EChartsOption>(
+    () => ({
+      animation: false,
+      color: palette,
+      tooltip: { trigger: "axis" },
+      legend: {
+        type: "scroll",
+        top: 4,
+        left: 8,
+        right: 8,
+        textStyle: { fontSize: 11 },
+      },
+      grid: { left: 54, right: 20, top: 52, bottom: 44 },
+      xAxis: {
+        type: "category",
+        boundaryGap: false,
+        data: labels,
+        axisLabel: { hideOverlap: true },
+      },
+      yAxis: { type: "value", scale: true },
+      series: validSeries.map((item) => ({
+        name: item.name,
+        type: "line",
+        data: item.points.map((point) => point.value),
+        smooth: false,
+        showSymbol: false,
+        lineStyle: { width: 2 },
+      })),
+    }),
+    [labels, validSeries],
+  );
 
   if (!validSeries.length) {
-    return <p className="text-xs text-muted-foreground">暂无足够的对比曲线数据</p>;
+    return (
+      <p className="text-xs text-muted-foreground">暂无足够的对比曲线数据</p>
+    );
   }
   return (
     <div className="min-w-0 overflow-hidden rounded-lg border border-border/70 bg-background/50 p-2">
@@ -441,7 +511,8 @@ function MultiLineChart({ series, ariaLabel }: { series: unknown; ariaLabel: str
 
 function safeArtifactUrl(value: unknown, suffix: "preview" | "download") {
   const url = displayValue(value).trim();
-  return /^\/api\/artifacts\/[A-Za-z0-9_-]+\/(preview|download)$/.test(url) && url.endsWith(`/${suffix}`)
+  return /^\/api\/artifacts\/[A-Za-z0-9_-]+\/(preview|download)$/.test(url) &&
+    url.endsWith(`/${suffix}`)
     ? url
     : "";
 }
@@ -511,11 +582,19 @@ function RenderComponent({
       );
     }
     case "Row":
-      return <div className="flex flex-wrap items-center gap-3">{renderChildren()}</div>;
+      return (
+        <div className="flex flex-wrap items-center gap-3">
+          {renderChildren()}
+        </div>
+      );
     case "Column":
       return <div className="flex flex-col gap-2">{renderChildren()}</div>;
     case "Card":
-      return <div className="rounded-xl border bg-card p-4 shadow-sm"><div className="space-y-3">{renderChildren()}</div></div>;
+      return (
+        <div className="rounded-xl border bg-card p-4 shadow-sm">
+          <div className="space-y-3">{renderChildren()}</div>
+        </div>
+      );
     case "Collapsible":
       return (
         <CollapsibleRenderer
@@ -529,20 +608,59 @@ function RenderComponent({
     case "Section":
       return (
         <section className="rounded-lg border border-border/70 bg-background/40 p-3">
-          {Boolean(component.title) && <h4 className="mb-2 text-xs font-semibold text-muted-foreground">{String(component.title)}</h4>}
+          {Boolean(component.title) && (
+            <h4 className="mb-2 text-xs font-semibold text-muted-foreground">
+              {String(component.title)}
+            </h4>
+          )}
           <div className="space-y-2">{renderChildren()}</div>
         </section>
       );
     case "Badge": {
       const tone = String(resolve(component.tone) || "secondary");
-      const variant = tone === "sell" || tone === "strong_sell" ? "destructive" : tone === "buy" || tone === "strong_buy" ? "success" : "secondary";
-      return <Badge variant={variant}>{displayValue(resolve(component.text))}</Badge>;
+      const variant =
+        tone === "sell" || tone === "strong_sell"
+          ? "destructive"
+          : tone === "buy" || tone === "strong_buy"
+            ? "success"
+            : "secondary";
+      return (
+        <Badge variant={variant}>{displayValue(resolve(component.text))}</Badge>
+      );
     }
     case "Progress":
-      return <div className="h-2 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.max(0, Math.min(100, Number(resolve(component.value) || 0)))}%` }} /></div>;
+      return (
+        <div className="h-2 overflow-hidden rounded-full bg-muted">
+          <div
+            className="h-full rounded-full bg-primary transition-all"
+            style={{
+              width: `${Math.max(0, Math.min(100, Number(resolve(component.value) || 0)))}%`,
+            }}
+          />
+        </div>
+      );
     case "ScoreBar": {
       const value = Number(resolve(component.value) || 0);
-      return <div className="space-y-1"><div className="flex justify-between text-xs"><span>{String(component.label || "")}</span><span>{value >= 0 ? "+" : ""}{value.toFixed(0)}</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className={cn("h-full rounded-full", value >= 0 ? "bg-primary" : "bg-destructive")} style={{ width: `${Math.min(100, Math.abs(value))}%` }} /></div></div>;
+      return (
+        <div className="space-y-1">
+          <div className="flex justify-between text-xs">
+            <span>{String(component.label || "")}</span>
+            <span>
+              {value >= 0 ? "+" : ""}
+              {value.toFixed(0)}
+            </span>
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+            <div
+              className={cn(
+                "h-full rounded-full",
+                value >= 0 ? "bg-primary" : "bg-destructive",
+              )}
+              style={{ width: `${Math.min(100, Math.abs(value))}%` }}
+            />
+          </div>
+        </div>
+      );
     }
     case "PipelineStep": {
       const status = String(component.status || "pending");
@@ -558,18 +676,91 @@ function RenderComponent({
             : status === "running"
               ? "border-primary bg-primary/10 text-primary"
               : "border-border text-muted-foreground";
-      const icon = completed ? "✓" : failed ? "×" : skipped ? "–" : status === "running" ? "•" : "○";
+      const icon = completed
+        ? "✓"
+        : failed
+          ? "×"
+          : skipped
+            ? "–"
+            : status === "running"
+              ? "•"
+              : "○";
       const detail = String(component.detail || "");
-      return <div className="flex items-start gap-2 text-xs"><span className={cn("flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-[10px]", statusClass)}>{icon}</span><span className="min-w-0"><span className="block">{String(component.label || "")}</span>{detail && <span className={cn("mt-0.5 block text-[11px]", failed ? "text-destructive" : "text-muted-foreground")}>{detail}</span>}</span></div>;
+      return (
+        <div className="flex items-start gap-2 text-xs">
+          <span
+            className={cn(
+              "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-[10px]",
+              statusClass,
+            )}
+          >
+            {icon}
+          </span>
+          <span className="min-w-0">
+            <span className="block">{String(component.label || "")}</span>
+            {detail && (
+              <span
+                className={cn(
+                  "mt-0.5 block text-[11px]",
+                  failed ? "text-destructive" : "text-muted-foreground",
+                )}
+              >
+                {detail}
+              </span>
+            )}
+          </span>
+        </div>
+      );
     }
     case "List": {
       const items = resolve(component.items);
       if (!Array.isArray(items)) return null;
-      const template = component.itemTemplate ? surface.components.get(String(component.itemTemplate)) : undefined;
-      return <div className="space-y-1">{Boolean(component.title) && <p className="text-xs font-medium text-muted-foreground">{String(component.title)}</p>}{items.map((item, index) => template ? <RenderComponent key={index} component={template} surface={surface} scope={item} onModelChange={onModelChange} onAction={onAction} /> : <div key={index} className="rounded-md bg-muted/50 px-2 py-1 text-xs">{displayValue(item)}</div>)}</div>;
+      const template = component.itemTemplate
+        ? surface.components.get(String(component.itemTemplate))
+        : undefined;
+      return (
+        <div className="space-y-1">
+          {Boolean(component.title) && (
+            <p className="text-xs font-medium text-muted-foreground">
+              {String(component.title)}
+            </p>
+          )}
+          {items.map((item, index) =>
+            template ? (
+              <RenderComponent
+                key={index}
+                component={template}
+                surface={surface}
+                scope={item}
+                onModelChange={onModelChange}
+                onAction={onAction}
+              />
+            ) : (
+              <div
+                key={index}
+                className="rounded-md bg-muted/50 px-2 py-1 text-xs"
+              >
+                {displayValue(item)}
+              </div>
+            ),
+          )}
+        </div>
+      );
     }
     case "StrategyItem":
-      return <div className="rounded-lg border px-3 py-2"><div className="flex items-center justify-between text-sm font-medium"><span>{displayValue(resolve(component.name))}</span>{Boolean(resolve(component.active)) && <Badge variant="success">启用</Badge>}</div><p className="mt-1 text-xs text-muted-foreground">{displayValue(resolve(component.description))}</p></div>;
+      return (
+        <div className="rounded-lg border px-3 py-2">
+          <div className="flex items-center justify-between text-sm font-medium">
+            <span>{displayValue(resolve(component.name))}</span>
+            {Boolean(resolve(component.active)) && (
+              <Badge variant="success">启用</Badge>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {displayValue(resolve(component.description))}
+          </p>
+        </div>
+      );
     case "SearchResultItem": {
       const link = displayValue(resolve(component.link)).trim();
       const title = displayValue(resolve(component.title)) || link;
@@ -591,25 +782,68 @@ function RenderComponent({
           ) : (
             <p className="text-sm font-medium">{title}</p>
           )}
-          {(source || date) && <p className="mt-1 text-xs text-muted-foreground">{[source, date].filter(Boolean).join(" · ")}</p>}
-          {snippet && <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{snippet}</p>}
+          {(source || date) && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {[source, date].filter(Boolean).join(" · ")}
+            </p>
+          )}
+          {snippet && (
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              {snippet}
+            </p>
+          )}
         </article>
       );
     }
     case "StatusItem": {
       const status = displayValue(resolve(component.status));
-      return <div className="flex items-center justify-between rounded-md bg-muted/50 px-2 py-1 text-xs"><span>{displayValue(resolve(component.label))}</span><Badge variant={status === "closed" ? "success" : status === "open" ? "destructive" : "warning"}>{status}</Badge></div>;
+      return (
+        <div className="flex items-center justify-between rounded-md bg-muted/50 px-2 py-1 text-xs">
+          <span>{displayValue(resolve(component.label))}</span>
+          <Badge
+            variant={
+              status === "closed"
+                ? "success"
+                : status === "open"
+                  ? "destructive"
+                  : "warning"
+            }
+          >
+            {status}
+          </Badge>
+        </div>
+      );
     }
     case "Sparkline": {
       const values = (resolve(component.values) as number[]) || [];
-      if (values.length < 2) return <p className="text-xs text-muted-foreground">暂无走势数据</p>;
-      return <EChart option={{
-        animation: false,
-        grid: { left: 4, right: 4, top: 4, bottom: 4 },
-        xAxis: { type: "category", show: false, data: values.map((_, index) => index) },
-        yAxis: { type: "value", show: false, scale: true },
-        series: [{ type: "line", data: values, smooth: true, showSymbol: false, lineStyle: { width: 2, color: "#2563eb" }, areaStyle: { color: "#2563eb", opacity: 0.1 } }],
-      }} height={80} ariaLabel="近期走势" />;
+      if (values.length < 2)
+        return <p className="text-xs text-muted-foreground">暂无走势数据</p>;
+      return (
+        <EChart
+          option={{
+            animation: false,
+            grid: { left: 4, right: 4, top: 4, bottom: 4 },
+            xAxis: {
+              type: "category",
+              show: false,
+              data: values.map((_, index) => index),
+            },
+            yAxis: { type: "value", show: false, scale: true },
+            series: [
+              {
+                type: "line",
+                data: values,
+                smooth: true,
+                showSymbol: false,
+                lineStyle: { width: 2, color: "#2563eb" },
+                areaStyle: { color: "#2563eb", opacity: 0.1 },
+              },
+            ],
+          }}
+          height={80}
+          ariaLabel="近期走势"
+        />
+      );
     }
     case "LineChart":
       return <LineChart points={resolve(component.points)} />;
@@ -617,29 +851,54 @@ function RenderComponent({
       return (
         <MultiLineChart
           series={resolve(component.series)}
-          ariaLabel={displayValue(resolve(component.ariaLabel)) || "多策略对比曲线"}
+          ariaLabel={
+            displayValue(resolve(component.ariaLabel)) || "多策略对比曲线"
+          }
         />
       );
     case "ArtifactLink": {
-      const previewUrl = safeArtifactUrl(resolve(component.previewUrl), "preview");
-      const downloadUrl = safeArtifactUrl(resolve(component.downloadUrl), "download");
+      const previewUrl = safeArtifactUrl(
+        resolve(component.previewUrl),
+        "preview",
+      );
+      const downloadUrl = safeArtifactUrl(
+        resolve(component.downloadUrl),
+        "download",
+      );
       const size = Number(resolve(component.size) || 0);
       const name = displayValue(resolve(component.name)) || "研究成果";
       return (
         <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-border/70 bg-background/50 px-3 py-2 text-xs">
-          <span className="min-w-0 flex-1 truncate font-medium" title={name}>{name}</span>
-          {size > 0 && <span className="text-muted-foreground">{(size / 1024).toFixed(1)} KB</span>}
+          <span className="min-w-0 flex-1 truncate font-medium" title={name}>
+            {name}
+          </span>
+          {size > 0 && (
+            <span className="text-muted-foreground">
+              {(size / 1024).toFixed(1)} KB
+            </span>
+          )}
           {previewUrl && (
-            <a className="rounded-md border px-2 py-1 text-primary hover:bg-muted" href={previewUrl} target="_blank" rel="noreferrer">
+            <a
+              className="rounded-md border px-2 py-1 text-primary hover:bg-muted"
+              href={previewUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
               预览
             </a>
           )}
           {downloadUrl && (
-            <a className="rounded-md bg-primary px-2 py-1 text-primary-foreground hover:opacity-90" href={downloadUrl} download>
+            <a
+              className="rounded-md bg-primary px-2 py-1 text-primary-foreground hover:opacity-90"
+              href={downloadUrl}
+              download
+            >
               下载
             </a>
           )}
-          {!previewUrl && !downloadUrl && <span className="text-destructive">链接无效</span>}
+          {!previewUrl && !downloadUrl && (
+            <span className="text-destructive">链接无效</span>
+          )}
         </div>
       );
     }
@@ -647,36 +906,159 @@ function RenderComponent({
       const status = displayValue(resolve(component.status));
       const error = displayValue(resolve(component.error));
       const failed = status === "failed";
-      return <div className={cn("flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs", failed ? "border-destructive/50 bg-destructive/5 text-destructive" : "border-border/70 bg-background/40 text-muted-foreground")} title={error || undefined}><span className={cn("h-2 w-2 rounded-full", status === "completed" ? "bg-green-500" : failed ? "bg-destructive" : "animate-pulse bg-primary")} /><span>已调用数据工具：{displayValue(resolve(component.name))}</span><span className="ml-auto">{status === "completed" ? "完成" : status === "running" ? "执行中" : status}</span>{error && <span className="basis-full pl-4">原因：{error}</span>}</div>;
+      return (
+        <div
+          className={cn(
+            "flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs",
+            failed
+              ? "border-destructive/50 bg-destructive/5 text-destructive"
+              : "border-border/70 bg-background/40 text-muted-foreground",
+          )}
+          title={error || undefined}
+        >
+          <span
+            className={cn(
+              "h-2 w-2 rounded-full",
+              status === "completed"
+                ? "bg-green-500"
+                : failed
+                  ? "bg-destructive"
+                  : "animate-pulse bg-primary",
+            )}
+          />
+          <span>已调用数据工具：{displayValue(resolve(component.name))}</span>
+          <span className="ml-auto">
+            {status === "completed"
+              ? "完成"
+              : status === "running"
+                ? "执行中"
+                : status}
+          </span>
+          {error && <span className="basis-full pl-4">原因：{error}</span>}
+        </div>
+      );
     }
     case "DataTable": {
       const rows = resolve(component.rows);
-      const columns = Array.isArray(component.columns) ? component.columns as Array<{ key: string; label: string }> : [];
+      const columns = Array.isArray(component.columns)
+        ? (component.columns as Array<{ key: string; label: string }>)
+        : [];
       if (!Array.isArray(rows)) return null;
-      return <div className="overflow-x-auto rounded-lg border"><table className="w-full min-w-[560px] text-left text-xs"><thead className="bg-muted/60 text-muted-foreground"><tr>{columns.map((column) => <th key={column.key} className="whitespace-nowrap px-3 py-2 font-medium">{column.label}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={index} className="border-t border-border/70">{columns.map((column) => <td key={column.key} className="whitespace-nowrap px-3 py-2">{displayValue((row as Record<string, unknown>)[column.key])}</td>)}</tr>)}</tbody></table></div>;
+      return (
+        <div className="overflow-x-auto rounded-lg border">
+          <table className="w-full min-w-[560px] text-left text-xs">
+            <thead className="bg-muted/60 text-muted-foreground">
+              <tr>
+                {columns.map((column) => (
+                  <th
+                    key={column.key}
+                    className="whitespace-nowrap px-3 py-2 font-medium"
+                  >
+                    {column.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={index} className="border-t border-border/70">
+                  {columns.map((column) => (
+                    <td
+                      key={column.key}
+                      className="whitespace-nowrap px-3 py-2"
+                    >
+                      {displayValue(
+                        (row as Record<string, unknown>)[column.key],
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
     }
     case "Button": {
-      const event = (component.action as { event?: { name?: string; context?: Record<string, unknown> } } | undefined)?.event;
-      return <Button onClick={() => event?.name && onAction?.({ name: event.name, surfaceId: surface.id, context: resolveContext(event.context || {}, surface.model) })}>{component.text ? displayValue(resolve(component.text)) : children.map((child) => <RenderComponent key={child.id} component={child} surface={surface} scope={scope} onModelChange={onModelChange} onAction={onAction} />)}</Button>;
+      const event = (
+        component.action as
+          | { event?: { name?: string; context?: Record<string, unknown> } }
+          | undefined
+      )?.event;
+      return (
+        <Button
+          onClick={() =>
+            event?.name &&
+            onAction?.({
+              name: event.name,
+              surfaceId: surface.id,
+              context: resolveContext(event.context || {}, surface.model),
+            })
+          }
+        >
+          {component.text
+            ? displayValue(resolve(component.text))
+            : children.map((child) => (
+                <RenderComponent
+                  key={child.id}
+                  component={child}
+                  surface={surface}
+                  scope={scope}
+                  onModelChange={onModelChange}
+                  onAction={onAction}
+                />
+              ))}
+        </Button>
+      );
     }
     case "TextField": {
       const binding = component.value as Binding | undefined;
       const path = binding && "path" in binding ? binding.path : "";
-      return <Input aria-label={String(component.label || "")} placeholder={String(component.label || "")} value={displayValue(resolve(component.value))} onChange={(event) => path && onModelChange(path, event.target.value)} />;
+      return (
+        <Input
+          aria-label={String(component.label || "")}
+          placeholder={String(component.label || "")}
+          value={displayValue(resolve(component.value))}
+          onChange={(event) => path && onModelChange(path, event.target.value)}
+        />
+      );
     }
     case "ChoicePicker": {
       const binding = component.value as Binding | undefined;
       const path = binding && "path" in binding ? binding.path : "";
-      const options = Array.isArray(component.options) ? component.options as Array<{ label: string; value: string }> : [];
-      return <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={displayValue(resolve(component.value))} onChange={(event) => path && onModelChange(path, event.target.value)}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
+      const options = Array.isArray(component.options)
+        ? (component.options as Array<{ label: string; value: string }>)
+        : [];
+      return (
+        <select
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+          value={displayValue(resolve(component.value))}
+          onChange={(event) => path && onModelChange(path, event.target.value)}
+        >
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      );
     }
     default:
-      return <div className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">暂不支持的 A2UI 组件：{component.component}</div>;
+      return (
+        <div className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+          暂不支持的 A2UI 组件：{component.component}
+        </div>
+      );
   }
 }
 
 function resolveContext(context: Record<string, unknown>, model: unknown) {
-  return Object.fromEntries(Object.entries(context).map(([key, value]) => [key, resolveValue(value, model)]));
+  return Object.fromEntries(
+    Object.entries(context).map(([key, value]) => [
+      key,
+      resolveValue(value, model),
+    ]),
+  );
 }
 
 function MarkdownContent({ text }: { text: string }) {
@@ -692,12 +1074,23 @@ function MarkdownContent({ text }: { text: string }) {
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       const level = heading[1].length;
-      const className = level <= 2 ? "mt-3 text-base font-semibold" : "mt-2 text-sm font-semibold";
-      blocks.push(<div key={index} className={className}>{inlineMarkdown(heading[2])}</div>);
+      const className =
+        level <= 2
+          ? "mt-3 text-base font-semibold"
+          : "mt-2 text-sm font-semibold";
+      blocks.push(
+        <div key={index} className={className}>
+          {inlineMarkdown(heading[2])}
+        </div>,
+      );
       index += 1;
       continue;
     }
-    if (/^\s*\|/.test(line) && index + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[index + 1])) {
+    if (
+      /^\s*\|/.test(line) &&
+      index + 1 < lines.length &&
+      /^\s*\|?\s*:?-{3,}/.test(lines[index + 1])
+    ) {
       const tableLines: string[] = [line];
       index += 2;
       while (index < lines.length && /^\s*\|/.test(lines[index])) {
@@ -713,7 +1106,13 @@ function MarkdownContent({ text }: { text: string }) {
         items.push(lines[index].replace(/^\s*[-*]\s+/, ""));
         index += 1;
       }
-      blocks.push(<ul key={`ul-${index}`} className="ml-4 list-disc space-y-1 text-sm">{items.map((item, itemIndex) => <li key={itemIndex}>{inlineMarkdown(item)}</li>)}</ul>);
+      blocks.push(
+        <ul key={`ul-${index}`} className="ml-4 list-disc space-y-1 text-sm">
+          {items.map((item, itemIndex) => (
+            <li key={itemIndex}>{inlineMarkdown(item)}</li>
+          ))}
+        </ul>,
+      );
       continue;
     }
     if (/^\s*\d+\.\s+/.test(line)) {
@@ -722,28 +1121,78 @@ function MarkdownContent({ text }: { text: string }) {
         items.push(lines[index].replace(/^\s*\d+\.\s+/, ""));
         index += 1;
       }
-      blocks.push(<ol key={`ol-${index}`} className="ml-4 list-decimal space-y-1 text-sm">{items.map((item, itemIndex) => <li key={itemIndex}>{inlineMarkdown(item)}</li>)}</ol>);
+      blocks.push(
+        <ol key={`ol-${index}`} className="ml-4 list-decimal space-y-1 text-sm">
+          {items.map((item, itemIndex) => (
+            <li key={itemIndex}>{inlineMarkdown(item)}</li>
+          ))}
+        </ol>,
+      );
       continue;
     }
     const paragraph: string[] = [line];
     index += 1;
-    while (index < lines.length && lines[index].trim() && !/^(#{1,6})\s|^\s*[-*]\s+|^\s*\d+\.\s+|^\s*\|/.test(lines[index])) {
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !/^(#{1,6})\s|^\s*[-*]\s+|^\s*\d+\.\s+|^\s*\|/.test(lines[index])
+    ) {
       paragraph.push(lines[index]);
       index += 1;
     }
-    blocks.push(<p key={`p-${index}`} className="whitespace-pre-wrap text-sm leading-relaxed">{inlineMarkdown(paragraph.join("\n"))}</p>);
+    blocks.push(
+      <p
+        key={`p-${index}`}
+        className="whitespace-pre-wrap text-sm leading-relaxed"
+      >
+        {inlineMarkdown(paragraph.join("\n"))}
+      </p>,
+    );
   }
   return <div className="space-y-3">{blocks}</div>;
 }
 
 function MarkdownTable({ lines }: { lines: string[] }) {
-  const cells = (line: string) => line.split("|").slice(1, -1).map((cell) => cell.trim());
+  const cells = (line: string) =>
+    line
+      .split("|")
+      .slice(1, -1)
+      .map((cell) => cell.trim());
   const headers = cells(lines[0]);
-  return <div className="overflow-x-auto rounded-lg border"><table className="w-full text-left text-xs"><thead className="bg-muted/60"><tr>{headers.map((header, index) => <th key={index} className="whitespace-nowrap px-3 py-2 font-medium">{inlineMarkdown(header)}</th>)}</tr></thead><tbody>{lines.slice(1).map((line, rowIndex) => <tr key={rowIndex} className="border-t border-border/70">{cells(line).map((cell, cellIndex) => <td key={cellIndex} className="whitespace-nowrap px-3 py-2">{inlineMarkdown(cell)}</td>)}</tr>)}</tbody></table></div>;
+  return (
+    <div className="overflow-x-auto rounded-lg border">
+      <table className="w-full text-left text-xs">
+        <thead className="bg-muted/60">
+          <tr>
+            {headers.map((header, index) => (
+              <th
+                key={index}
+                className="whitespace-nowrap px-3 py-2 font-medium"
+              >
+                {inlineMarkdown(header)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {lines.slice(1).map((line, rowIndex) => (
+            <tr key={rowIndex} className="border-t border-border/70">
+              {cells(line).map((cell, cellIndex) => (
+                <td key={cellIndex} className="whitespace-nowrap px-3 py-2">
+                  {inlineMarkdown(cell)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function inlineMarkdown(text: string): ReactNode {
-  const linkPattern = /(\[[^\]\n]+\]\((https?:\/\/[^)\s]+)\)|https?:\/\/[^\s<]+)/g;
+  const linkPattern =
+    /(\[[^\]\n]+\]\((https?:\/\/[^)\s]+)\)|https?:\/\/[^\s<]+)/g;
   const nodes: ReactNode[] = [];
   let cursor = 0;
   let match: RegExpExecArray | null;
@@ -787,8 +1236,14 @@ function inlineMarkdown(text: string): ReactNode {
 function inlineMarkdownTokens(text: string, keyOffset: number): ReactNode[] {
   return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, index) => {
     const key = keyOffset + index;
-    if (part.startsWith("**") && part.endsWith("**")) return <strong key={key}>{part.slice(2, -2)}</strong>;
-    if (part.startsWith("`") && part.endsWith("`")) return <code key={key} className="rounded bg-muted px-1">{part.slice(1, -1)}</code>;
+    if (part.startsWith("**") && part.endsWith("**"))
+      return <strong key={key}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith("`") && part.endsWith("`"))
+      return (
+        <code key={key} className="rounded bg-muted px-1">
+          {part.slice(1, -1)}
+        </code>
+      );
     return <span key={key}>{part}</span>;
   });
 }

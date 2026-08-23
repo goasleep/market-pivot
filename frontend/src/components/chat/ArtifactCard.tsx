@@ -68,7 +68,11 @@ function parseCsv(text: string): string[][] {
     row.push(cell);
     rows.push(row);
   }
-  while (rows.length > 1 && rows[rows.length - 1]?.length === 1 && rows[rows.length - 1]?.[0] === "") {
+  while (
+    rows.length > 1 &&
+    rows[rows.length - 1]?.length === 1 &&
+    rows[rows.length - 1]?.[0] === ""
+  ) {
     rows.pop();
   }
   return rows;
@@ -87,7 +91,7 @@ type ChartPoint = { label: string; value: number };
 
 function asObject(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as JsonObject
+    ? (value as JsonObject)
     : null;
 }
 
@@ -98,7 +102,9 @@ function numberValue(value: unknown): number | null {
 
 function formatMetric(value: unknown, digits = 2) {
   const number = numberValue(value);
-  return number === null ? "暂无" : number.toLocaleString("zh-CN", { maximumFractionDigits: digits });
+  return number === null
+    ? "暂无"
+    : number.toLocaleString("zh-CN", { maximumFractionDigits: digits });
 }
 
 function formatPercent(value: unknown) {
@@ -108,53 +114,80 @@ function formatPercent(value: unknown) {
 
 function equityPoints(result: JsonObject): ChartPoint[] {
   if (!Array.isArray(result.equity_curve)) return [];
-  return result.equity_curve.flatMap((item, index) => {
-    const point = asObject(item);
-    const value = numberValue(point?.value);
-    return value === null ? [] : [{ label: String(point?.date || index), value }];
-  }).slice(-250);
+  return result.equity_curve
+    .flatMap((item, index) => {
+      const point = asObject(item);
+      const value = numberValue(point?.value);
+      return value === null
+        ? []
+        : [{ label: String(point?.date || index), value }];
+    })
+    .slice(-250);
 }
 
-function ExperimentJsonPreview({ document, result, points }: { document: JsonObject; result: JsonObject; points: ChartPoint[] }) {
+function ExperimentJsonPreview({
+  document,
+  result,
+  points,
+}: {
+  document: JsonObject;
+  result: JsonObject;
+  points: ChartPoint[];
+}) {
   const trades = Array.isArray(result.trades)
-    ? result.trades.map(asObject).filter((item): item is JsonObject => Boolean(item))
+    ? result.trades
+        .map(asObject)
+        .filter((item): item is JsonObject => Boolean(item))
     : [];
   const { equityOption, drawdownOption } = useMemo(() => {
     const labels = points.map((point) => point.label);
     const values = points.map((point) => point.value);
-    const valueByDate = new Map(points.map((point) => [point.label, point.value]));
+    const valueByDate = new Map(
+      points.map((point) => [point.label, point.value]),
+    );
     const tradeMarkers = trades.flatMap((trade) => {
       const date = String(trade.date || "");
       const value = valueByDate.get(date);
       if (value === undefined) return [];
       const isBuy = String(trade.action || "").toLowerCase() === "buy";
-      return [{
-        name: isBuy ? "买入" : "卖出",
-        coord: [date, value],
-        value: isBuy ? "买" : "卖",
-        itemStyle: { color: isBuy ? "#16a34a" : "#dc2626" },
-      }];
+      return [
+        {
+          name: isBuy ? "买入" : "卖出",
+          coord: [date, value],
+          value: isBuy ? "买" : "卖",
+          itemStyle: { color: isBuy ? "#16a34a" : "#dc2626" },
+        },
+      ];
     });
     const equityOption: EChartsOption = {
       animation: false,
       tooltip: { trigger: "axis" },
       grid: { left: 58, right: 20, top: 24, bottom: 42 },
-      xAxis: { type: "category", boundaryGap: false, data: labels, axisLabel: { hideOverlap: true } },
+      xAxis: {
+        type: "category",
+        boundaryGap: false,
+        data: labels,
+        axisLabel: { hideOverlap: true },
+      },
       yAxis: { type: "value", scale: true },
-      series: [{
-        type: "line",
-        data: values,
-        smooth: true,
-        showSymbol: false,
-        lineStyle: { width: 3, color: "#2563eb" },
-        areaStyle: { color: "#2563eb", opacity: 0.12 },
-        markPoint: tradeMarkers.length ? {
-          symbol: "pin",
-          symbolSize: 42,
-          data: tradeMarkers,
-          label: { color: "#fff", fontSize: 11 },
-        } : undefined,
-      }],
+      series: [
+        {
+          type: "line",
+          data: values,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 3, color: "#2563eb" },
+          areaStyle: { color: "#2563eb", opacity: 0.12 },
+          markPoint: tradeMarkers.length
+            ? {
+                symbol: "pin",
+                symbolSize: 42,
+                data: tradeMarkers,
+                label: { color: "#fff", fontSize: 11 },
+              }
+            : undefined,
+        },
+      ],
     };
     let peak = 0;
     const drawdowns = values.map((value) => {
@@ -163,30 +196,47 @@ function ExperimentJsonPreview({ document, result, points }: { document: JsonObj
     });
     const drawdownOption: EChartsOption = {
       animation: false,
-      tooltip: { trigger: "axis", valueFormatter: (value) => `${Number(value).toFixed(2)}%` },
+      tooltip: {
+        trigger: "axis",
+        valueFormatter: (value) => `${Number(value).toFixed(2)}%`,
+      },
       grid: { left: 58, right: 20, top: 24, bottom: 42 },
-      xAxis: { type: "category", boundaryGap: false, data: labels, axisLabel: { hideOverlap: true } },
+      xAxis: {
+        type: "category",
+        boundaryGap: false,
+        data: labels,
+        axisLabel: { hideOverlap: true },
+      },
       yAxis: { type: "value", max: 0, axisLabel: { formatter: "{value}%" } },
-      series: [{
-        type: "line",
-        data: drawdowns,
-        smooth: true,
-        showSymbol: false,
-        lineStyle: { width: 2, color: "#dc2626" },
-        areaStyle: { color: "#dc2626", opacity: 0.1 },
-      }],
+      series: [
+        {
+          type: "line",
+          data: drawdowns,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 2, color: "#dc2626" },
+          areaStyle: { color: "#dc2626", opacity: 0.1 },
+        },
+      ],
     };
     return { equityOption, drawdownOption };
   }, [points, trades]);
 
-  const ticker = String(result.ticker || (Array.isArray(result.tickers) ? result.tickers.join(", ") : "实验组合"));
+  const ticker = String(
+    result.ticker ||
+      (Array.isArray(result.tickers) ? result.tickers.join(", ") : "实验组合"),
+  );
   const strategy = asObject(document.strategy_spec);
   return (
     <div className="space-y-4 bg-background p-4">
       <div>
-        <div className="text-sm font-semibold">实验结果 · {String(strategy?.name || "未命名策略")}</div>
+        <div className="text-sm font-semibold">
+          实验结果 · {String(strategy?.name || "未命名策略")}
+        </div>
         <div className="mt-1 text-xs text-muted-foreground">
-          {ticker} · {String(result.start_date || "")} 至 {String(result.end_date || "")} · {String(document.experiment_id || "")}
+          {ticker} · {String(result.start_date || "")} 至{" "}
+          {String(result.end_date || "")} ·{" "}
+          {String(document.experiment_id || "")}
         </div>
       </div>
       <div className="grid gap-2 sm:grid-cols-5">
@@ -199,21 +249,31 @@ function ExperimentJsonPreview({ document, result, points }: { document: JsonObj
         ].map(([label, value]) => (
           <div key={label} className="rounded-lg border bg-card px-3 py-2">
             <div className="text-[11px] text-muted-foreground">{label}</div>
-            <div className="mt-1 text-sm font-semibold tabular-nums">{value}</div>
+            <div className="mt-1 text-sm font-semibold tabular-nums">
+              {value}
+            </div>
           </div>
         ))}
       </div>
       <div className="rounded-lg border bg-card p-2">
-        <div className="px-2 pt-1 text-xs font-medium text-muted-foreground">回测资产曲线（标记买入/卖出）</div>
+        <div className="px-2 pt-1 text-xs font-medium text-muted-foreground">
+          回测资产曲线（标记买入/卖出）
+        </div>
         <EChart option={equityOption} height={280} ariaLabel="回测资产曲线" />
       </div>
       <div className="rounded-lg border bg-card p-2">
-        <div className="px-2 pt-1 text-xs font-medium text-muted-foreground">回撤曲线</div>
+        <div className="px-2 pt-1 text-xs font-medium text-muted-foreground">
+          回撤曲线
+        </div>
         <EChart option={drawdownOption} height={230} ariaLabel="回测回撤曲线" />
       </div>
       <details className="rounded-lg border bg-card">
-        <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground">查看原始 JSON</summary>
-        <pre className="max-h-72 overflow-auto border-t p-3 text-[11px] leading-relaxed">{JSON.stringify(document, null, 2)}</pre>
+        <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground">
+          查看原始 JSON
+        </summary>
+        <pre className="max-h-72 overflow-auto border-t p-3 text-[11px] leading-relaxed">
+          {JSON.stringify(document, null, 2)}
+        </pre>
       </details>
     </div>
   );
@@ -230,11 +290,22 @@ function JsonArtifactPreview({ content }: { content: string }) {
   const document = asObject(parsed.value);
   const result = asObject(document?.result);
   const points = result ? equityPoints(result) : [];
-  if (parsed.error) return <div className="p-5 text-sm text-destructive">{parsed.error}</div>;
+  if (parsed.error)
+    return <div className="p-5 text-sm text-destructive">{parsed.error}</div>;
   if (document && result && document.experiment_id && points.length >= 2) {
-    return <ExperimentJsonPreview document={document} result={result} points={points} />;
+    return (
+      <ExperimentJsonPreview
+        document={document}
+        result={result}
+        points={points}
+      />
+    );
   }
-  return <pre className="h-full overflow-auto whitespace-pre-wrap bg-background p-5 text-xs leading-relaxed">{JSON.stringify(parsed.value, null, 2)}</pre>;
+  return (
+    <pre className="h-full overflow-auto whitespace-pre-wrap bg-background p-5 text-xs leading-relaxed">
+      {JSON.stringify(parsed.value, null, 2)}
+    </pre>
+  );
 }
 
 function TextArtifactPreview({ artifact }: { artifact: Artifact }) {
@@ -254,7 +325,8 @@ function TextArtifactPreview({ artifact }: { artifact: Artifact }) {
       })
       .then((text) => setContent(text.replace(/^\uFEFF/, "")))
       .catch((reason: unknown) => {
-        if (reason instanceof DOMException && reason.name === "AbortError") return;
+        if (reason instanceof DOMException && reason.name === "AbortError")
+          return;
         setError("文件内容加载失败，请尝试下载文件。");
       });
 
@@ -262,7 +334,11 @@ function TextArtifactPreview({ artifact }: { artifact: Artifact }) {
   }, [artifact.preview_url]);
 
   if (error) {
-    return <div className="flex h-full items-center justify-center p-6 text-sm text-destructive">{error}</div>;
+    return (
+      <div className="flex h-full items-center justify-center p-6 text-sm text-destructive">
+        {error}
+      </div>
+    );
   }
   if (content === null) {
     return (
@@ -275,7 +351,12 @@ function TextArtifactPreview({ artifact }: { artifact: Artifact }) {
   if (isMarkdown) {
     return (
       <div className="h-full overflow-auto bg-background p-5">
-        <A2UIRenderer messages={createMarkdownSurface(content, `artifact-${artifact.artifact_id}`)} />
+        <A2UIRenderer
+          messages={createMarkdownSurface(
+            content,
+            `artifact-${artifact.artifact_id}`,
+          )}
+        />
       </div>
     );
   }
@@ -287,20 +368,26 @@ function TextArtifactPreview({ artifact }: { artifact: Artifact }) {
   const headers = rows[0] || [];
   const dataRows = rows.slice(1);
   if (!headers.length) {
-    return <div className="p-5 text-sm text-muted-foreground">CSV 文件为空。</div>;
+    return (
+      <div className="p-5 text-sm text-muted-foreground">CSV 文件为空。</div>
+    );
   }
 
   return (
     <div className="h-full overflow-auto bg-background p-4">
       <div className="mb-3 text-xs text-muted-foreground">
-        {dataRows.length.toLocaleString("zh-CN")} 行 · {headers.length.toLocaleString("zh-CN")} 列
+        {dataRows.length.toLocaleString("zh-CN")} 行 ·{" "}
+        {headers.length.toLocaleString("zh-CN")} 列
       </div>
       <div className="overflow-x-auto rounded-lg border">
         <table className="w-full min-w-max text-left text-xs">
           <thead className="sticky top-0 bg-muted/95 text-muted-foreground">
             <tr>
               {headers.map((header, index) => (
-                <th key={`${header}-${index}`} className="whitespace-nowrap px-3 py-2 font-medium">
+                <th
+                  key={`${header}-${index}`}
+                  className="whitespace-nowrap px-3 py-2 font-medium"
+                >
                   {header || `列 ${index + 1}`}
                 </th>
               ))}
@@ -308,9 +395,15 @@ function TextArtifactPreview({ artifact }: { artifact: Artifact }) {
           </thead>
           <tbody>
             {dataRows.map((row, rowIndex) => (
-              <tr key={rowIndex} className="border-t border-border/70 even:bg-muted/20">
+              <tr
+                key={rowIndex}
+                className="border-t border-border/70 even:bg-muted/20"
+              >
                 {headers.map((_, columnIndex) => (
-                  <td key={columnIndex} className="whitespace-pre-wrap px-3 py-2 align-top">
+                  <td
+                    key={columnIndex}
+                    className="whitespace-pre-wrap px-3 py-2 align-top"
+                  >
                     {row[columnIndex] || ""}
                   </td>
                 ))}
@@ -324,20 +417,32 @@ function TextArtifactPreview({ artifact }: { artifact: Artifact }) {
 }
 
 function previewContent(artifact: Artifact) {
-  if (artifact.mime_type === "text/markdown" || artifact.mime_type === "text/csv" || artifact.mime_type === "application/json") {
+  if (
+    artifact.mime_type === "text/markdown" ||
+    artifact.mime_type === "text/csv" ||
+    artifact.mime_type === "application/json"
+  ) {
     return <TextArtifactPreview artifact={artifact} />;
   }
   if (artifact.mime_type.startsWith("image/")) {
     return (
       <div className="flex h-full items-center justify-center overflow-auto bg-slate-950/5 p-4">
-        <img src={artifact.preview_url} alt={artifact.name} className="max-h-full max-w-full object-contain" />
+        <img
+          src={artifact.preview_url}
+          alt={artifact.name}
+          className="max-h-full max-w-full object-contain"
+        />
       </div>
     );
   }
   if (artifact.mime_type.startsWith("video/")) {
     return (
       <div className="flex h-full items-center justify-center bg-slate-950 p-4">
-        <video src={artifact.preview_url} controls className="max-h-full max-w-full" />
+        <video
+          src={artifact.preview_url}
+          controls
+          className="max-h-full max-w-full"
+        />
       </div>
     );
   }

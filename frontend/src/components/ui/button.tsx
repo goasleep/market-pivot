@@ -8,10 +8,14 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-gradient-to-r from-[#0376FF] to-[#315BFF] text-primary-foreground shadow-[0_8px_18px_rgba(3,118,255,0.22)] hover:-translate-y-0.5 hover:shadow-[0_12px_24px_rgba(3,118,255,0.3)]",
-        destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-        outline: "border border-input bg-white/60 shadow-sm hover:border-primary/40 hover:bg-accent hover:text-accent-foreground",
-        secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+        default:
+          "bg-gradient-to-r from-[#0376FF] to-[#315BFF] text-primary-foreground shadow-[0_8px_18px_rgba(3,118,255,0.22)] hover:-translate-y-0.5 hover:shadow-[0_12px_24px_rgba(3,118,255,0.3)]",
+        destructive:
+          "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+        outline:
+          "border border-input bg-white/60 shadow-sm hover:border-primary/40 hover:bg-accent hover:text-accent-foreground",
+        secondary:
+          "bg-secondary text-secondary-foreground hover:bg-secondary/80",
         ghost: "hover:bg-accent hover:text-accent-foreground",
         link: "text-primary underline-offset-4 hover:underline",
       },
@@ -26,11 +30,12 @@ const buttonVariants = cva(
       variant: "default",
       size: "default",
     },
-  }
+  },
 );
 
 export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+  extends
+    React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof buttonVariants> {
   asChild?: boolean;
 }
@@ -45,7 +50,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         {...props}
       />
     );
-  }
+  },
 );
 Button.displayName = "Button";
 

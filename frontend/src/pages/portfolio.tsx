@@ -44,6 +44,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { PageHeader, PageShell } from "@/components/layout/Page";
 import type {
   AgentDecisionAudit,
   AgentRunSummary,
@@ -280,10 +281,13 @@ export function PortfolioPage() {
   };
 
   return (
-    <div className="space-y-6 p-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="mb-2 flex items-center gap-2">
+    <PageShell>
+      <PageHeader
+        eyebrow="Portfolio Intelligence"
+        title="Agent 模拟组合"
+        description={
+          <span className="flex flex-wrap items-center gap-2">
+            Agent 负责研究和纸面执行，您负责目标、风险边界与关键决策审批。
             <Badge variant="outline">Agent 管理</Badge>
             <span className="flex items-center gap-1 text-xs text-muted-foreground">
               <span
@@ -291,33 +295,32 @@ export function PortfolioPage() {
               />
               {streamConnected ? "实时同步" : "定时刷新"}
             </span>
-          </div>
-          <h1 className="text-2xl font-bold">Agent 组合</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Agent 负责研究和模拟执行，您负责目标、风险边界与关键决策审批。
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <select
-            className="h-10 rounded-md border bg-background px-3 text-sm"
-            value={accountId}
-            onChange={(event) => navigate(`/portfolio/${event.target.value}`)}
-          >
-            {accounts.map((account) => (
-              <option key={account.account_id} value={account.account_id}>
-                {account.name} · {account.account_id}
-              </option>
-            ))}
-          </select>
-          <Button variant="outline" onClick={() => refresh()} disabled={busy}>
-            <RefreshCw className="mr-2 h-4 w-4" />
-            刷新
-          </Button>
-          <Button onClick={() => navigate("/chat")}>
-            <MessageSquare className="mr-2 h-4 w-4" />和 Agent 对话
-          </Button>
-        </div>
-      </div>
+          </span>
+        }
+        icon={Bot}
+        actions={
+          <>
+            <select
+              className="field-surface w-auto min-w-48"
+              value={accountId}
+              onChange={(event) => navigate(`/portfolio/${event.target.value}`)}
+            >
+              {accounts.map((account) => (
+                <option key={account.account_id} value={account.account_id}>
+                  {account.name} · {account.account_id}
+                </option>
+              ))}
+            </select>
+            <Button variant="outline" onClick={() => refresh()} disabled={busy}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              刷新
+            </Button>
+            <Button onClick={() => navigate("/chat")}>
+              <MessageSquare className="mr-2 h-4 w-4" />和 Agent 对话
+            </Button>
+          </>
+        }
+      />
 
       {message && (
         <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
@@ -822,6 +825,6 @@ export function PortfolioPage() {
           )}
         </CardContent>
       </Card>
-    </div>
+    </PageShell>
   );
 }

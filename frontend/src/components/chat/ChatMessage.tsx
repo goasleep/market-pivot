@@ -7,7 +7,7 @@ import {
   type A2UIMessage,
 } from "./A2UIRenderer";
 import { WidgetRenderer } from "./WidgetRenderer";
-import { ArtifactCard } from "./ArtifactCard";
+import { LazyArtifactCard } from "./LazyArtifactCard";
 import type { Artifact } from "@/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -87,9 +87,15 @@ function messageText(message: ChatMessageData): string {
     .map((part) => String(part.content))
     .join("\n\n")
     .trim();
-  const references = (message.references || []).filter((reference) => reference.url);
+  const references = (message.references || []).filter(
+    (reference) => reference.url,
+  );
   if (!references.length) return text;
-  return [text, "\n参考来源：", ...references.map((item) => `${item.title} · ${item.url || item.source}`)]
+  return [
+    text,
+    "\n参考来源：",
+    ...references.map((item) => `${item.title} · ${item.url || item.source}`),
+  ]
     .filter(Boolean)
     .join("\n");
 }
@@ -117,7 +123,9 @@ export function ChatMessage({
 }: ChatMessageProps) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
-  const references = (message.references || []).filter((reference) => reference.url);
+  const references = (message.references || []).filter(
+    (reference) => reference.url,
+  );
   const timestamp = formatMessageTime(message.createdAt);
 
   const copyMessage = async () => {
@@ -155,16 +163,26 @@ export function ChatMessage({
       <div
         className={cn(
           "group flex w-full min-w-0 flex-col gap-2",
-          isUser ? "max-w-[85%] items-end" : "max-w-[calc(100%-2.75rem)] items-start",
+          isUser
+            ? "max-w-[85%] items-end"
+            : "max-w-[calc(100%-2.75rem)] items-start",
         )}
       >
         <div className="flex w-full min-w-0 max-w-full items-start gap-2">
-          <div className={cn("flex w-full min-w-0 max-w-full flex-col gap-2", isUser ? "items-end" : "items-start")}>
+          <div
+            className={cn(
+              "flex w-full min-w-0 max-w-full flex-col gap-2",
+              isUser ? "items-end" : "items-start",
+            )}
+          >
             {message.parts.map((part, i) => {
               if (part.type === "text") {
                 if (!isUser) {
                   return (
-                    <div key={i} className="w-full min-w-0 max-w-full overflow-hidden rounded-lg">
+                    <div
+                      key={i}
+                      className="w-full min-w-0 max-w-full overflow-hidden rounded-lg"
+                    >
                       <A2UIRenderer
                         messages={createMarkdownSurface(
                           String(part.content),
@@ -191,7 +209,10 @@ export function ChatMessage({
               }
               if (part.type === "widget") {
                 return (
-                  <div key={i} className="w-full min-w-0 max-w-full overflow-hidden rounded-lg">
+                  <div
+                    key={i}
+                    className="w-full min-w-0 max-w-full overflow-hidden rounded-lg"
+                  >
                     <WidgetRenderer html={String(part.content)} />
                   </div>
                 );
@@ -201,7 +222,10 @@ export function ChatMessage({
                   ? part.content
                   : [part.content];
                 return (
-                  <div key={i} className="w-full min-w-0 max-w-full overflow-hidden rounded-lg">
+                  <div
+                    key={i}
+                    className="w-full min-w-0 max-w-full overflow-hidden rounded-lg"
+                  >
                     <A2UIRenderer
                       messages={messages as A2UIMessage[]}
                       onAction={onAction}
@@ -211,8 +235,11 @@ export function ChatMessage({
               }
               if (part.type === "artifact") {
                 return (
-                  <div key={i} className="w-full min-w-0 max-w-full overflow-hidden rounded-lg">
-                    <ArtifactCard artifact={part.content as Artifact} />
+                  <div
+                    key={i}
+                    className="w-full min-w-0 max-w-full overflow-hidden rounded-lg"
+                  >
+                    <LazyArtifactCard artifact={part.content as Artifact} />
                   </div>
                 );
               }
@@ -220,32 +247,51 @@ export function ChatMessage({
                 const interaction = part.content as ChatInteraction;
                 const answered = interaction.status !== "pending";
                 return (
-                  <div key={i} className="w-full rounded-xl border border-primary/30 bg-primary/5 p-4">
-                    <div className="text-sm font-medium">{interaction.question}</div>
-                    {interaction.kind === "tool_confirmation" && interaction.tool?.tool_name && (
-                      <div className="mt-2 rounded-md bg-background/70 px-3 py-2 text-xs text-muted-foreground">
-                        工具：{interaction.tool.tool_name}
-                        {interaction.tool.args && (
-                          <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[11px]">
-                            {JSON.stringify(interaction.tool.args, null, 2)}
-                          </pre>
-                        )}
-                      </div>
-                    )}
+                  <div
+                    key={i}
+                    className="w-full rounded-xl border border-primary/30 bg-primary/5 p-4"
+                  >
+                    <div className="text-sm font-medium">
+                      {interaction.question}
+                    </div>
+                    {interaction.kind === "tool_confirmation" &&
+                      interaction.tool?.tool_name && (
+                        <div className="mt-2 rounded-md bg-background/70 px-3 py-2 text-xs text-muted-foreground">
+                          工具：{interaction.tool.tool_name}
+                          {interaction.tool.args && (
+                            <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[11px]">
+                              {JSON.stringify(interaction.tool.args, null, 2)}
+                            </pre>
+                          )}
+                        </div>
+                      )}
                     <div className="mt-3 flex flex-wrap gap-2">
                       {interaction.options.map((option) => (
                         <Button
                           key={option.id}
                           size="sm"
-                          variant={interaction.selected_option === option.id ? "default" : "outline"}
+                          variant={
+                            interaction.selected_option === option.id
+                              ? "default"
+                              : "outline"
+                          }
                           disabled={answered}
-                          onClick={() => onInteraction?.({ ...interaction, selected_option: option.id })}
+                          onClick={() =>
+                            onInteraction?.({
+                              ...interaction,
+                              selected_option: option.id,
+                            })
+                          }
                         >
                           {option.label}
                         </Button>
                       ))}
                     </div>
-                    {answered && <p className="mt-2 text-xs text-muted-foreground">已提交选择，Agent 将继续执行。</p>}
+                    {answered && (
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        已提交选择，Agent 将继续执行。
+                      </p>
+                    )}
                   </div>
                 );
               }
@@ -255,7 +301,9 @@ export function ChatMessage({
             {message.loading && (
               <div className="flex animate-in items-center gap-2 rounded-lg bg-muted px-4 py-2 fade-in duration-300">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span className="text-sm text-muted-foreground">Agent 正在处理</span>
+                <span className="text-sm text-muted-foreground">
+                  Agent 正在处理
+                </span>
                 <span className="flex gap-0.5" aria-label="处理中">
                   <span className="h-1 w-1 animate-bounce rounded-full bg-muted-foreground [animation-delay:-0.3s]" />
                   <span className="h-1 w-1 animate-bounce rounded-full bg-muted-foreground [animation-delay:-0.15s]" />
@@ -277,24 +325,54 @@ export function ChatMessage({
             </button>
           )}
         </div>
-        <div className={cn("flex items-center gap-1.5 text-xs text-muted-foreground", isUser && "justify-end")}>
-          {timestamp && (!message.loading || isUser) && <span className="mr-1 tabular-nums">{timestamp}</span>}
-          {isUser && <button
+        <div
+          className={cn(
+            "flex items-center gap-1.5 text-xs text-muted-foreground",
+            isUser && "justify-end",
+          )}
+        >
+          {timestamp && (!message.loading || isUser) && (
+            <span className="mr-1 tabular-nums">{timestamp}</span>
+          )}
+          {isUser && (
+            <button
               type="button"
               onClick={() => void copyMessage()}
               aria-label="复制消息"
               title="复制消息"
               className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground"
             >
-              {copied ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
-            </button>}
+              {copied ? (
+                <Check className="h-3.5 w-3.5 text-emerald-600" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+            </button>
+          )}
         </div>
         {!isUser && !message.loading && message.parts.length > 0 && (
           <div className="flex items-center gap-1 text-muted-foreground">
-            <button type="button" onClick={() => void copyMessage()} aria-label="复制回复" title="复制回复" className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground">
-              {copied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
+            <button
+              type="button"
+              onClick={() => void copyMessage()}
+              aria-label="复制回复"
+              title="复制回复"
+              className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground"
+            >
+              {copied ? (
+                <Check className="h-4 w-4 text-emerald-600" />
+              ) : (
+                <Copy className="h-4 w-4" />
+              )}
             </button>
-            <button type="button" onClick={onRegenerate} disabled={!onRegenerate} aria-label="重新生成" title="重新生成" className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40">
+            <button
+              type="button"
+              onClick={onRegenerate}
+              disabled={!onRegenerate}
+              aria-label="重新生成"
+              title="重新生成"
+              className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            >
               <RefreshCw className="h-4 w-4" />
             </button>
             {references.length > 0 && (
@@ -307,7 +385,9 @@ export function ChatMessage({
                 >
                   <ExternalLink className="h-3.5 w-3.5" />
                   Reference
-                  <span className="rounded-full bg-primary/10 px-1.5 text-[10px]">{references.length}</span>
+                  <span className="rounded-full bg-primary/10 px-1.5 text-[10px]">
+                    {references.length}
+                  </span>
                 </button>
               </>
             )}
