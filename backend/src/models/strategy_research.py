@@ -54,6 +54,8 @@ class StrategyComparisonSpec(BaseModel):
     initial_capital: float = Field(default=1_000_000, gt=0)
     fill_time: Literal["next_open", "same_close"] = "next_open"
     benchmark: str = "buy_hold"
+    market_benchmark_ticker: str = Field(default="000300", min_length=6, max_length=16)
+    market_benchmark_name: str = "沪深300"
     ranking_metric: Literal["total_return", "sharpe_ratio", "calmar_ratio", "out_of_sample_return"] = (
         "total_return"
     )

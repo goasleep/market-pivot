@@ -187,6 +187,7 @@ async def compare_strategy_backtests(
     initial_capital: float = 1_000_000,
     decision_interval: int = 1,
     objective: str = "",
+    market_benchmark_ticker: str = "000300",
 ) -> str:
     """在共享数据快照上比较标准策略，并完成成本、样本外和稳定性检验。"""
     from application.strategy_comparison import build_comparison_spec, compare_strategies, standard_strategy_suite
@@ -206,6 +207,8 @@ async def compare_strategy_backtests(
         initial_capital=initial_capital,
         strategies=strategies,
         objective=objective,
+        market_benchmark_ticker=market_benchmark_ticker,
+        market_benchmark_name="沪深300" if market_benchmark_ticker == "000300" else market_benchmark_ticker,
     )
     payload = await compare_strategies(spec, publish_artifacts=True, generate_explanation=True)
     payload.update(

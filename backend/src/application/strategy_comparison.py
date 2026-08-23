@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from data.history_validation import prepare_cross_validated_backtest_data as prepare_single_backtest_data
+from data.market_index import async_get_market_index_history
 from engine.backtester import run_backtest
 from llm.service import get_llm_service
 from models.schemas import (
@@ -255,6 +256,8 @@ def build_comparison_spec(
     initial_capital: float = 1_000_000,
     strategies: Iterable[StrategySpec] | None = None,
     objective: str = "",
+    market_benchmark_ticker: str = "000300",
+    market_benchmark_name: str = "沪深300",
 ) -> StrategyComparisonSpec:
     kind = AssetType(asset_type)
     warmup_start = (date.fromisoformat(start_date) - timedelta(days=450)).isoformat()
@@ -269,6 +272,8 @@ def build_comparison_spec(
         evaluation_end_date=end_date,
         warmup_bars=252,
         initial_capital=initial_capital,
+        market_benchmark_ticker=market_benchmark_ticker,
+        market_benchmark_name=market_benchmark_name,
         ranking_metric=_ranking_metric_for_objective(objective),
         strategies=tuple(strategies or standard_strategy_suite(kind)),
         task_contract=strategy_comparison_contract(),
@@ -384,6 +389,7 @@ async def compare_strategies(
     cost_analysis = await _run_cost_scenarios(spec, prepared, base_results, evaluation_start)
     cost_consistency = _base_cost_consistency(results, cost_analysis.get("base", []))
     sensitivity = await _run_parameter_sensitivity(spec, prepared, base, evaluation_start)
+    market_benchmark = await _run_market_benchmark(spec, results, base, evaluation_start)
     ranking = [
         item["strategy_name"]
         for item in sorted(
@@ -430,11 +436,16 @@ async def compare_strategies(
         "data_validation": cross_validation,
         "execution": _account_config(spec, base).effective_trading_rules(spec.asset_type).model_dump(mode="json")
         | {"fill_time": spec.fill_time},
+        "price_curve": [
+            {"date": str(row["date"]), "value": round(float(row["close"]), 6)}
+            for _, row in evaluation_frame.iterrows()
+        ],
         "comparisons": results,
         "ranking": ranking,
         "cost_scenarios": cost_analysis,
         "cost_consistency": cost_consistency,
         "parameter_sensitivity": sensitivity,
+        "market_benchmark": market_benchmark,
     }
     payload["acceptance"] = _acceptance(spec, payload).model_dump(mode="json")
     conclusion = build_comparison_conclusion(payload, minimum_history_years=spec.task_contract.minimum_history_years)
@@ -497,6 +508,111 @@ def _comparison_row(strategy: StrategySpec, result: dict[str, Any]) -> dict[str,
         "drawdown_curve": _drawdown_curve(result.get("equity_curve", [])),
         "trades": result.get("trades", []),
         "error": result.get("error"),
+    }
+
+
+def _metric_difference(left: Any, right: Any) -> float | None:
+    if left is None or right is None:
+        return None
+    try:
+        return round(float(left) - float(right), 6)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _run_market_benchmark(
+    spec: StrategyComparisonSpec,
+    target_rows: list[dict[str, Any]],
+    base_cost: CostScenario,
+    evaluation_start: str,
+) -> dict[str, Any]:
+    """Apply every strategy to a broad-market index without blocking target conclusions on failure."""
+    try:
+        market_frame, snapshot = await async_get_market_index_history(
+            spec.market_benchmark_ticker,
+            start_date=spec.warmup_start_date or spec.start_date,
+            end_date=spec.evaluation_end_date or spec.end_date,
+        )
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "ticker": spec.market_benchmark_ticker,
+            "name": spec.market_benchmark_name,
+            "error": str(exc)[:500],
+            "comparisons": [],
+        }
+
+    market_frame = market_frame[
+        market_frame["date"] <= (spec.evaluation_end_date or spec.end_date)
+    ].reset_index(drop=True)
+    evaluation_rows = market_frame[market_frame["date"] >= evaluation_start]
+    if len(evaluation_rows) < 2:
+        return {
+            "status": "unavailable",
+            "ticker": spec.market_benchmark_ticker,
+            "name": spec.market_benchmark_name,
+            "error": "同期大盘指数不足 2 个可用交易日",
+            "snapshot": snapshot,
+            "comparisons": [],
+        }
+    market_evaluation_start = str(evaluation_rows.iloc[0]["date"])
+    prepared = (market_frame, snapshot)
+    target_by_name = {str(row.get("strategy_name")): row for row in target_rows}
+    comparisons = []
+    for strategy in spec.strategies:
+        target = target_by_name.get(strategy.name, {})
+        try:
+            market_result = await run_backtest(
+                ticker=spec.market_benchmark_ticker,
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+                asset_type=spec.asset_type,
+                initial_capital=spec.initial_capital,
+                fill_time=spec.fill_time,
+                strategy_name=strategy.name,
+                strategy_spec=strategy.model_dump(mode="json"),
+                prepared_data=prepared,
+                account_config=_account_config(spec, base_cost),
+                evaluation_start_date=market_evaluation_start,
+            )
+            market_error = market_result.get("error")
+        except Exception as exc:
+            market_result = {}
+            market_error = str(exc)[:500]
+        market_total_return = None if market_error else market_result.get("total_return")
+        market_max_drawdown = None if market_error else market_result.get("max_drawdown")
+        market_sharpe_ratio = None if market_error else market_result.get("sharpe_ratio")
+        comparisons.append(
+            {
+                "strategy_name": strategy.name,
+                "display_name": strategy.description.split("，", 1)[0] or strategy.name,
+                "asset_total_return": target.get("total_return"),
+                "market_total_return": market_total_return,
+                "excess_return": _metric_difference(target.get("total_return"), market_total_return),
+                "asset_max_drawdown": target.get("max_drawdown"),
+                "market_max_drawdown": market_max_drawdown,
+                "drawdown_improvement": _metric_difference(market_max_drawdown, target.get("max_drawdown")),
+                "asset_sharpe_ratio": target.get("sharpe_ratio"),
+                "market_sharpe_ratio": market_sharpe_ratio,
+                "asset_equity_curve": target.get("equity_curve") or [],
+                "market_equity_curve": [] if market_error else market_result.get("equity_curve") or [],
+                "market_error": market_error,
+            }
+        )
+    errors = [row for row in comparisons if row.get("market_error")]
+    target_dates = {str(point.get("date")) for row in target_rows for point in (row.get("equity_curve") or [])}
+    market_dates = set(evaluation_rows["date"].astype(str))
+    coverage_ratio = len(target_dates & market_dates) / max(len(target_dates), 1)
+    return {
+        "status": "partial" if errors else "available",
+        "ticker": spec.market_benchmark_ticker,
+        "name": spec.market_benchmark_name,
+        "evaluation_start_date": market_evaluation_start,
+        "evaluation_end_date": str(evaluation_rows.iloc[-1]["date"]),
+        "coverage_ratio": round(coverage_ratio, 6),
+        "snapshot": snapshot,
+        "comparisons": comparisons,
+        "simulation_note": "大盘指数不可直接交易；此处使用相同策略、评价期和成交成本进行指数代理模拟。",
     }
 
 
@@ -830,17 +946,29 @@ def build_comparison_conclusion(
     warnings = []
     if validation.get("status") != "verified":
         warnings.append(f"历史行情交叉核验状态为 {validation.get('status', 'unknown')}。")
-    if float(payload.get("history_years", 0)) < minimum_history_years:
-        warnings.append(f"正式评价期不足 {minimum_history_years:g} 年，不输出正式优胜策略。")
+    history_years = float(payload.get("history_years", 0))
+    if history_years < minimum_history_years:
+        warnings.append(
+            f"当前评价期约 {history_years:g} 年，低于 {minimum_history_years:g} 年正式验证标准；"
+            "仍按现有数据给出分维度结果，但应降低置信度并避免外推。"
+        )
+    market_benchmark = payload.get("market_benchmark") or {}
+    if market_benchmark.get("status") == "unavailable":
+        warnings.append(
+            f"同期大盘基准 {market_benchmark.get('name') or market_benchmark.get('ticker') or ''} 不可用："
+            f"{market_benchmark.get('error') or '未取得指数行情'}。当前标的结论仍保留。"
+        )
+    elif market_benchmark.get("status") == "partial":
+        warnings.append("同期大盘的部分策略模拟失败；可用的同策略比较仍保留，其余维度不据此下结论。")
     limitations = [
         "固定参数历史模拟不代表未来表现。",
         "日线回测不模拟盘口排队、部分成交和真实流动性冲击。",
         "样本外结果是固定策略留出段诊断，不等同于独立训练后的实盘验证。",
     ]
-    if not official:
+    if not rows:
         return ComparisonConclusion(
             official=False,
-            tradeoffs=["数据或历史覆盖未达到正式排名标准，当前结果仅作探索性比较。"],
+            tradeoffs=["没有可比较的策略结果，无法基于当前数据计算分维度表现。"],
             data_warnings=warnings,
             limitations=limitations,
         )
@@ -885,8 +1013,19 @@ def build_comparison_conclusion(
             else float("-inf")
         ),
     )
+    current_findings = "；".join(
+        f"{label}为{row.get('display_name') or row.get('strategy_name')}"
+        for label, row in (
+            ("绝对收益领先", total),
+            ("风险调整表现领先", sharpe),
+            ("回撤控制领先", drawdown),
+            ("样本外表现领先", oos),
+            ("压力成本下稳健性领先", robustness),
+        )
+        if row
+    )
     return ComparisonConclusion(
-        official=True,
+        official=official,
         absolute_return_winner=_winner(total, "total_return", total.get("total_return")),
         risk_adjusted_winner=_winner(sharpe, "sharpe_ratio", sharpe.get("sharpe_ratio") if sharpe else None),
         drawdown_winner=_winner(drawdown, "max_drawdown", drawdown.get("max_drawdown")),
@@ -901,6 +1040,14 @@ def build_comparison_conclusion(
             stress_by_name.get(robustness.get("strategy_name"), {}).get("total_return"),
         ),
         tradeoffs=[
+            f"基于当前可用样本的分维度结果：{current_findings}。",
+            *(
+                []
+                if official
+                else [
+                    "已使用当前可用数据完成分维度比较；数据风险会降低结论置信度，但不会替代或抹去当前样本给出的结果。"
+                ]
+            ),
             "绝对收益、风险调整收益、回撤控制和样本外表现使用不同评价维度，因此不存在唯一最好策略。",
             "低仓位策略通常能降低回撤，但也可能牺牲趋势行情中的绝对收益。",
         ],

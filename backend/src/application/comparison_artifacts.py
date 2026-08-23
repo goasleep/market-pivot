@@ -86,8 +86,20 @@ def _validation_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _winner_label(item: dict[str, Any] | None) -> str:
     if not item:
-        return "暂无正式结论"
+        return "该维度缺少可比数据"
     return f"{item.get('display_name') or item.get('strategy_name')}（{item.get('value')}）"
+
+
+def _market_comparison_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            key: value
+            for key, value in row.items()
+            if key not in {"asset_equity_curve", "market_equity_curve"}
+        }
+        for row in ((payload.get("market_benchmark") or {}).get("comparisons") or [])
+        if isinstance(row, dict)
+    ]
 
 
 def _html_report(payload: dict[str, Any]) -> str:
@@ -121,6 +133,34 @@ def _html_report(payload: dict[str, Any]) -> str:
     warnings = "".join(f"<li>{html.escape(str(item))}</li>" for item in conclusion.get("data_warnings", []))
     ticker = html.escape(str(payload.get("ticker")))
     header_html = "".join(f"<th>{item}</th>" for item in headers)
+    market_benchmark = payload.get("market_benchmark") or {}
+    market_headers = ["同一策略", "当前标的收益", "大盘收益", "同策略超额", "标的回撤", "大盘回撤"]
+    market_table_rows = []
+    for row in _market_comparison_rows(payload):
+        values = [
+            row.get("display_name") or row.get("strategy_name"),
+            row.get("asset_total_return"),
+            row.get("market_total_return"),
+            row.get("excess_return"),
+            row.get("asset_max_drawdown"),
+            row.get("market_max_drawdown"),
+        ]
+        market_table_rows.append(
+            "<tr>" + "".join(f"<td>{html.escape(str(value))}</td>" for value in values) + "</tr>"
+        )
+    market_html = ""
+    if market_benchmark:
+        market_header_html = "".join(f"<th>{item}</th>" for item in market_headers)
+        market_note = html.escape(
+            str(market_benchmark.get("simulation_note") or market_benchmark.get("error") or "")
+        )
+        market_html = (
+            f"<h2>同一策略：当前标的 vs "
+            f"{html.escape(str(market_benchmark.get('name') or market_benchmark.get('ticker')))}</h2>"
+            f"<p class=\"meta\">{market_note}</p>"
+            f"<table><thead><tr>{market_header_html}</tr></thead>"
+            f"<tbody>{''.join(market_table_rows)}</tbody></table>"
+        )
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -140,6 +180,7 @@ th:first-child,td:first-child{{text-align:left}}
 热身 {payload.get('warmup_bars')} 个交易日 · 数据核验 {payload.get('data_validation', {}).get('status')}</p>
 <div class="cards">{winner_cards}</div>
 <table><thead><tr>{header_html}</tr></thead><tbody>{''.join(table_rows)}</tbody></table>
+{market_html}
 <h2>数据与限制</h2><ul>{warnings}</ul>
 <p>历史研究与模拟交易结果不代表未来表现，不构成投资建议。</p>
 </main></body></html>"""
@@ -232,6 +273,7 @@ def _workbook(payload: dict[str, Any], selected_rows: list[dict[str, Any]]) -> b
         widths={"description": 45, "entry_rules": 50, "exit_rules": 50, "position_policy": 50},
     )
     _write_table(workbook, "绩效对比", _comparison_rows(payload))
+    _write_table(workbook, "同期大盘同策略", _market_comparison_rows(payload))
     cost_rows = [
         {"scenario": scenario, **row}
         for scenario, rows in (payload.get("cost_scenarios") or {}).items()

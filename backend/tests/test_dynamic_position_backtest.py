@@ -46,6 +46,11 @@ async def test_dynamic_exposure_uses_warmup_but_only_trades_in_evaluation_period
 
     assert result["equity_curve"][0]["date"] == evaluation_start
     assert result["equity_curve"][0]["value"] == 1_000_000
+    assert result["price_curve"][0] == {
+        "date": evaluation_start,
+        "value": round(float(prepared[0].iloc[252]["close"]), 6),
+    }
+    assert result["price_curve"][-1]["date"] == str(prepared[0].iloc[-1]["date"])
     assert all(trade["date"] >= evaluation_start for trade in result["trades"])
     targets = [point["target_exposure"] for point in result["signal_curve"]]
     assert targets and all(0 <= value <= 0.95 for value in targets)

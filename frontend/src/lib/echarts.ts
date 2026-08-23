@@ -1,5 +1,6 @@
-import { LineChart } from "echarts/charts";
+import { LineChart, ScatterChart } from "echarts/charts";
 import {
+  DataZoomComponent,
   GridComponent,
   LegendComponent,
   TooltipComponent,
@@ -9,6 +10,8 @@ import { CanvasRenderer } from "echarts/renderers";
 
 use([
   LineChart,
+  ScatterChart,
+  DataZoomComponent,
   GridComponent,
   LegendComponent,
   TooltipComponent,

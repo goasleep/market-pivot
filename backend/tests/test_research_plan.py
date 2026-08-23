@@ -134,6 +134,20 @@ def test_comparison_synthesis_uses_frozen_winners_and_artifact_count():
                 "data_warnings": ["一个候选源不可用。"],
                 "limitations": ["历史表现不代表未来。"],
             },
+            "market_benchmark": {
+                "status": "available",
+                "ticker": "000300",
+                "name": "沪深300",
+                "comparisons": [
+                    {
+                        "strategy_name": "buy_hold",
+                        "display_name": "买入持有",
+                        "asset_total_return": 0.7,
+                        "market_total_return": 0.4,
+                        "excess_return": 0.3,
+                    }
+                ],
+            },
             "artifacts": [{"name": str(index)} for index in range(7)],
         }
     )
@@ -141,6 +155,8 @@ def test_comparison_synthesis_uses_frozen_winners_and_artifact_count():
     assert "2016-08-22 至 2026-08-21" in text
     assert "绝对收益：买入持有" in text
     assert "数据核验状态：degraded" in text
+    assert "同期大盘对比" in text
+    assert "超额为 +30.00%" in text
     assert "共 7 个文件" in text
 
 

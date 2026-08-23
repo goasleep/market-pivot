@@ -38,6 +38,19 @@ def test_audit_workbook_has_fixed_sheets_chart_and_formula_checks():
         "cost_scenarios": {},
         "parameter_sensitivity": {},
         "execution": {"fill_time": "next_open"},
+        "market_benchmark": {
+            "status": "available",
+            "ticker": "000300",
+            "name": "沪深300",
+            "comparisons": [
+                {
+                    "strategy_name": "buy_hold",
+                    "asset_total_return": 0.1,
+                    "market_total_return": 0.06,
+                    "excess_return": 0.04,
+                }
+            ],
+        },
     }
     selected = [
         {"date": "2020-01-02", "open": 10, "high": 10, "low": 10, "close": 10, "volume": 1}
@@ -52,6 +65,7 @@ def test_audit_workbook_has_fixed_sheets_chart_and_formula_checks():
         )
         assert "结果总览" in workbook_xml
         assert "模型检查" in workbook_xml
+        assert "同期大盘同策略" in workbook_xml
         assert "选定行情数据" in workbook_xml
         assert "COUNTA" in worksheet_xml
         assert "drawings/drawing" in " ".join(archive.namelist())

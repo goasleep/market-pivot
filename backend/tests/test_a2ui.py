@@ -295,6 +295,10 @@ def test_strategy_comparison_renders_auditable_research_sections_and_safe_artifa
         "strategy_spec": {"position_policy": {"mode": "continuous", "max_exposure": 0.95}},
         "entry_rules": [],
         "exit_rules": [],
+        "trades": [
+            {"date": "2021-01-04", "action": "buy", "shares": 100, "price": 3.8},
+            {"date": "2025-01-03", "action": "sell", "shares": 100, "price": 4.2},
+        ],
     }
     payload = {
         "ticker": "510300",
@@ -305,6 +309,40 @@ def test_strategy_comparison_renders_auditable_research_sections_and_safe_artifa
         "benchmark": "buy_hold",
         "ranking": ["buy_hold"],
         "comparisons": [comparison],
+        "price_curve": [
+            {"date": "2020-01-02", "value": 3.5},
+            {"date": "2021-01-04", "value": 3.8},
+            {"date": "2025-01-03", "value": 4.2},
+            {"date": "2026-08-21", "value": 4.4},
+        ],
+        "market_benchmark": {
+            "status": "available",
+            "ticker": "000300",
+            "name": "沪深300",
+            "evaluation_start_date": "2020-01-02",
+            "evaluation_end_date": "2026-08-21",
+            "coverage_ratio": 0.99,
+            "simulation_note": "使用相同策略和成交成本进行指数代理模拟。",
+            "comparisons": [
+                {
+                    "strategy_name": "buy_hold",
+                    "display_name": "买入持有",
+                    "asset_total_return": 0.1,
+                    "market_total_return": 0.07,
+                    "excess_return": 0.03,
+                    "asset_max_drawdown": 0.08,
+                    "market_max_drawdown": 0.1,
+                    "drawdown_improvement": 0.02,
+                    "asset_sharpe_ratio": 1.1,
+                    "market_sharpe_ratio": 0.8,
+                    "asset_equity_curve": comparison["equity_curve"],
+                    "market_equity_curve": [
+                        {"date": "2020-01-02", "value": 1_000_000},
+                        {"date": "2026-08-21", "value": 1_070_000},
+                    ],
+                }
+            ],
+        },
         "acceptance": {"satisfied": True, "checks": {"fair_evaluation_period": True}},
         "conclusion": {
             "official": True,
@@ -339,7 +377,89 @@ def test_strategy_comparison_renders_auditable_research_sections_and_safe_artifa
     model = messages[2]["updateDataModel"]["value"]
 
     assert sum(item.get("component") == "MultiLineChart" for item in components) == 3
+    assert any(item.get("component") == "TradeChart" for item in components)
+    assert any(item.get("component") == "BenchmarkChart" for item in components)
     assert any(item.get("component") == "ArtifactLink" for item in components)
     assert model["winners"][0]["strategy"] == "买入持有"
     assert model["stabilityRows"][0]["rollingPositive"] == "+50.00%"
     assert model["artifacts"][0]["downloadUrl"].startswith("/api/artifacts/")
+    assert model["pricePoints"][1] == {"label": "2021-01-04", "value": 3.8}
+    assert model["tradeStrategies"][0]["trades"][0]["action"] == "buy"
+    assert model["marketRows"][0]["excessReturn"] == "+3.00%"
+    assert model["marketCurveStrategies"][0]["name"] == "买入持有"
+
+
+def test_single_backtest_renders_price_and_actual_trade_points():
+    messages = render_tool_result(
+        "run_backtest",
+        json.dumps(
+            {
+                "data_type": "backtest",
+                "result": {
+                    "ticker": "510300",
+                    "start_date": "2026-01-02",
+                    "end_date": "2026-01-06",
+                    "initial_capital": 100_000,
+                    "total_trades": 2,
+                    "price_curve": [
+                        {"date": "2026-01-02", "value": 4.0},
+                        {"date": "2026-01-05", "value": 4.1},
+                        {"date": "2026-01-06", "value": 4.2},
+                    ],
+                    "trades": [
+                        {"date": "2026-01-05", "action": "buy", "price": 4.11, "shares": 100},
+                        {"date": "2026-01-06", "action": "sell", "price": 4.19, "shares": 100},
+                    ],
+                },
+            }
+        ),
+    )
+
+    components = messages[1]["updateComponents"]["components"]
+    model = messages[2]["updateDataModel"]["value"]
+    chart = next(item for item in components if item.get("id") == "tradePointsChart")
+    summary = next(item for item in components if item.get("id") == "summary")
+    assert chart["component"] == "TradeChart"
+    assert summary["children"][-1] == "trade-count"
+    assert model["pricePoints"][-1] == {"label": "2026-01-06", "value": 4.2}
+    assert len(model["tradeStrategies"][0]["trades"]) == 2
+
+
+def test_strategy_comparison_labels_limited_data_as_a_conclusion_not_no_conclusion():
+    payload = {
+        "ticker": "510300",
+        "comparisons": [
+            {
+                "strategy_name": "buy_hold",
+                "display_name": "买入持有",
+                "total_return": 0.1,
+                "diagnostics": {},
+                "strategy_spec": {},
+            }
+        ],
+        "acceptance": {"satisfied": False, "checks": {}},
+        "conclusion": {
+            "official": False,
+            "absolute_return_winner": {
+                "strategy_name": "buy_hold",
+                "display_name": "买入持有",
+                "metric": "total_return",
+                "value": 0.1,
+            },
+            "tradeoffs": ["已使用当前可用数据完成比较。"],
+            "data_warnings": ["评价期较短。"],
+        },
+        "data_validation": {"status": "degraded"},
+    }
+
+    messages = render_tool_result("compare_strategy_backtests", json.dumps(payload))
+    components = messages[1]["updateComponents"]["components"]
+
+    official = next(item for item in components if item.get("id") == "official")
+    winners = next(item for item in components if item.get("id") == "winners")
+    tradeoffs = next(item for item in components if item.get("id") == "tradeoffs")
+    conclusion = next(item for item in components if item.get("id") == "conclusion")
+    assert official["text"] == "当前数据结论（有限置信）"
+    assert winners["title"] == "基于当前数据的分维度结论"
+    assert tradeoffs["title"] == "当前数据结论与权衡"
+    assert conclusion["title"] == "结论、风险与局限"

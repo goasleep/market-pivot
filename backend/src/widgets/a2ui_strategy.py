@@ -354,7 +354,7 @@ def _comparison_winner_rows(conclusion: dict[str, Any]) -> list[dict[str, Any]]:
         rows.append(
             {
                 "category": label,
-                "strategy": item.get("display_name") or item.get("strategy_name") or "暂无正式结论",
+                "strategy": item.get("display_name") or item.get("strategy_name") or "该维度缺少可比数据",
                 "metric": metric or "—",
                 "value": display,
             }
@@ -429,6 +429,69 @@ def render_strategy_comparison(
         for item in comparisons
         if (item.get("strategy_spec") or {}).get("position_policy")
     ]
+    price_points = [
+        {
+            "label": str(item.get("date") or item.get("label") or ""),
+            "value": float(item.get("value", item.get("close", 0)) or 0),
+        }
+        for item in (payload.get("price_curve") or [])
+        if isinstance(item, dict) and (item.get("date") is not None or item.get("label") is not None)
+    ]
+    comparison_by_name = {str(item.get("strategy_name")): item for item in comparisons}
+    ordered_strategy_names = [
+        *[str(name) for name in (payload.get("ranking") or []) if str(name) in comparison_by_name],
+        *[str(item.get("strategy_name")) for item in comparisons],
+    ]
+    trade_strategies = []
+    seen_strategy_names = set()
+    for strategy_name in ordered_strategy_names:
+        if strategy_name in seen_strategy_names:
+            continue
+        seen_strategy_names.add(strategy_name)
+        item = comparison_by_name[strategy_name]
+        trade_strategies.append(
+            {
+                "name": item.get("display_name") or strategy_name,
+                "strategyName": strategy_name,
+                "trades": [trade for trade in (item.get("trades") or []) if isinstance(trade, dict)],
+            }
+        )
+    market_benchmark = dict(payload.get("market_benchmark") or {})
+    market_rows = [
+        {
+            "strategy": item.get("display_name") or item.get("strategy_name"),
+            "assetReturn": _percent_label(item.get("asset_total_return")),
+            "marketReturn": _percent_label(item.get("market_total_return")),
+            "excessReturn": _percent_label(item.get("excess_return")),
+            "assetDrawdown": _percent_label(item.get("asset_max_drawdown"), signed=False),
+            "marketDrawdown": _percent_label(item.get("market_max_drawdown"), signed=False),
+            "drawdownImprovement": _percent_label(item.get("drawdown_improvement")),
+            "assetSharpe": _number_label(item.get("asset_sharpe_ratio")),
+            "marketSharpe": _number_label(item.get("market_sharpe_ratio")),
+        }
+        for item in (market_benchmark.get("comparisons") or [])
+        if isinstance(item, dict)
+    ]
+    market_curve_strategies = [
+        {
+            "name": item.get("display_name") or item.get("strategy_name"),
+            "assetPoints": _normalised_curve({"equity_curve": item.get("asset_equity_curve") or []}),
+            "marketPoints": _normalised_curve({"equity_curve": item.get("market_equity_curve") or []}),
+        }
+        for item in (market_benchmark.get("comparisons") or [])
+        if isinstance(item, dict) and not item.get("market_error")
+    ]
+    market_label = market_benchmark.get("name") or market_benchmark.get("ticker") or "同期大盘"
+    if market_benchmark.get("status") == "unavailable":
+        market_note = f"{market_label}基准暂不可用：{market_benchmark.get('error') or '未取得指数行情'}。"
+    else:
+        market_note = (
+            f"基准：{market_label}（{market_benchmark.get('ticker', '—')}），评价期 "
+            f"{market_benchmark.get('evaluation_start_date', '—')} 至 "
+            f"{market_benchmark.get('evaluation_end_date', '—')}，共同交易日覆盖 "
+            f"{float(market_benchmark.get('coverage_ratio') or 0):.1%}。"
+            f"{market_benchmark.get('simulation_note') or ''}"
+        )
 
     conclusion = dict(payload.get("conclusion") or {})
     validation = dict(payload.get("data_validation") or {})
@@ -516,7 +579,7 @@ def render_strategy_comparison(
 
     surface_id = surface_id or f"strategy-comparison-{uuid4().hex}"
     acceptance_label = "验收通过" if acceptance.get("satisfied") else "验收未通过"
-    official_label = "正式结论" if conclusion.get("official") else "探索性结果"
+    official_label = "正式验证结论" if conclusion.get("official") else "当前数据结论（有限置信）"
     components: list[dict[str, Any]] = [
         {
             "id": "root",
@@ -528,6 +591,8 @@ def render_strategy_comparison(
                 "winners",
                 "table",
                 "equity",
+                *(["trade-points"] if len(price_points) >= 2 else []),
+                *(["market-benchmark"] if market_benchmark else []),
                 "drawdown",
                 *(["exposure"] if exposure_series else []),
                 "costs",
@@ -572,7 +637,7 @@ def render_strategy_comparison(
         {
             "id": "winners",
             "component": "Section",
-            "title": "五类优胜者",
+            "title": "基于当前数据的分维度结论",
             "children": ["winner-table"],
         },
         {
@@ -617,6 +682,79 @@ def render_strategy_comparison(
             "series": _ref("/equitySeries"),
             "ariaLabel": "多策略归一化净值",
         },
+        *(
+            [
+                {
+                    "id": "trade-points",
+                    "component": "Collapsible",
+                    "title": "标的价格与实际买卖点（按策略查看）",
+                    "defaultExpanded": True,
+                    "children": ["trade-points-note", "trade-points-chart"],
+                },
+                _text(
+                    "trade-points-note",
+                    "选择策略查看其实际成交点。买卖日期和价格已反映次日开盘执行、滑点及交易规则；并非原始信号日。",
+                    "caption",
+                ),
+                {
+                    "id": "trade-points-chart",
+                    "component": "TradeChart",
+                    "pricePoints": _ref("/pricePoints"),
+                    "strategies": _ref("/tradeStrategies"),
+                    "ariaLabel": "多策略回测实际买卖点",
+                },
+            ]
+            if len(price_points) >= 2
+            else []
+        ),
+        *(
+            [
+                {
+                    "id": "market-benchmark",
+                    "component": "Collapsible",
+                    "title": f"同一策略：当前标的 vs {market_label}",
+                    "defaultExpanded": True,
+                    "children": [
+                        "market-benchmark-note",
+                        "market-benchmark-table",
+                        *(["market-benchmark-chart"] if market_curve_strategies else []),
+                    ],
+                },
+                _text("market-benchmark-note", market_note, "caption"),
+                {
+                    "id": "market-benchmark-table",
+                    "component": "DataTable",
+                    "columns": [
+                        {"key": "strategy", "label": "同一策略"},
+                        {"key": "assetReturn", "label": "当前标的收益"},
+                        {"key": "marketReturn", "label": "大盘收益"},
+                        {"key": "excessReturn", "label": "同策略超额"},
+                        {"key": "assetDrawdown", "label": "标的回撤"},
+                        {"key": "marketDrawdown", "label": "大盘回撤"},
+                        {"key": "drawdownImprovement", "label": "回撤改善"},
+                        {"key": "assetSharpe", "label": "标的 Sharpe"},
+                        {"key": "marketSharpe", "label": "大盘 Sharpe"},
+                    ],
+                    "rows": _ref("/marketRows"),
+                },
+                *(
+                    [
+                        {
+                            "id": "market-benchmark-chart",
+                            "component": "BenchmarkChart",
+                            "strategies": _ref("/marketCurveStrategies"),
+                            "assetLabel": str(payload.get("ticker") or "当前标的"),
+                            "marketLabel": str(market_label),
+                            "ariaLabel": "当前标的与同期大盘同策略净值对比",
+                        }
+                    ]
+                    if market_curve_strategies
+                    else []
+                ),
+            ]
+            if market_benchmark
+            else []
+        ),
         {
             "id": "drawdown",
             "component": "Collapsible",
@@ -742,11 +880,16 @@ def render_strategy_comparison(
         {
             "id": "conclusion",
             "component": "Collapsible",
-            "title": "结论、权衡与局限",
+            "title": "结论、风险与局限",
             "defaultExpanded": True,
             "children": ["tradeoffs", "warnings", "limitations"],
         },
-        {"id": "tradeoffs", "component": "List", "title": "权衡", "items": _ref("/tradeoffs")},
+        {
+            "id": "tradeoffs",
+            "component": "List",
+            "title": "当前数据结论与权衡",
+            "items": _ref("/tradeoffs"),
+        },
         {"id": "warnings", "component": "List", "title": "数据警告", "items": _ref("/warnings")},
         {"id": "limitations", "component": "List", "title": "局限", "items": _ref("/limitations")},
         {
@@ -779,6 +922,10 @@ def render_strategy_comparison(
         "equitySeries": equity_series,
         "drawdownSeries": drawdown_series,
         "exposureSeries": exposure_series,
+        "pricePoints": price_points,
+        "tradeStrategies": trade_strategies,
+        "marketRows": market_rows,
+        "marketCurveStrategies": market_curve_strategies,
         "costRows": cost_rows,
         "stabilityRows": stability_rows,
         "sourceRows": source_rows,

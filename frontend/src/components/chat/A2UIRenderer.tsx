@@ -509,6 +509,365 @@ function MultiLineChart({
   );
 }
 
+interface NormalizedTrade {
+  date: string;
+  action: "buy" | "sell";
+  price: number;
+  shares: number;
+  amount: number;
+}
+
+interface NormalizedTradeStrategy {
+  name: string;
+  trades: NormalizedTrade[];
+}
+
+function formatTradeTooltip(params: unknown): string {
+  const items = Array.isArray(params) ? params : [params];
+  const first = items[0];
+  const firstRecord =
+    first && typeof first === "object"
+      ? (first as Record<string, unknown>)
+      : undefined;
+  const lines = [String(firstRecord?.axisValue || "")];
+  items.forEach((item) => {
+    if (!item || typeof item !== "object") return;
+    const record = item as Record<string, unknown>;
+    const data = record.data;
+    const dataRecord =
+      data && typeof data === "object" && !Array.isArray(data)
+        ? (data as Record<string, unknown>)
+        : undefined;
+    const value = dataRecord?.value ?? data;
+    const values = Array.isArray(value) ? value : [value];
+    const price = Number(values[values.length - 1]);
+    if (!Number.isFinite(price)) return;
+    let line = `${String(record.seriesName || "价格")}：${price.toFixed(3)}`;
+    const shares = Number(dataRecord?.shares || 0);
+    const amount = Number(dataRecord?.amount || 0);
+    if (shares > 0) line += ` · ${shares.toLocaleString("zh-CN")} 份`;
+    if (amount > 0)
+      line += ` · ¥${amount.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`;
+    lines.push(line);
+  });
+  return lines.filter(Boolean).join("\n");
+}
+
+function TradeChart({
+  pricePoints,
+  strategies,
+  ariaLabel,
+}: {
+  pricePoints: unknown;
+  strategies: unknown;
+  ariaLabel: string;
+}) {
+  const prices = useMemo(
+    () =>
+      (Array.isArray(pricePoints) ? pricePoints : [])
+        .map((point) => {
+          if (!point || typeof point !== "object") return null;
+          const record = point as Record<string, unknown>;
+          const value = Number(record.value);
+          if (!Number.isFinite(value)) return null;
+          return { label: String(record.label || ""), value };
+        })
+        .filter(
+          (point): point is { label: string; value: number } => point !== null,
+        ),
+    [pricePoints],
+  );
+  const normalizedStrategies = useMemo<NormalizedTradeStrategy[]>(
+    () =>
+      (Array.isArray(strategies) ? strategies : [])
+        .map((strategy, strategyIndex) => {
+          if (!strategy || typeof strategy !== "object") return null;
+          const record = strategy as Record<string, unknown>;
+          const trades = (Array.isArray(record.trades) ? record.trades : [])
+            .map((trade) => {
+              if (!trade || typeof trade !== "object") return null;
+              const tradeRecord = trade as Record<string, unknown>;
+              const actionValue = String(
+                tradeRecord.action || "",
+              ).toLowerCase();
+              const action = actionValue.endsWith("buy")
+                ? "buy"
+                : actionValue.endsWith("sell")
+                  ? "sell"
+                  : null;
+              const price = Number(tradeRecord.price);
+              if (!action || !Number.isFinite(price)) return null;
+              return {
+                date: String(tradeRecord.date || ""),
+                action,
+                price,
+                shares: Number(tradeRecord.shares || 0),
+                amount: Number(tradeRecord.amount || 0),
+              };
+            })
+            .filter((trade): trade is NormalizedTrade => trade !== null);
+          return {
+            name: String(record.name || `策略 ${strategyIndex + 1}`),
+            trades,
+          };
+        })
+        .filter(
+          (strategy): strategy is NormalizedTradeStrategy => strategy !== null,
+        ),
+    [strategies],
+  );
+  const [selectedName, setSelectedName] = useState("");
+  const selectedStrategy =
+    normalizedStrategies.find((strategy) => strategy.name === selectedName) ||
+    normalizedStrategies[0];
+  const buyTrades =
+    selectedStrategy?.trades.filter((trade) => trade.action === "buy") || [];
+  const sellTrades =
+    selectedStrategy?.trades.filter((trade) => trade.action === "sell") || [];
+  const option = useMemo<EChartsOption>(
+    () => ({
+      animation: false,
+      color: ["#2563eb", "#dc2626", "#16a34a"],
+      tooltip: {
+        trigger: "axis",
+        renderMode: "richText",
+        axisPointer: { type: "cross" },
+        formatter: formatTradeTooltip,
+      },
+      legend: { top: 4, left: 8 },
+      grid: { left: 58, right: 22, top: 48, bottom: 68 },
+      dataZoom: [
+        { type: "inside", start: 0, end: 100 },
+        { type: "slider", start: 0, end: 100, height: 20, bottom: 12 },
+      ],
+      xAxis: {
+        type: "category",
+        boundaryGap: false,
+        data: prices.map((point) => point.label),
+        axisLabel: { hideOverlap: true },
+      },
+      yAxis: { type: "value", scale: true, name: "价格" },
+      series: [
+        {
+          name: "标的价格",
+          type: "line",
+          data: prices.map((point) => point.value),
+          showSymbol: false,
+          lineStyle: { width: 2, color: "#2563eb" },
+        },
+        {
+          name: "买入",
+          type: "scatter",
+          data: buyTrades.map((trade) => ({
+            value: [trade.date, trade.price],
+            shares: trade.shares,
+            amount: trade.amount,
+          })),
+          symbol: "triangle",
+          symbolSize: 18,
+          itemStyle: { color: "#dc2626" },
+          label: {
+            show: true,
+            formatter: "买",
+            position: "top",
+            color: "#dc2626",
+          },
+        },
+        {
+          name: "卖出",
+          type: "scatter",
+          data: sellTrades.map((trade) => ({
+            value: [trade.date, trade.price],
+            shares: trade.shares,
+            amount: trade.amount,
+          })),
+          symbol: "triangle",
+          symbolRotate: 180,
+          symbolSize: 18,
+          itemStyle: { color: "#16a34a" },
+          label: {
+            show: true,
+            formatter: "卖",
+            position: "bottom",
+            color: "#16a34a",
+          },
+        },
+      ],
+    }),
+    [buyTrades, prices, sellTrades],
+  );
+
+  if (prices.length < 2 || !selectedStrategy) {
+    return (
+      <p className="text-xs text-muted-foreground">暂无足够的价格或策略数据</p>
+    );
+  }
+
+  return (
+    <div className="min-w-0 space-y-2 overflow-hidden rounded-lg border border-border/70 bg-background/50 p-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-muted-foreground">
+        <label className="flex items-center gap-2">
+          <span>策略</span>
+          <select
+            className="max-w-[24rem] rounded-md border bg-background px-2 py-1 text-foreground"
+            value={selectedStrategy.name}
+            onChange={(event) => setSelectedName(event.target.value)}
+          >
+            {normalizedStrategies.map((strategy) => (
+              <option key={strategy.name} value={strategy.name}>
+                {strategy.name}（{strategy.trades.length} 次成交）
+              </option>
+            ))}
+          </select>
+        </label>
+        <span>
+          买入 {buyTrades.length} 次 · 卖出 {sellTrades.length} 次
+        </span>
+      </div>
+      <EChart option={option} height={380} ariaLabel={ariaLabel} />
+    </div>
+  );
+}
+
+interface NormalizedBenchmarkStrategy {
+  name: string;
+  assetPoints: Array<{ label: string; value: number }>;
+  marketPoints: Array<{ label: string; value: number }>;
+}
+
+function normalizeChartPoints(value: unknown) {
+  return (Array.isArray(value) ? value : [])
+    .map((point) => {
+      if (!point || typeof point !== "object") return null;
+      const record = point as Record<string, unknown>;
+      const number = Number(record.value);
+      if (!Number.isFinite(number)) return null;
+      return { label: String(record.label || ""), value: number };
+    })
+    .filter(
+      (point): point is { label: string; value: number } => point !== null,
+    );
+}
+
+function BenchmarkChart({
+  strategies,
+  assetLabel,
+  marketLabel,
+  ariaLabel,
+}: {
+  strategies: unknown;
+  assetLabel: string;
+  marketLabel: string;
+  ariaLabel: string;
+}) {
+  const normalizedStrategies = useMemo<NormalizedBenchmarkStrategy[]>(
+    () =>
+      (Array.isArray(strategies) ? strategies : [])
+        .map((strategy, index) => {
+          if (!strategy || typeof strategy !== "object") return null;
+          const record = strategy as Record<string, unknown>;
+          const assetPoints = normalizeChartPoints(record.assetPoints);
+          const marketPoints = normalizeChartPoints(record.marketPoints);
+          if (assetPoints.length < 2 || marketPoints.length < 2) return null;
+          return {
+            name: String(record.name || `策略 ${index + 1}`),
+            assetPoints,
+            marketPoints,
+          };
+        })
+        .filter(
+          (strategy): strategy is NormalizedBenchmarkStrategy =>
+            strategy !== null,
+        ),
+    [strategies],
+  );
+  const [selectedName, setSelectedName] = useState("");
+  const selectedStrategy =
+    normalizedStrategies.find((strategy) => strategy.name === selectedName) ||
+    normalizedStrategies[0];
+  const labels = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...(selectedStrategy?.assetPoints.map((point) => point.label) || []),
+          ...(selectedStrategy?.marketPoints.map((point) => point.label) || []),
+        ]),
+      ).sort(),
+    [selectedStrategy],
+  );
+  const option = useMemo<EChartsOption>(() => {
+    const assetByDate = new Map(
+      selectedStrategy?.assetPoints.map((point) => [point.label, point.value]),
+    );
+    const marketByDate = new Map(
+      selectedStrategy?.marketPoints.map((point) => [point.label, point.value]),
+    );
+    return {
+      animation: false,
+      color: ["#2563eb", "#ea580c"],
+      tooltip: { trigger: "axis", axisPointer: { type: "cross" } },
+      legend: { top: 4, left: 8 },
+      grid: { left: 58, right: 22, top: 48, bottom: 68 },
+      dataZoom: [
+        { type: "inside", start: 0, end: 100 },
+        { type: "slider", start: 0, end: 100, height: 20, bottom: 12 },
+      ],
+      xAxis: {
+        type: "category",
+        boundaryGap: false,
+        data: labels,
+        axisLabel: { hideOverlap: true },
+      },
+      yAxis: { type: "value", scale: true, name: "归一化净值" },
+      series: [
+        {
+          name: assetLabel,
+          type: "line",
+          data: labels.map((label) => assetByDate.get(label) ?? null),
+          connectNulls: true,
+          showSymbol: false,
+          lineStyle: { width: 2 },
+        },
+        {
+          name: marketLabel,
+          type: "line",
+          data: labels.map((label) => marketByDate.get(label) ?? null),
+          connectNulls: true,
+          showSymbol: false,
+          lineStyle: { width: 2 },
+        },
+      ],
+    };
+  }, [assetLabel, labels, marketLabel, selectedStrategy]);
+
+  if (!selectedStrategy) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        暂无可用的同期大盘策略曲线
+      </p>
+    );
+  }
+  return (
+    <div className="min-w-0 space-y-2 overflow-hidden rounded-lg border border-border/70 bg-background/50 p-2">
+      <label className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
+        <span>策略</span>
+        <select
+          className="max-w-[24rem] rounded-md border bg-background px-2 py-1 text-foreground"
+          value={selectedStrategy.name}
+          onChange={(event) => setSelectedName(event.target.value)}
+        >
+          {normalizedStrategies.map((strategy) => (
+            <option key={strategy.name} value={strategy.name}>
+              {strategy.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <EChart option={option} height={380} ariaLabel={ariaLabel} />
+    </div>
+  );
+}
+
 function safeArtifactUrl(value: unknown, suffix: "preview" | "download") {
   const url = displayValue(value).trim();
   return /^\/api\/artifacts\/[A-Za-z0-9_-]+\/(preview|download)$/.test(url) &&
@@ -853,6 +1212,30 @@ function RenderComponent({
           series={resolve(component.series)}
           ariaLabel={
             displayValue(resolve(component.ariaLabel)) || "多策略对比曲线"
+          }
+        />
+      );
+    case "TradeChart":
+      return (
+        <TradeChart
+          pricePoints={resolve(component.pricePoints)}
+          strategies={resolve(component.strategies)}
+          ariaLabel={
+            displayValue(resolve(component.ariaLabel)) || "回测策略实际买卖点"
+          }
+        />
+      );
+    case "BenchmarkChart":
+      return (
+        <BenchmarkChart
+          strategies={resolve(component.strategies)}
+          assetLabel={displayValue(resolve(component.assetLabel)) || "当前标的"}
+          marketLabel={
+            displayValue(resolve(component.marketLabel)) || "同期大盘"
+          }
+          ariaLabel={
+            displayValue(resolve(component.ariaLabel)) ||
+            "当前标的与同期大盘同策略净值对比"
           }
         />
       );

@@ -102,6 +102,7 @@ def _compact_strategy_comparison(payload: dict[str, Any]) -> dict[str, Any]:
         "cost_scenarios",
         "cost_consistency",
         "parameter_sensitivity",
+        "market_benchmark",
         "acceptance",
         "conclusion",
         "artifacts",
@@ -114,6 +115,28 @@ def _compact_strategy_comparison(payload: dict[str, Any]) -> dict[str, Any]:
     validation = dict(payload.get("data_validation") or {})
     validation["differences"] = (validation.get("differences") or [])[:20]
     compact["data_validation"] = validation
+    market_benchmark = dict(compact.get("market_benchmark") or {})
+    market_benchmark["comparisons"] = [
+        {
+            key: row.get(key)
+            for key in (
+                "strategy_name",
+                "display_name",
+                "asset_total_return",
+                "market_total_return",
+                "excess_return",
+                "asset_max_drawdown",
+                "market_max_drawdown",
+                "drawdown_improvement",
+                "asset_sharpe_ratio",
+                "market_sharpe_ratio",
+                "market_error",
+            )
+        }
+        for row in (market_benchmark.get("comparisons") or [])
+        if isinstance(row, dict)
+    ]
+    compact["market_benchmark"] = market_benchmark
     return compact
 
 
@@ -251,6 +274,38 @@ def _synthesis_output(output: Any) -> Any:
         },
         "execution": output.get("execution"),
         "acceptance": output.get("acceptance"),
+        "market_benchmark": {
+            **{
+                key: (output.get("market_benchmark") or {}).get(key)
+                for key in (
+                    "status",
+                    "ticker",
+                    "name",
+                    "evaluation_start_date",
+                    "evaluation_end_date",
+                    "coverage_ratio",
+                    "error",
+                    "simulation_note",
+                )
+            },
+            "comparisons": [
+                {
+                    key: row.get(key)
+                    for key in (
+                        "strategy_name",
+                        "display_name",
+                        "asset_total_return",
+                        "market_total_return",
+                        "excess_return",
+                        "asset_max_drawdown",
+                        "market_max_drawdown",
+                        "drawdown_improvement",
+                    )
+                }
+                for row in ((output.get("market_benchmark") or {}).get("comparisons") or [])
+                if isinstance(row, dict)
+            ],
+        },
         "artifacts": [
             {key: artifact.get(key) for key in ("name", "mime_type", "size_bytes")}
             for artifact in (output.get("artifacts") or [])
@@ -325,6 +380,22 @@ def _comparison_synthesis_text(payload: dict[str, Any]) -> str:
         lines.append("数据警告：" + "；".join(str(item) for item in warnings))
     if limitations:
         lines.append("局限：" + "；".join(str(item) for item in limitations))
+    market_benchmark = payload.get("market_benchmark") or {}
+    market_comparisons = [
+        item
+        for item in (market_benchmark.get("comparisons") or [])
+        if isinstance(item, dict) and item.get("excess_return") is not None
+    ]
+    if market_benchmark.get("status") in {"available", "partial"} and market_comparisons:
+        leading_relative = max(market_comparisons, key=lambda item: float(item["excess_return"]))
+        lines.append(
+            f"同期大盘对比：以 {market_benchmark.get('name') or market_benchmark.get('ticker')} 为基准，"
+            f"同策略相对表现最高的是 "
+            f"{leading_relative.get('display_name') or leading_relative.get('strategy_name')}，"
+            f"当前标的相对大盘同策略超额为 {float(leading_relative['excess_return']):+.2%}。"
+        )
+    elif market_benchmark.get("status") == "unavailable":
+        lines.append(f"同期大盘对比暂不可用：{market_benchmark.get('error') or '未取得指数行情'}。")
     artifacts = payload.get("artifacts") or []
     lines.append(
         f"完整可审计成果包已生成，共 {len(artifacts)} 个文件，包含 HTML、XLSX、JSON 与 CSV；可在上方成果区预览或下载。"

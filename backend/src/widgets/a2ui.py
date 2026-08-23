@@ -552,6 +552,16 @@ def render_backtest_result(
         if isinstance(item, dict) and item.get("date") is not None
     ]
     trades = result.get("trades") or []
+    strategy_spec = payload.get("strategy_spec") or result.get("strategy_spec") or {}
+    strategy_name = strategy_spec.get("description") or strategy_spec.get("name") or "回测策略"
+    price_points = [
+        {
+            "label": str(item.get("date") or item.get("label") or ""),
+            "value": float(item.get("value", item.get("close", 0)) or 0),
+        }
+        for item in (result.get("price_curve") or [])
+        if isinstance(item, dict) and (item.get("date") is not None or item.get("label") is not None)
+    ]
     rows = [
         {
             "date": trade.get("date", ""),
@@ -579,7 +589,7 @@ def render_backtest_result(
         {
             "id": "summary",
             "component": "Row",
-            "children": ["final", "return", "drawdown", "sharpe", "winrate", "trades"],
+            "children": ["final", "return", "drawdown", "sharpe", "winrate", "trade-count"],
         },
         _text("final", f"最终市值 ¥{_number_label(result.get('final_value'))}", "caption"),
         _text("return", f"收益 {_percent_label(result.get('total_return'))}", "caption"),
@@ -591,7 +601,7 @@ def render_backtest_result(
         ),
         _text("sharpe", f"Sharpe {_number_label(result.get('sharpe_ratio'))}", "caption"),
         _text("winrate", f"胜率 {_percent_label(result.get('win_rate'))}", "caption"),
-        _text("trades", f"交易 {result.get('total_trades', len(trades))} 次", "caption"),
+        _text("trade-count", f"交易 {result.get('total_trades', len(trades))} 次", "caption"),
     ]
     if is_experiment:
         spec = payload.get("strategy_spec") or {}
@@ -613,6 +623,31 @@ def render_backtest_result(
                 "points": _ref("/points"),
                 "ariaLabel": "回测资金曲线",
             }
+        )
+    if len(price_points) >= 2:
+        children.append("tradePoints")
+        components.extend(
+            [
+                {
+                    "id": "tradePoints",
+                    "component": "Collapsible",
+                    "title": "标的价格与实际买卖点",
+                    "defaultExpanded": True,
+                    "children": ["tradePointsNote", "tradePointsChart"],
+                },
+                _text(
+                    "tradePointsNote",
+                    "买卖标记来自实际成交记录，日期和价格已反映成交时点、滑点及交易规则；并非原始信号日。",
+                    "caption",
+                ),
+                {
+                    "id": "tradePointsChart",
+                    "component": "TradeChart",
+                    "pricePoints": _ref("/pricePoints"),
+                    "strategies": _ref("/tradeStrategies"),
+                    "ariaLabel": "回测策略实际买卖点",
+                },
+            ]
         )
     if rows:
         children.append("trades")
@@ -645,7 +680,16 @@ def render_backtest_result(
         components.append(_text("error", f"回测错误：{result['error']}", "body", tone="negative"))
     children.append("notice")
     components.append(_text("notice", "回测基于历史数据，仅用于策略研究，不代表未来表现。", "caption"))
-    return _surface(surface_id, components, {"points": points, "trades": rows})
+    return _surface(
+        surface_id,
+        components,
+        {
+            "points": points,
+            "pricePoints": price_points,
+            "tradeStrategies": [{"name": strategy_name, "trades": trades}],
+            "trades": rows,
+        },
+    )
 
 
 def render_sandbox_strategy_candidate(
@@ -695,6 +739,9 @@ CATALOG = {
         "StatusItem": {},
         "Sparkline": {},
         "LineChart": {},
+        "MultiLineChart": {},
+        "TradeChart": {},
+        "BenchmarkChart": {},
         "Button": {},
         "TextField": {},
         "ChoicePicker": {},

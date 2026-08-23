@@ -333,6 +333,10 @@ async def run_backtest(
         "realized_pnl": metrics["realized_pnl"],
         "total_fees": metrics["total_fees"],
         "total_trades": len(engine.portfolio.trades),
+        "price_curve": [
+            {"date": str(row["date"]), "value": round(float(row["close"]), 6)}
+            for _, row in evaluation_frame.iterrows()
+        ],
         "equity_curve": equity_curve,
         "signal_curve": signal_curve,
         "trades": [t.model_dump(mode="json") for t in engine.portfolio.trades],
@@ -890,6 +894,7 @@ def _empty_result(ticker, start_date, end_date, initial_capital, error: str | No
         "realized_pnl": 0.0,
         "total_fees": 0.0,
         "total_trades": 0,
+        "price_curve": [],
         "equity_curve": [],
         "trades": [],
         "error": error,
