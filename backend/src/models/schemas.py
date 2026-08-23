@@ -1,5 +1,7 @@
 """Data models for A-Share Agent."""
 
+from __future__ import annotations
+
 from enum import Enum
 from typing import Any, Literal
 
@@ -201,10 +203,174 @@ class PositionModel(BaseModel):
         return self
 
 
+class StrategyOperand(BaseModel):
+    """One side of a v2 expression comparison."""
+
+    type: Literal["indicator", "constant"]
+    indicator: str | None = None
+    value: float | list[float] | None = None
+    window: int | None = Field(default=None, ge=1, le=2520)
+
+    @model_validator(mode="after")
+    def validate_operand(self):
+        if self.type == "indicator" and not self.indicator:
+            raise ValueError("indicator 操作数必须指定 indicator")
+        if self.type == "constant" and self.value is None:
+            raise ValueError("constant 操作数必须指定 value")
+        return self
+
+
+class StrategyExpression(BaseModel):
+    """Recursive, bounded expression tree used by StrategySpec v2."""
+
+    type: Literal[
+        "compare",
+        "all",
+        "any",
+        "not",
+        "crosses_above",
+        "crosses_below",
+        "sustained",
+        "count",
+    ]
+    left: StrategyOperand | None = None
+    operator: Literal["gt", "gte", "lt", "lte", "eq", "between"] | None = None
+    right: StrategyOperand | None = None
+    children: list[StrategyExpression] = Field(default_factory=list, max_length=50)
+    expression: StrategyExpression | None = None
+    bars: int | None = Field(default=None, ge=1, le=252)
+    minimum: int | None = Field(default=None, ge=1, le=252)
+    description: str = ""
+
+    @model_validator(mode="after")
+    def validate_shape(self):
+        if self.type == "compare":
+            if self.left is None or self.right is None or self.operator is None:
+                raise ValueError("compare 表达式必须包含 left、operator 和 right")
+        elif self.type in {"crosses_above", "crosses_below"}:
+            if self.left is None or self.right is None:
+                raise ValueError(f"{self.type} 表达式必须包含 left 和 right")
+        elif self.type in {"all", "any"}:
+            if not self.children:
+                raise ValueError(f"{self.type} 表达式必须包含 children")
+        elif self.type == "not":
+            if self.expression is None:
+                raise ValueError("not 表达式必须包含 expression")
+        elif self.type in {"sustained", "count"}:
+            if self.expression is None or self.bars is None:
+                raise ValueError(f"{self.type} 表达式必须包含 expression 和 bars")
+            if self.type == "count" and (self.minimum is None or self.minimum > self.bars):
+                raise ValueError("count.minimum 必须存在且不能大于 bars")
+        return self
+
+
+class HybridStrategyComponent(BaseModel):
+    """One declarative or trusted-Python component in a hybrid strategy."""
+
+    id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
+    type: Literal["dsl", "python"] = "dsl"
+    role: Literal["signal", "router", "position"] = "signal"
+    weight: float = Field(default=1.0, ge=0.0, le=100.0)
+    expression: StrategyExpression | None = None
+    plugin: str | None = Field(default=None, max_length=160)
+    plugin_version: str = Field(default="1.0.0", max_length=64)
+    params: dict[str, Any] = Field(default_factory=dict)
+    score_when_true: float = Field(default=1.0, ge=-1.0, le=1.0)
+    score_when_false: float = Field(default=0.0, ge=-1.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_component(self):
+        if self.type == "dsl" and self.expression is None:
+            raise ValueError("DSL 组件必须包含 expression")
+        if self.type == "python" and not self.plugin:
+            raise ValueError("Python 组件必须指定已注册 plugin")
+        return self
+
+
+class FusionSpec(BaseModel):
+    """Deterministic signal-fusion policy for StrategySpec v2."""
+
+    type: Literal["weighted_score", "majority_vote", "priority"] = "weighted_score"
+    entry_threshold: float = Field(default=0.25, ge=-1.0, le=1.0)
+    exit_threshold: float = Field(default=0.05, ge=-1.0, le=1.0)
+    conflict_policy: Literal["hold", "reduce", "exit"] = "hold"
+
+    @model_validator(mode="after")
+    def validate_thresholds(self):
+        if self.exit_threshold > self.entry_threshold:
+            raise ValueError("exit_threshold 不能大于 entry_threshold")
+        return self
+
+
+class ContinuousPositionPolicy(BaseModel):
+    """Continuous long-only exposure policy; no fixed position tiers."""
+
+    mode: Literal["continuous"] = "continuous"
+    min_exposure: float = Field(default=0.0, ge=0.0, le=1.0)
+    max_exposure: float = Field(default=0.95, ge=0.0, le=1.0)
+    minimum_change: float = Field(default=0.02, ge=0.0, le=1.0)
+    max_increase_per_rebalance: float = Field(default=1.0, gt=0.0, le=1.0)
+    max_decrease_per_rebalance: float = Field(default=1.0, gt=0.0, le=1.0)
+    rebalance_frequency: Literal["daily", "weekly", "monthly"] = "daily"
+
+    @model_validator(mode="after")
+    def validate_exposure_bounds(self):
+        if self.min_exposure > self.max_exposure:
+            raise ValueError("min_exposure 不能大于 max_exposure")
+        return self
+
+
+class StrategyStatePolicy(BaseModel):
+    """Lifecycle memory retained independently from continuous exposure."""
+
+    enabled: bool = True
+    cooldown_bars_after_exit: int = Field(default=0, ge=0, le=252)
+
+
+class StrategySignal(BaseModel):
+    """Normalized output produced by every DSL or trusted Python component."""
+
+    component_id: str
+    score: float = Field(ge=-1.0, le=1.0)
+    target_exposure: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    reasons: list[str] = Field(default_factory=list)
+    metrics: dict[str, float | int | str | None] = Field(default_factory=dict)
+    state_updates: dict[str, Any] = Field(default_factory=dict)
+
+
+class StrategyIntent(BaseModel):
+    """Auditable, pre-trade output of the v2 runtime."""
+
+    decision: Decision = Decision.HOLD
+    target_exposure: float = Field(ge=0.0, le=1.0)
+    score: float = Field(ge=-1.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    state_before: str = "flat"
+    state_after: str = "flat"
+    component_signals: list[StrategySignal] = Field(default_factory=list)
+    trace: dict[str, Any] = Field(default_factory=dict)
+
+
+class StrategyRuntimeState(BaseModel):
+    """Persisted strategy memory; exposure remains continuous and independent."""
+
+    lifecycle: Literal["flat", "active", "cooldown"] = "flat"
+    target_exposure: float = Field(default=0.0, ge=0.0, le=1.0)
+    entry_price: float | None = Field(default=None, gt=0)
+    peak_price: float | None = Field(default=None, gt=0)
+    bars_in_state: int = Field(default=0, ge=0)
+    cooldown_remaining: int = Field(default=0, ge=0)
+    variables: dict[str, Any] = Field(default_factory=dict)
+    last_evaluated_date: str | None = None
+    last_output: dict[str, Any] = Field(default_factory=dict)
+
+
 class StrategySpec(BaseModel):
     """Versioned strategy definition produced by YAML or an LLM."""
 
     name: str
+    schema_version: Literal[1, 2] = 1
     version: str = "1.0.0"
     description: str = ""
     asset_types: list[AssetType] = Field(default_factory=lambda: [AssetType.ETF, AssetType.LOF])
@@ -219,7 +385,24 @@ class StrategySpec(BaseModel):
     position_size_pct: float = Field(default=0.2, ge=0, le=1)
     rebalance_frequency: Literal["daily", "weekly", "manual"] = "daily"
     position_model: PositionModel | None = None
+    components: list[HybridStrategyComponent] = Field(default_factory=list, max_length=50)
+    fusion: FusionSpec | None = None
+    position_policy: ContinuousPositionPolicy | None = None
+    state_policy: StrategyStatePolicy | None = None
     source: Literal["yaml", "llm", "user", "sandbox"] = "yaml"
+
+    @model_validator(mode="after")
+    def validate_schema_version(self):
+        if self.schema_version == 2:
+            if not self.components:
+                raise ValueError("StrategySpec v2 必须至少包含一个 component")
+            ids = [item.id for item in self.components]
+            if len(ids) != len(set(ids)):
+                raise ValueError("StrategySpec v2 的 component.id 不能重复")
+            self.fusion = self.fusion or FusionSpec()
+            self.position_policy = self.position_policy or ContinuousPositionPolicy()
+            self.state_policy = self.state_policy or StrategyStatePolicy()
+        return self
 
 
 class PortfolioSpec(BaseModel):

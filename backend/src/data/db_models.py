@@ -143,6 +143,19 @@ class StrategyDeploymentRecord(Model):
         table = "strategy_deployments"
 
 
+class StrategyRuntimeStateRecord(Model):
+    id = fields.CharField(max_length=256, primary_key=True)
+    deployment_id = fields.CharField(max_length=128, db_index=True)
+    ticker = fields.CharField(max_length=32)
+    state_json = fields.TextField()
+    last_evaluated_date = fields.CharField(max_length=32, null=True)
+    updated_at = fields.CharField(max_length=64)
+
+    class Meta:
+        table = "strategy_runtime_states"
+        unique_together = (("deployment_id", "ticker"),)
+
+
 class ResearchStrategyCandidateRecord(Model):
     candidate_id = fields.CharField(max_length=128, primary_key=True)
     status = fields.CharField(max_length=32, db_index=True)
@@ -185,6 +198,7 @@ __models__ = [
     AutomationEventRecord,
     BacktestExperimentRecord,
     StrategyDeploymentRecord,
+    StrategyRuntimeStateRecord,
     ResearchStrategyCandidateRecord,
     ArtifactRecord,
 ]

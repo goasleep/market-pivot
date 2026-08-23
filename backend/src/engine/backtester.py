@@ -30,7 +30,13 @@ from engine.portfolio_allocator import (
     rebalance_portfolio,
     target_weights,
 )
-from engine.strategy_runtime import decision_from_strategy, target_exposure_from_strategy
+from engine.strategy_runtime import (
+    decision_from_intent,
+    decision_from_strategy,
+    evaluate_strategy_intent,
+    normalize_target_exposures,
+    target_exposure_from_strategy,
+)
 from engine.trading_engine import TimeAwareTradingEngine, decision_shares
 from graph.workflow import get_workflow
 from models.schemas import (
@@ -38,10 +44,12 @@ from models.schemas import (
     Decision,
     PortfolioSpec,
     SimulationAccountConfig,
+    StrategyRuntimeState,
     StrategySpec,
     TradeDecision,
 )
 from strategies.compiler import strategy_from_mapping
+from strategies.plugin_registry import strategy_plugins_manifest
 
 # Kept as a module alias for existing test doubles and callers that patch the
 # workflow. Production invocation is routed through ResearchService below.
@@ -149,6 +157,8 @@ async def run_backtest(
     pending_decision = None
     pending_exposure: float | None = None
     target_exposure = 0.0
+    hybrid_state = StrategyRuntimeState()
+    latest_intent = None
 
     for i, row in df.iterrows():
         current_date = row["date"]
@@ -182,9 +192,28 @@ async def run_backtest(
             try:
                 if executable_spec:
                     history = df.iloc[: i + 1]
-                    dynamic_exposure = target_exposure_from_strategy(executable_spec, history)
+                    if executable_spec.schema_version == 2:
+                        market_value = engine.portfolio.total_value - engine.portfolio.cash
+                        current_exposure = (
+                            market_value / engine.portfolio.total_value if engine.portfolio.total_value else 0.0
+                        )
+                        latest_intent, hybrid_state, _ = evaluate_strategy_intent(
+                            executable_spec,
+                            history,
+                            asset_type=asset_type,
+                            current_exposure=current_exposure,
+                            state=hybrid_state,
+                        )
+                        dynamic_exposure = latest_intent.target_exposure
+                        frequency = executable_spec.position_policy.rebalance_frequency
+                    else:
+                        dynamic_exposure = target_exposure_from_strategy(executable_spec, history)
+                        frequency = (
+                            executable_spec.position_model.rebalance_frequency
+                            if executable_spec.position_model is not None
+                            else executable_spec.rebalance_frequency
+                        )
                     if dynamic_exposure is not None:
-                        frequency = executable_spec.position_model.rebalance_frequency
                         if _should_rebalance(day_count, frequency):
                             target_exposure = dynamic_exposure
                             if fill_time == "same_close":
@@ -271,7 +300,9 @@ async def run_backtest(
                 target_position = 1
             elif pending_decision.decision == Decision.SELL:
                 target_position = 0
-        if executable_spec and executable_spec.position_model is not None:
+        if executable_spec and (
+            executable_spec.schema_version == 2 or executable_spec.position_model is not None
+        ):
             effective_target = pending_exposure if pending_exposure is not None else target_exposure
         else:
             effective_target = float(target_position) * (executable_spec.position_size_pct if executable_spec else 1.0)
@@ -281,6 +312,8 @@ async def run_backtest(
                 "target_position": target_position,
                 "target_exposure": round(float(effective_target), 8),
                 "actual_exposure": round(actual_exposure, 8),
+                "score": latest_intent.score if latest_intent is not None else None,
+                "state": latest_intent.state_after if latest_intent is not None else None,
             }
         )
 
@@ -301,7 +334,10 @@ async def run_backtest(
             float(evaluation_frame.iloc[-1]["close"] / evaluation_frame.iloc[0]["close"] - 1),
             6,
         ),
-        "execution": _execution_manifest(engine, fill_time),
+        "execution": {
+            **_execution_manifest(engine, fill_time),
+            "strategy_plugins": strategy_plugins_manifest(executable_spec.components) if executable_spec else [],
+        },
         "start_date": evaluation_frame.iloc[0]["date"],
         "end_date": end_date,
         "warmup_start_date": df.iloc[0]["date"],
@@ -455,6 +491,7 @@ async def run_pool_backtest(
     equity_curve: list[dict] = []
     portfolio_history: list[dict] = []
     target_weights_history: list[dict] = []
+    hybrid_states: dict[str, StrategyRuntimeState] = {}
 
     for day_count, current_date in enumerate(trading_dates):
         engine.advance_to_date(current_date)
@@ -464,7 +501,7 @@ async def run_pool_backtest(
             if not matches.empty:
                 rows_today[symbol] = matches.iloc[-1]
 
-        if portfolio is not None and pending_target is not None:
+        if pending_target is not None:
             pending_weights, pending_decisions = pending_target
             rebalance_portfolio(
                 engine,
@@ -483,6 +520,7 @@ async def run_pool_backtest(
         engine.update_prices({symbol: float(row["close"]) for symbol, row in rows_today.items()})
 
         if day_count % decision_interval == 0:
+            hybrid_targets: dict[str, float] = {}
             day_decisions: dict[str, TradeDecision] = {
                 position.ticker: TradeDecision(
                     ticker=position.ticker,
@@ -520,14 +558,40 @@ async def run_pool_backtest(
                         "progress": [],
                     }
                     if executable_spec:
-                        decision = _decision_from_strategy(
-                            executable_spec,
-                            history_until_day,
-                            asset_type=asset_type,
-                            ticker=symbol,
-                            current_price=current_price,
-                            has_position=bool(engine._find_position(symbol)),
-                        )
+                        if executable_spec.schema_version == 2:
+                            position_value = (
+                                engine._find_position(symbol).market_value
+                                if engine._find_position(symbol) is not None
+                                else 0.0
+                            )
+                            current_exposure = (
+                                position_value / engine.portfolio.total_value if engine.portfolio.total_value else 0.0
+                            )
+                            intent, next_state, _ = evaluate_strategy_intent(
+                                executable_spec,
+                                history_until_day,
+                                asset_type=asset_type,
+                                current_exposure=current_exposure,
+                                state=hybrid_states.get(symbol),
+                            )
+                            hybrid_states[symbol] = next_state
+                            hybrid_targets[symbol] = intent.target_exposure
+                            decision = decision_from_intent(
+                                executable_spec,
+                                intent,
+                                ticker=symbol,
+                                asset_type=asset_type,
+                                current_price=current_price,
+                            )
+                        else:
+                            decision = _decision_from_strategy(
+                                executable_spec,
+                                history_until_day,
+                                asset_type=asset_type,
+                                ticker=symbol,
+                                current_price=current_price,
+                                has_position=bool(engine._find_position(symbol)),
+                            )
                     else:
                         result = await research_service.run_state(
                             state,
@@ -549,7 +613,11 @@ async def run_pool_backtest(
                     if decision is None:
                         decision = TradeDecision(ticker=symbol, asset_type=asset_type, decision=Decision.HOLD)
                     day_decisions[symbol] = decision
-                    if portfolio is None and decision.decision != Decision.HOLD:
+                    if (
+                        portfolio is None
+                        and (executable_spec is None or executable_spec.schema_version == 1)
+                        and decision.decision != Decision.HOLD
+                    ):
                         if fill_time == "same_close":
                             _execute_decision(engine, decision, symbol, current_price, current_date)
                         else:
@@ -557,7 +625,37 @@ async def run_pool_backtest(
                 except Exception as exc:
                     logger.error(f"Agent error on {symbol} {current_date}: {exc}")
 
-            if portfolio is not None and _should_rebalance(day_count, portfolio.rebalance_frequency):
+            if executable_spec is not None and executable_spec.schema_version == 2:
+                policy = executable_spec.position_policy
+                if policy is not None and _should_rebalance(day_count, policy.rebalance_frequency):
+                    for position in engine.portfolio.positions:
+                        hybrid_targets.setdefault(
+                            position.ticker,
+                            (
+                                position.market_value / engine.portfolio.total_value
+                                if engine.portfolio.total_value
+                                else 0.0
+                            ),
+                        )
+                    weights = normalize_target_exposures(
+                        hybrid_targets,
+                        max_position_weight=(portfolio.max_position_weight if portfolio else policy.max_exposure),
+                        max_positions=(portfolio.max_positions if portfolio else len(valid)),
+                        cash_reserve=(portfolio.cash_reserve if portfolio else 1 - policy.max_exposure),
+                    )
+                    target_weights_history.append(
+                        {
+                            "date": current_date,
+                            "weights": weights,
+                            "cash_reserve": portfolio.cash_reserve if portfolio else 1 - policy.max_exposure,
+                        }
+                    )
+                    close_prices = {symbol: float(row["close"]) for symbol, row in rows_today.items()}
+                    if fill_time == "same_close":
+                        rebalance_portfolio(engine, weights, close_prices, day_decisions, current_date)
+                    else:
+                        pending_target = (weights, day_decisions)
+            elif portfolio is not None and _should_rebalance(day_count, portfolio.rebalance_frequency):
                 weights = target_weights(day_decisions, engine, portfolio)
                 target_weights_history.append(
                     {"date": current_date, "weights": weights, "cash_reserve": portfolio.cash_reserve}
@@ -591,7 +689,10 @@ async def run_pool_backtest(
         "portfolio_spec": portfolio.model_dump(mode="json") if portfolio else None,
         "data_snapshots": data_snapshots,
         "data_rejections": data_rejections,
-        "execution": _execution_manifest(engine, fill_time),
+        "execution": {
+            **_execution_manifest(engine, fill_time),
+            "strategy_plugins": strategy_plugins_manifest(executable_spec.components) if executable_spec else [],
+        },
         "tickers": list(valid),
         "start_date": start_date,
         "end_date": end_date,
@@ -607,7 +708,7 @@ async def run_pool_backtest(
         "equity_curve": equity_curve,
         "trades": [trade.model_dump(mode="json") for trade in engine.portfolio.trades],
     }
-    if portfolio is not None:
+    if portfolio is not None or (executable_spec is not None and executable_spec.schema_version == 2):
         payload["portfolio_history"] = portfolio_history
         payload["target_weights_history"] = target_weights_history
         payload["symbol_metrics"] = _symbol_metrics(valid, engine)

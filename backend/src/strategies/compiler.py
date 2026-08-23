@@ -6,7 +6,15 @@ from typing import Any
 
 import pandas as pd
 
-from models.schemas import AssetType, IndicatorSpec, StrategyCondition, StrategySpec
+from models.schemas import (
+    AssetType,
+    IndicatorSpec,
+    StrategyCondition,
+    StrategyExpression,
+    StrategyOperand,
+    StrategySpec,
+)
+from strategies.plugin_registry import get_strategy_plugin
 
 SUPPORTED_INDICATORS = frozenset(
     {
@@ -184,6 +192,8 @@ def strategy_from_mapping(data: dict[str, Any], *, source: str | None = None) ->
     """
     payload = dict(data)
     payload.setdefault("name", "generated_strategy")
+    if payload.get("components") and "schema_version" not in payload:
+        payload["schema_version"] = 2
     if source:
         payload["source"] = source
     if isinstance(payload.get("asset_types"), str):
@@ -213,7 +223,7 @@ def strategy_from_mapping(data: dict[str, Any], *, source: str | None = None) ->
     spec = StrategySpec.model_validate(payload)
     errors = validate_strategy_spec(spec)
     if errors:
-        raise ValueError("策略包含不受支持的指标: " + "; ".join(errors))
+        raise ValueError("策略包含不受支持的指标或组件: " + "; ".join(errors))
     return spec
 
 
@@ -329,6 +339,37 @@ def _indicator(
     return None
 
 
+def indicator_value(
+    history: pd.DataFrame,
+    operand: StrategyOperand,
+    indicator_specs: list[IndicatorSpec] | None = None,
+) -> float | list[float] | None:
+    """Resolve an expression operand without exposing the private indicator implementation."""
+
+    if operand.type == "constant":
+        return operand.value
+    return _indicator(history, operand.indicator or "", operand.window, indicator_specs)
+
+
+def _expression_indicators(expression: StrategyExpression, *, depth: int = 1) -> tuple[list[str], list[str]]:
+    if depth > 12:
+        return [], ["表达式嵌套深度不能超过 12"]
+    names = []
+    errors = []
+    for operand in (expression.left, expression.right):
+        if operand is not None and operand.type == "indicator" and operand.indicator:
+            names.append(operand.indicator)
+    for child in expression.children:
+        child_names, child_errors = _expression_indicators(child, depth=depth + 1)
+        names.extend(child_names)
+        errors.extend(child_errors)
+    if expression.expression is not None:
+        child_names, child_errors = _expression_indicators(expression.expression, depth=depth + 1)
+        names.extend(child_names)
+        errors.extend(child_errors)
+    return names, errors
+
+
 def validate_strategy_spec(
     spec: StrategySpec,
     *,
@@ -344,6 +385,16 @@ def validate_strategy_spec(
     }
     requested = [*spec.indicators, *(item.name for item in spec.indicator_specs)]
     requested.extend(condition.indicator for condition in [*spec.entry_conditions, *spec.exit_conditions])
+    for component in spec.components:
+        if component.expression is not None:
+            names, expression_errors = _expression_indicators(component.expression)
+            requested.extend(names)
+            errors.extend(expression_errors)
+        if component.type == "python":
+            try:
+                get_strategy_plugin(component.plugin or "", component.plugin_version)
+            except ValueError as exc:
+                errors.append(str(exc))
     for name in requested:
         canonical = aliases.get(name.lower(), name.lower())
         if canonical.startswith(("ma", "ema")) and canonical[2:].isdigit():
@@ -357,6 +408,88 @@ def validate_strategy_spec(
             if missing:
                 errors.append(f"{name} 缺少字段: {', '.join(missing)}")
     return list(dict.fromkeys(errors))
+
+
+def _compare_values(
+    left: float | list[float] | None,
+    operator: str,
+    right: float | list[float] | None,
+) -> bool:
+    if left is None or isinstance(left, list) or right is None:
+        return False
+    if operator == "between":
+        return isinstance(right, list) and len(right) == 2 and float(right[0]) <= left <= float(right[1])
+    if isinstance(right, list):
+        return False
+    return {
+        "gt": left > right,
+        "gte": left >= right,
+        "lt": left < right,
+        "lte": left <= right,
+        "eq": left == right,
+    }[operator]
+
+
+def evaluate_expression(
+    expression: StrategyExpression,
+    history: pd.DataFrame,
+    *,
+    indicator_specs: list[IndicatorSpec] | None = None,
+) -> dict[str, Any]:
+    """Evaluate a recursive expression against the supplied historical prefix."""
+
+    def evaluate(item: StrategyExpression, frame: pd.DataFrame) -> dict[str, Any]:
+        if item.type == "compare":
+            left = indicator_value(frame, item.left, indicator_specs) if item.left else None
+            right = indicator_value(frame, item.right, indicator_specs) if item.right else None
+            matched = _compare_values(left, item.operator or "eq", right)
+            return {"type": item.type, "matched": matched, "left": left, "right": right, "operator": item.operator}
+        if item.type in {"crosses_above", "crosses_below"}:
+            current_left = indicator_value(frame, item.left, indicator_specs) if item.left else None
+            current_right = indicator_value(frame, item.right, indicator_specs) if item.right else None
+            previous = frame.iloc[:-1]
+            previous_left = indicator_value(previous, item.left, indicator_specs) if item.left else None
+            previous_right = indicator_value(previous, item.right, indicator_specs) if item.right else None
+            values = (previous_left, previous_right, current_left, current_right)
+            if any(value is None or isinstance(value, list) for value in values):
+                matched = False
+            elif item.type == "crosses_above":
+                matched = previous_left <= previous_right and current_left > current_right
+            else:
+                matched = previous_left >= previous_right and current_left < current_right
+            return {
+                "type": item.type,
+                "matched": matched,
+                "previous": {"left": previous_left, "right": previous_right},
+                "current": {"left": current_left, "right": current_right},
+            }
+        if item.type in {"all", "any"}:
+            children = [evaluate(child, frame) for child in item.children]
+            matched = all(child["matched"] for child in children) if item.type == "all" else any(
+                child["matched"] for child in children
+            )
+            return {"type": item.type, "matched": matched, "children": children}
+        if item.type == "not":
+            child = evaluate(item.expression, frame) if item.expression else {"matched": False}
+            return {"type": item.type, "matched": not child["matched"], "child": child}
+        if item.type in {"sustained", "count"}:
+            bars = item.bars or 1
+            outcomes = []
+            for offset in range(bars, 0, -1):
+                prefix = frame.iloc[: len(frame) - offset + 1]
+                outcomes.append(evaluate(item.expression, prefix) if item.expression else {"matched": False})
+            matched_count = sum(bool(outcome["matched"]) for outcome in outcomes)
+            matched = matched_count == bars if item.type == "sustained" else matched_count >= (item.minimum or bars)
+            return {
+                "type": item.type,
+                "matched": matched,
+                "bars": bars,
+                "matched_count": matched_count,
+                "outcomes": outcomes,
+            }
+        return {"type": item.type, "matched": False}
+
+    return evaluate(expression, history)
 
 
 def _matches(value: float | None, condition: StrategyCondition) -> bool:

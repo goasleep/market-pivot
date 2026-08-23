@@ -22,6 +22,7 @@ from models.schemas import (
     StrategyDeployment,
     StrategySpec,
 )
+from strategies.plugin_registry import strategy_plugins_manifest
 
 
 def _now() -> str:
@@ -130,6 +131,7 @@ class DeploymentService:
         if not experiment.get("strategy_spec"):
             raise ValueError("回测实验缺少可执行 StrategySpec")
         strategy = StrategySpec.model_validate(experiment["strategy_spec"])
+        plugin_manifest = strategy_plugins_manifest(strategy.components)
         if strategy.source == "sandbox":
             from application.strategy_candidates import strategy_candidates
 
@@ -156,8 +158,19 @@ class DeploymentService:
             raise ValueError("策略资产类型与回测结果不一致")
 
         execution = dict(result.get("execution") or {})
+        if strategy.schema_version == 2:
+            backtested_plugins = list(execution.get("strategy_plugins") or [])
+            if backtested_plugins != plugin_manifest:
+                raise ValueError("混合策略插件版本或代码哈希与回测实验不一致")
+            execution["strategy_plugins"] = plugin_manifest
         capital = float(initial_cash or result.get("initial_capital") or 1_000_000)
-        max_single = portfolio_spec.max_position_weight if portfolio_spec else strategy.position_size_pct
+        max_single = (
+            portfolio_spec.max_position_weight
+            if portfolio_spec
+            else strategy.position_policy.max_exposure
+            if strategy.schema_version == 2 and strategy.position_policy is not None
+            else strategy.position_size_pct
+        )
         max_total = 1 - portfolio_spec.cash_reserve if portfolio_spec else 0.95
         trading_rules = AssetTradingRules.defaults_for(asset_type).model_copy(
             update={
@@ -211,7 +224,14 @@ class DeploymentService:
             await self.accounts.update_config(account_id, account_config)
 
         strategy_json = _canonical(strategy)
-        digest = hashlib.sha256(strategy_json.encode()).hexdigest()
+        digest = hashlib.sha256(
+            _canonical(
+                {
+                    "strategy_spec": strategy.model_dump(mode="json"),
+                    "strategy_plugins": plugin_manifest,
+                }
+            ).encode()
+        ).hexdigest()
         deployment_id = f"deploy-{hashlib.sha256(deploy_key.encode()).hexdigest()[:20]}"
         timestamp = _now()
         row = await StrategyDeploymentRecord.create(

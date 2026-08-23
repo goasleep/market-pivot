@@ -1,0 +1,80 @@
+name: adaptive_hybrid
+display_name: 自适应混合策略
+version: 2.0.0
+schema_version: 2
+description: 趋势 Python 插件与嵌套 DSL 确认信号融合，输出连续目标仓位。
+category: hybrid
+default_active: false
+aliases:
+  - 混合策略
+asset_types:
+  - etf
+  - lof
+source: yaml
+indicators:
+  - rsi
+  - volume_ratio
+components:
+  - id: trend
+    type: python
+    role: signal
+    plugin: core.trend_score
+    plugin_version: 1.0.0
+    weight: 0.6
+    params:
+      fast_window: 10
+      slow_window: 60
+      sensitivity: 20
+  - id: confirmation
+    type: dsl
+    role: signal
+    weight: 0.4
+    score_when_true: 1
+    score_when_false: 0
+    expression:
+      type: any
+      children:
+        - type: all
+          children:
+            - type: compare
+              left: {type: indicator, indicator: rsi, window: 14}
+              operator: gte
+              right: {type: constant, value: 50}
+            - type: compare
+              left: {type: indicator, indicator: volume_ratio, window: 20}
+              operator: gte
+              right: {type: constant, value: 1}
+        - type: sustained
+          bars: 3
+          expression:
+            type: compare
+            left: {type: indicator, indicator: rsi, window: 14}
+            operator: gte
+            right: {type: constant, value: 55}
+  - id: regime
+    type: python
+    role: router
+    plugin: core.market_regime
+    plugin_version: 1.0.0
+    params:
+      lookback: 120
+fusion:
+  type: weighted_score
+  entry_threshold: 0.25
+  exit_threshold: 0.05
+  conflict_policy: hold
+position_policy:
+  mode: continuous
+  min_exposure: 0
+  max_exposure: 0.85
+  minimum_change: 0.03
+  max_increase_per_rebalance: 0.15
+  max_decrease_per_rebalance: 0.3
+  rebalance_frequency: weekly
+state_policy:
+  enabled: true
+  cooldown_bars_after_exit: 5
+stop_loss_pct: 0.08
+take_profit_pct: 0.2
+instructions: |
+  使用趋势强度、量价确认和市场状态路由融合信号；目标仓位连续变化，所有订单仍受组合风控和模拟撮合规则约束。

@@ -25,10 +25,11 @@ from strategies.skill_manager import register_strategy_spec
 
 STRATEGY_DESIGN_SYSTEM = """你是一个严格的量化策略设计 Agent。请为 A 股股票或场内基金设计可执行的日线策略。
 只允许使用用户提供的目标、日线 OHLCV 数据字段和下方受控指标，不能引用未来数据、实时新闻或当前才知道的财务数据。
-必须返回 JSON 对象，不能输出 Markdown。JSON 必须包含：name、version、description、asset_types、indicators、
-indicator_specs、entry_conditions、exit_conditions、entry_condition_logic、exit_condition_logic、
-stop_loss_pct、take_profit_pct、position_size_pct、
-rebalance_frequency、source。每个条件必须使用受控指标名称、gt/gte/lt/lte/eq/between 操作符和数值。
+必须返回 JSON 对象，不能输出 Markdown。普通策略使用 schema_version=1，并包含 name、version、description、
+asset_types、indicators、indicator_specs、entry_conditions、exit_conditions、entry_condition_logic、
+exit_condition_logic、stop_loss_pct、take_profit_pct、position_size_pct、rebalance_frequency、source。
+当且仅当用户明确要求混合策略、嵌套逻辑、连续仓位或 Python 插件时，使用 schema_version=2，并返回
+components、fusion、position_policy、state_policy；不得生成或内嵌任意 Python 源码。
 
 格式约束：
 1. indicators 必须是字符串数组，例如 ["ma", "rsi"]。
@@ -44,6 +45,12 @@ rebalance_frequency、source。每个条件必须使用受控指标名称、gt/g
    indicators=["ma_spread_5_20"]，indicator_specs=[{"name":"ma_spread_pct","alias":"ma_spread_5_20",
    "source":"close","role":"entry","params":{"fast_window":5,"slow_window":20}}]；
    入场使用 ma_spread_5_20 gt 0，退出使用 ma_spread_5_20 lte 0。条件的 value 必须是数值，不能用另一个指标名。
+7. v2 的 DSL component 使用递归 expression，type 可为 compare/all/any/not/crosses_above/crosses_below/
+   sustained/count。比较两侧必须是 {"type":"indicator","indicator":"ma","window":20} 或
+   {"type":"constant","value":0}。Python component 只能引用已注册插件 core.trend_score@1.0.0 或
+   core.market_regime@1.0.0；YAML 只填写 plugin、plugin_version 和 params。
+8. v2 仓位必须使用 position_policy.mode=continuous，并设置 0 到 1 之间的 min_exposure、max_exposure、
+   minimum_change、max_increase_per_rebalance、max_decrease_per_rebalance，不得使用固定仓位档位。
 """
 
 STRATEGY_REPAIR_SYSTEM = STRATEGY_DESIGN_SYSTEM + """
