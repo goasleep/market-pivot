@@ -30,7 +30,7 @@ from engine.portfolio_allocator import (
     rebalance_portfolio,
     target_weights,
 )
-from engine.strategy_runtime import decision_from_strategy
+from engine.strategy_runtime import decision_from_strategy, target_exposure_from_strategy
 from engine.trading_engine import TimeAwareTradingEngine, decision_shares
 from graph.workflow import get_workflow
 from models.schemas import (
@@ -64,6 +64,7 @@ async def run_backtest(
     capture_data: bool = False,
     prepared_data: tuple[pd.DataFrame, dict[str, Any]] | None = None,
     account_config: SimulationAccountConfig | dict[str, Any] | None = None,
+    evaluation_start_date: str | None = None,
 ) -> dict:
     """Run backtest over historical data.
 
@@ -112,8 +113,18 @@ async def run_backtest(
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     df = df.sort_values("date").reset_index(drop=True)
 
+    evaluation_start = evaluation_start_date or start_date
+    evaluation_frame = df[df["date"] >= evaluation_start].reset_index(drop=True)
+    if evaluation_frame.empty:
+        return _empty_result(ticker, evaluation_start, end_date, initial_capital, error="正式评价期没有行情数据")
     trading_dates = df["date"].tolist()
-    logger.info(f"Backtest period: {len(trading_dates)} trading days")
+    evaluation_dates = set(evaluation_frame["date"].tolist())
+    logger.info(
+        "Backtest input={} bars, evaluation={} bars starting {}",
+        len(trading_dates),
+        len(evaluation_frame),
+        evaluation_frame.iloc[0]["date"],
+    )
 
     # 2. Initialize engine
     rules = (
@@ -128,7 +139,7 @@ async def run_backtest(
 
     # Set initial position if provided
     if initial_position > 0:
-        first_price = float(df.iloc[0]["close"])
+        first_price = float(evaluation_frame.iloc[0]["close"])
         engine.seed_position(ticker, initial_position, first_price)
 
     # 3. Iterate over trading days
@@ -136,19 +147,31 @@ async def run_backtest(
     signal_curve: list[dict[str, Any]] = []
     day_count = 0
     pending_decision = None
+    pending_exposure: float | None = None
+    target_exposure = 0.0
 
     for i, row in df.iterrows():
         current_date = row["date"]
         current_price = float(row["close"])
+        is_evaluation = current_date in evaluation_dates
 
         engine.advance_to_date(current_date)
-        if pending_decision is not None:
+        if is_evaluation and pending_exposure is not None:
+            rebalance_portfolio(
+                engine,
+                {ticker: pending_exposure} if pending_exposure > 0 else {},
+                {ticker: float(row["open"])},
+                trade_date=current_date,
+            )
+            pending_exposure = None
+        if is_evaluation and pending_decision is not None:
             _execute_decision(engine, pending_decision, ticker, float(row["open"]), current_date)
             pending_decision = None
         engine.update_prices({ticker: current_price})
 
-        # Run agent at interval
-        if day_count % decision_interval == 0:
+        # Warm-up rows feed indicators only. Trading and metrics begin on the
+        # shared evaluation date for every strategy, including buy-and-hold.
+        if is_evaluation and day_count % decision_interval == 0:
             if progress_callback:
                 pct = engine.progress_pct
                 await progress_callback(
@@ -158,14 +181,31 @@ async def run_backtest(
 
             try:
                 if executable_spec:
-                    decision = _decision_from_strategy(
-                        executable_spec,
-                        df.iloc[: i + 1],
-                        asset_type=asset_type,
-                        ticker=ticker,
-                        current_price=current_price,
-                        has_position=bool(engine._find_position(ticker)),
-                    )
+                    history = df.iloc[: i + 1]
+                    dynamic_exposure = target_exposure_from_strategy(executable_spec, history)
+                    if dynamic_exposure is not None:
+                        frequency = executable_spec.position_model.rebalance_frequency
+                        if _should_rebalance(day_count, frequency):
+                            target_exposure = dynamic_exposure
+                            if fill_time == "same_close":
+                                rebalance_portfolio(
+                                    engine,
+                                    {ticker: target_exposure} if target_exposure > 0 else {},
+                                    {ticker: current_price},
+                                    trade_date=current_date,
+                                )
+                            else:
+                                pending_exposure = target_exposure
+                        decision = None
+                    else:
+                        decision = _decision_from_strategy(
+                            executable_spec,
+                            history,
+                            asset_type=asset_type,
+                            ticker=ticker,
+                            current_price=current_price,
+                            has_position=bool(engine._find_position(ticker)),
+                        )
                 else:
                     context = await build_market_context(
                         ticker,
@@ -211,18 +251,18 @@ async def run_backtest(
             except Exception as e:
                 logger.error(f"Agent error on {current_date}: {e}")
 
+        if not is_evaluation:
+            continue
+
+        market_value = engine.portfolio.total_value - engine.portfolio.cash
+        actual_exposure = market_value / engine.portfolio.total_value if engine.portfolio.total_value else 0.0
         equity_curve.append(
             {
                 "date": current_date,
                 "value": round(engine.portfolio.total_value, 2),
                 "cash": round(engine.portfolio.cash, 2),
-                "market_value": round(engine.portfolio.total_value - engine.portfolio.cash, 2),
-                "exposure": round(
-                    (engine.portfolio.total_value - engine.portfolio.cash) / engine.portfolio.total_value,
-                    8,
-                )
-                if engine.portfolio.total_value
-                else 0.0,
+                "market_value": round(market_value, 2),
+                "exposure": round(actual_exposure, 8),
             }
         )
         target_position = int(bool(engine._find_position(ticker)))
@@ -231,7 +271,18 @@ async def run_backtest(
                 target_position = 1
             elif pending_decision.decision == Decision.SELL:
                 target_position = 0
-        signal_curve.append({"date": current_date, "target_position": target_position})
+        if executable_spec and executable_spec.position_model is not None:
+            effective_target = pending_exposure if pending_exposure is not None else target_exposure
+        else:
+            effective_target = float(target_position) * (executable_spec.position_size_pct if executable_spec else 1.0)
+        signal_curve.append(
+            {
+                "date": current_date,
+                "target_position": target_position,
+                "target_exposure": round(float(effective_target), 8),
+                "actual_exposure": round(actual_exposure, 8),
+            }
+        )
 
         day_count += 1
 
@@ -246,10 +297,15 @@ async def run_backtest(
         "asset_type": asset_type.value,
         "strategy_spec": executable_spec.model_dump(mode="json") if executable_spec else None,
         "data_snapshot": data_snapshot,
-        "buy_hold_return": round(float(df.iloc[-1]["close"] / df.iloc[0]["close"] - 1), 6),
+        "buy_hold_return": round(
+            float(evaluation_frame.iloc[-1]["close"] / evaluation_frame.iloc[0]["close"] - 1),
+            6,
+        ),
         "execution": _execution_manifest(engine, fill_time),
-        "start_date": start_date,
+        "start_date": evaluation_frame.iloc[0]["date"],
         "end_date": end_date,
+        "warmup_start_date": df.iloc[0]["date"],
+        "evaluation_start_date": evaluation_frame.iloc[0]["date"],
         "initial_capital": initial_capital,
         "final_value": round(engine.portfolio.total_value, 2),
         "total_return": metrics["total_return"],

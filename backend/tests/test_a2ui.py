@@ -257,3 +257,81 @@ def test_sandbox_candidate_renders_source_validation_and_backtest_in_one_surface
     assert "generate_target_positions" in data["sourceCode"]
     assert data["validationRows"][0]["status"] == "通过"
     assert data["points"][-1]["value"] == 1_120_000
+
+
+def test_strategy_comparison_renders_auditable_research_sections_and_safe_artifacts():
+    comparison = {
+        "strategy_name": "buy_hold",
+        "display_name": "买入持有",
+        "total_return": 0.1,
+        "annualized_return": 0.05,
+        "max_drawdown": 0.08,
+        "sharpe_ratio": 0.6,
+        "calmar_ratio": 0.62,
+        "exposure": 0.95,
+        "turnover": 0.1,
+        "total_fees": 120,
+        "final_value": 1_100_000,
+        "equity_curve": [
+            {"date": "2020-01-02", "value": 1_000_000},
+            {"date": "2026-08-21", "value": 1_100_000},
+        ],
+        "drawdown_curve": [
+            {"date": "2020-01-02", "value": 0},
+            {"date": "2026-08-21", "value": -0.08},
+        ],
+        "diagnostics": {
+            "out_of_sample": {"out_of_sample_return": 0.03},
+            "rolling": [{"total_return": 0.1}, {"total_return": -0.1}],
+        },
+        "strategy_spec": {"position_size_pct": 0.95},
+        "entry_rules": [],
+        "exit_rules": [],
+    }
+    payload = {
+        "ticker": "510300",
+        "initial_capital": 1_000_000,
+        "evaluation_start_date": "2020-01-02",
+        "evaluation_end_date": "2026-08-21",
+        "warmup_bars": 252,
+        "benchmark": "buy_hold",
+        "ranking": ["buy_hold"],
+        "comparisons": [comparison],
+        "acceptance": {"satisfied": True, "checks": {"fair_evaluation_period": True}},
+        "conclusion": {
+            "official": True,
+            "absolute_return_winner": {
+                "strategy_name": "buy_hold",
+                "display_name": "买入持有",
+                "metric": "total_return",
+                "value": 0.1,
+            },
+            "tradeoffs": ["不存在唯一最好策略。"],
+            "limitations": ["历史表现不代表未来。"],
+        },
+        "data_validation": {
+            "status": "verified",
+            "selected_source": "eastmoney",
+            "selection_reason": "质量分最高",
+            "candidates": [],
+        },
+        "artifacts": [
+            {
+                "name": "报告.html",
+                "mime_type": "text/html",
+                "size_bytes": 1024,
+                "preview_url": "/api/artifacts/artifact-demo/preview",
+                "download_url": "/api/artifacts/artifact-demo/download",
+            }
+        ],
+    }
+
+    messages = render_tool_result("compare_strategy_backtests", json.dumps(payload))
+    components = messages[1]["updateComponents"]["components"]
+    model = messages[2]["updateDataModel"]["value"]
+
+    assert sum(item.get("component") == "MultiLineChart" for item in components) == 2
+    assert any(item.get("component") == "ArtifactLink" for item in components)
+    assert model["winners"][0]["strategy"] == "买入持有"
+    assert model["stabilityRows"][0]["rollingPositive"] == "+50.00%"
+    assert model["artifacts"][0]["downloadUrl"].startswith("/api/artifacts/")

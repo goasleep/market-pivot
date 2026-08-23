@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from math import sqrt
 from typing import Any
 
 import pandas as pd
@@ -94,6 +95,32 @@ def decision_from_strategy(
         ),
         evaluation,
     )
+
+
+def target_exposure_from_strategy(spec: StrategySpec, history: pd.DataFrame) -> float | None:
+    """Return a bounded exposure for dynamic position models.
+
+    ``None`` keeps legacy decision-based strategies on their existing path.
+    The calculation only consumes the supplied historical prefix.
+    """
+    model = spec.position_model
+    if model is None or model.type == "fixed":
+        return None
+    close = pd.to_numeric(history.get("close"), errors="coerce").dropna()
+    required = max(model.volatility_window + 1, model.trend_window if model.type == "trend_volatility_target" else 0)
+    if len(close) < required:
+        return 0.0
+    returns = close.pct_change(fill_method=None).dropna().tail(model.volatility_window)
+    realized = float(returns.std(ddof=0) * sqrt(252)) if len(returns) >= model.volatility_window else 0.0
+    if not pd.notna(realized) or realized <= 0:
+        exposure = model.max_exposure
+    else:
+        exposure = model.target_volatility / realized
+    if model.type == "trend_volatility_target":
+        trend = float(close.tail(model.trend_window).mean())
+        if float(close.iloc[-1]) <= trend:
+            exposure = 0.0
+    return round(min(max(float(exposure), model.min_exposure), model.max_exposure), 10)
 
 
 def plan_rebalance(

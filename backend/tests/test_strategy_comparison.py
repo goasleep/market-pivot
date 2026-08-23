@@ -9,16 +9,19 @@ def test_standard_suite_has_distinct_benchmark_trend_momentum_and_reversal_strat
     suite = standard_strategy_suite("etf")
     names = {item.name for item in suite}
 
-    assert len(suite) == 8
+    assert len(suite) == 11
     assert {
         "buy_hold",
         "ma_5_20",
         "ma_20_60",
         "momentum_20",
+        "momentum_252",
         "rsi_reversal",
         "bollinger_reversal",
         "breakout_20",
         "trend_pullback",
+        "volatility_target_15",
+        "trend_volatility_target",
     } == names
     assert all(item.asset_types == ["etf"] or item.asset_types[0].value == "etf" for item in suite)
 
@@ -98,7 +101,7 @@ async def test_formal_comparison_uses_one_snapshot_and_satisfies_full_contract(m
 
     assert fetches == 1
     assert prepared_ids == {id(prepared)}
-    assert result["strategy_count"] == 8
+    assert result["strategy_count"] == 11
     assert result["acceptance"]["satisfied"] is True
     assert result["acceptance"]["missing"] == []
     assert set(result["cost_scenarios"]) == {"low", "base", "stress"}

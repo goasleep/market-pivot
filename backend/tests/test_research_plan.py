@@ -397,6 +397,54 @@ async def test_multi_strategy_request_uses_strategy_comparison_backtest_tool():
     }
 
 
+@pytest.mark.asyncio
+async def test_strategy_comparison_contract_overrides_planner_mode_and_preserves_user_dates():
+    captured = {}
+
+    @tool
+    async def compare_strategy_backtests(
+        ticker: str,
+        start_date: str,
+        end_date: str,
+        asset_type: str = "stock",
+        objective: str = "",
+    ) -> str:
+        """Compare strategies."""
+        captured.update(locals())
+        return json.dumps({"data_type": "strategy_backtest_comparison"})
+
+    step = ResearchStep.model_validate(
+        _step("backtest", "backtest")
+        | {
+            "inputs": {
+                "objective": "运行一个回测实验",
+                "execution_mode": "agent",
+                "start_date": "2018-01-01",
+                "end_date": "2026-08-23",
+            }
+        }
+    )
+    state = {
+        "request": {
+            "message": "给510300执行多个量化策略并对比，使用2016-08-22至2026-08-21。",
+            "intent": "backtest",
+            "tickers": ["510300"],
+            "asset_type": "etf",
+            "as_of_date": "2026-08-23",
+        },
+        "task_contract": {"operation": "strategy_comparison"},
+        "plan": _plan([_step("backtest", "backtest")]),
+        "step_results": {},
+    }
+    context = ResearchPlanContext(tools={compare_strategy_backtests.name: compare_strategy_backtests})
+
+    result = await _execute_step(step, state, context)
+
+    assert result["data_type"] == "strategy_backtest_comparison"
+    assert captured["start_date"] == "2016-08-22"
+    assert captured["end_date"] == "2026-08-21"
+
+
 def test_tool_failure_classifier_separates_retry_adjust_and_terminal_errors():
     assert _classify_failure("connection timeout while reading response") == "transient"
     assert _classify_failure("策略包含不受支持的指标: fast_ma") == "correctable"

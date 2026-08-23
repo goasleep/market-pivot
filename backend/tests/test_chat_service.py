@@ -422,6 +422,69 @@ async def test_chat_conversation_streams_history_chart_surface(store, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_chat_does_not_repeat_artifacts_already_rendered_in_a2ui_bundle(store, monkeypatch):
+    _, assistant_id = await store.prepare_task(
+        conversation_id="conversation-artifacts",
+        task_id="task-artifacts",
+        message="对比策略并生成回测产物",
+        history=[],
+    )
+    artifact = {
+        "artifact_id": "artifact-report",
+        "name": "策略回测报告.html",
+        "mime_type": "text/html",
+        "size_bytes": 1024,
+        "preview_url": "/api/artifacts/artifact-report/preview",
+        "download_url": "/api/artifacts/artifact-report/download",
+    }
+
+    class FakeAssetAgent:
+        def prepare(self, **kwargs):
+            return kwargs
+
+        async def chat(self, request):
+            del request
+            yield {
+                "type": "tool",
+                "name": "compare_strategy_backtests",
+                "status": "completed",
+                "result": json.dumps({"ticker": "510300", "artifacts": [artifact]}, ensure_ascii=False),
+            }
+            yield {"type": "text", "text": "策略对比已完成。"}
+
+    monkeypatch.setattr(chat_service, "asset_agent", FakeAssetAgent())
+    manager = ChatTaskManager(store)
+    await manager.start(
+        ChatTaskInput(
+            task_id="task-artifacts",
+            conversation_id="conversation-artifacts",
+            message="对比策略并生成回测产物",
+            history=[],
+            strategy=None,
+            asset_type="etf",
+            assistant_message_id=assistant_id,
+        )
+    )
+
+    events = [event async for event in manager.subscribe("task-artifacts")]
+    assert not any(event["event"] == "artifact" for event in events)
+    a2ui_messages = [
+        json.loads(event["data"])["a2ui"]
+        for event in events
+        if event["event"] == "a2ui"
+    ]
+    assert any(
+        component.get("component") == "ArtifactLink"
+        for message in a2ui_messages
+        for component in message.get("updateComponents", {}).get("components", [])
+    )
+    conversation = await store.get_conversation("conversation-artifacts")
+    assert conversation is not None
+    assistant_parts = conversation["messages"][-1]["parts"]
+    assert not any(part["type"] == "artifact" for part in assistant_parts)
+
+
+@pytest.mark.asyncio
 async def test_cancelled_task_rejects_late_parts(store):
     _, assistant_id = await store.prepare_task(
         conversation_id="conversation-1",

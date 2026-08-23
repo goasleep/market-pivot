@@ -117,6 +117,27 @@ data_sources = DataSourceRegistry(
             priority=10,
         ),
         DataSourceSpec(
+            "eastmoney",
+            "东方财富",
+            "market_data",
+            ("market.quote", "market.history", "market.fundamentals"),
+            priority=10,
+        ),
+        DataSourceSpec(
+            "tencent",
+            "腾讯证券",
+            "market_data",
+            ("market.history",),
+            priority=20,
+        ),
+        DataSourceSpec(
+            "sina",
+            "新浪财经",
+            "market_data",
+            ("market.quote", "market.history"),
+            priority=30,
+        ),
+        DataSourceSpec(
             "serper",
             "Serper / Google Search",
             "web_search",

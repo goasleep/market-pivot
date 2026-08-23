@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
 
-from engine.backtester import prepare_single_backtest_data, run_backtest
-from models.schemas import AssetType, IndicatorSpec, SimulationAccountConfig, StrategyCondition, StrategySpec
+from data.history_validation import prepare_cross_validated_backtest_data as prepare_single_backtest_data
+from engine.backtester import run_backtest
+from llm.service import get_llm_service
+from models.schemas import (
+    AssetType,
+    IndicatorSpec,
+    PositionModel,
+    SimulationAccountConfig,
+    StrategyCondition,
+    StrategySpec,
+)
 from models.strategy_research import (
+    ComparisonConclusion,
     CostScenario,
     StrategyComparisonSpec,
     TaskAcceptance,
@@ -40,6 +52,14 @@ def standard_strategy_suite(asset_type: AssetType | str) -> tuple[StrategySpec, 
             indicators=["return_pct"],
             entry_conditions=[StrategyCondition(indicator="return_pct", operator="gt", value=0, window=20)],
             exit_conditions=[StrategyCondition(indicator="return_pct", operator="lte", value=0, window=20)],
+            **common,
+        ),
+        StrategySpec(
+            name="momentum_252",
+            description="252 日动量为正时持有，作为长周期趋势对照",
+            indicators=["return_pct"],
+            entry_conditions=[StrategyCondition(indicator="return_pct", operator="gt", value=0, window=252)],
+            exit_conditions=[StrategyCondition(indicator="return_pct", operator="lte", value=0, window=252)],
             **common,
         ),
         StrategySpec(
@@ -88,6 +108,33 @@ def standard_strategy_suite(asset_type: AssetType | str) -> tuple[StrategySpec, 
                 StrategyCondition(indicator="price_vs_ma_pct", operator="lt", value=-3, window=20)
             ],
             stop_loss_pct=0.06,
+            **common,
+        ),
+        StrategySpec(
+            name="volatility_target_15",
+            description="20 日波动率目标 15%，每周调整 0% 至 95% 的目标仓位",
+            indicators=["volatility"],
+            position_model=PositionModel(
+                type="volatility_target",
+                volatility_window=20,
+                target_volatility=0.15,
+                max_exposure=0.95,
+                rebalance_frequency="weekly",
+            ),
+            **common,
+        ),
+        StrategySpec(
+            name="trend_volatility_target",
+            description="位于 MA60 上方时采用 15% 波动率目标，否则空仓",
+            indicators=["ma", "volatility"],
+            position_model=PositionModel(
+                type="trend_volatility_target",
+                volatility_window=20,
+                target_volatility=0.15,
+                trend_window=60,
+                max_exposure=0.95,
+                rebalance_frequency="weekly",
+            ),
             **common,
         ),
     )
@@ -165,11 +212,17 @@ def build_comparison_spec(
     objective: str = "",
 ) -> StrategyComparisonSpec:
     kind = AssetType(asset_type)
+    warmup_start = (date.fromisoformat(start_date) - timedelta(days=450)).isoformat()
     return StrategyComparisonSpec(
         ticker=ticker,
         asset_type=kind,
         start_date=start_date,
         end_date=end_date,
+        requested_start_date=start_date,
+        warmup_start_date=warmup_start,
+        evaluation_start_date=start_date,
+        evaluation_end_date=end_date,
+        warmup_bars=252,
         initial_capital=initial_capital,
         ranking_metric=_ranking_metric_for_objective(objective),
         strategies=tuple(strategies or standard_strategy_suite(kind)),
@@ -206,15 +259,56 @@ def _account_config(spec: StrategyComparisonSpec, scenario: CostScenario) -> Sim
     )
 
 
-async def compare_strategies(spec: StrategyComparisonSpec) -> dict[str, Any]:
+async def compare_strategies(
+    spec: StrategyComparisonSpec,
+    *,
+    publish_artifacts: bool = False,
+    generate_explanation: bool = False,
+) -> dict[str, Any]:
     """Run the formal comparison on one immutable dataset and verify completion."""
-    prepared = await prepare_single_backtest_data(
+    prepared_bundle = await prepare_single_backtest_data(
         ticker=spec.ticker,
-        start_date=spec.start_date,
-        end_date=spec.end_date,
+        start_date=spec.warmup_start_date or spec.start_date,
+        end_date=spec.evaluation_end_date or spec.end_date,
         asset_type=spec.asset_type,
     )
-    frame, snapshot = prepared
+    cross_validated_bundle = len(prepared_bundle) == 3
+    if cross_validated_bundle:
+        prepared_frame, snapshot, cross_validation = prepared_bundle
+    else:  # Compatibility for deterministic tests and injected legacy providers.
+        prepared_frame, snapshot = prepared_bundle
+        cross_validation = {
+            "status": "unverified",
+            "selected_source": snapshot.get("source", "injected"),
+            "selection_reason": "仅提供一个注入的数据快照",
+            "rule_version": "history-cross-validation-v1",
+            "candidates": [],
+            "comparison": {"status": "unverified"},
+            "differences": [],
+        }
+    requested_start = spec.evaluation_start_date or spec.requested_start_date or spec.start_date
+    before_requested = prepared_frame[prepared_frame["date"] < requested_start]
+    if not cross_validated_bundle:
+        evaluation_start_candidate = requested_start
+    elif len(before_requested) >= spec.warmup_bars:
+        evaluation_start_candidate = requested_start
+    elif len(prepared_frame) > spec.warmup_bars:
+        evaluation_start_candidate = str(prepared_frame.iloc[spec.warmup_bars]["date"])
+    else:
+        evaluation_start_candidate = str(prepared_frame.iloc[-1]["date"])
+    frame = prepared_frame[prepared_frame["date"] <= (spec.evaluation_end_date or spec.end_date)].reset_index(drop=True)
+    eligible_evaluation_rows = frame[frame["date"] >= evaluation_start_candidate]
+    evaluation_start = (
+        str(eligible_evaluation_rows.iloc[0]["date"])
+        if not eligible_evaluation_rows.empty
+        else str(frame.iloc[-1]["date"])
+    )
+    prepared = (
+        prepared_bundle
+        if not cross_validated_bundle and len(frame) == len(prepared_frame)
+        else (frame, snapshot)
+    )
+    evaluation_frame = frame[frame["date"] >= evaluation_start].reset_index(drop=True)
     base = next(item for item in spec.cost_scenarios if item.name == "base")
 
     results = []
@@ -231,6 +325,7 @@ async def compare_strategies(spec: StrategyComparisonSpec) -> dict[str, Any]:
             strategy_spec=strategy.model_dump(mode="json"),
             prepared_data=prepared,
             account_config=_account_config(spec, base),
+            evaluation_start_date=evaluation_start,
         )
         base_results[strategy.name] = result
         results.append(_comparison_row(strategy, result))
@@ -239,11 +334,11 @@ async def compare_strategies(spec: StrategyComparisonSpec) -> dict[str, Any]:
     for item in results:
         item["excess_return"] = round(item["total_return"] - benchmark["total_return"], 6)
         item["metrics"]["excess_return"] = item["excess_return"]
-        item["diagnostics"] = _curve_diagnostics(item["equity_curve"], frame, spec.out_of_sample_ratio)
+        item["diagnostics"] = _curve_diagnostics(item["equity_curve"], evaluation_frame, spec.out_of_sample_ratio)
 
-    cost_analysis = await _run_cost_scenarios(spec, prepared, base_results)
+    cost_analysis = await _run_cost_scenarios(spec, prepared, base_results, evaluation_start)
     cost_consistency = _base_cost_consistency(results, cost_analysis.get("base", []))
-    sensitivity = await _run_parameter_sensitivity(spec, prepared, base)
+    sensitivity = await _run_parameter_sensitivity(spec, prepared, base, evaluation_start)
     ranking = [
         item["strategy_name"]
         for item in sorted(
@@ -252,13 +347,26 @@ async def compare_strategies(spec: StrategyComparisonSpec) -> dict[str, Any]:
             reverse=True,
         )
     ]
-    actual_years = _history_years(snapshot)
+    actual_years = max(
+        (
+            date.fromisoformat(str(snapshot["actual_end_date"]))
+            - date.fromisoformat(str(evaluation_start))
+        ).days
+        / 365.25,
+        0,
+    )
     payload: dict[str, Any] = {
+        "comparison_id": f"strategy-comparison-{uuid4().hex[:16]}",
         "data_type": "strategy_backtest_comparison",
         "ticker": spec.ticker,
         "asset_type": spec.asset_type.value,
-        "start_date": spec.start_date,
+        "start_date": evaluation_start,
         "end_date": spec.end_date,
+        "requested_start_date": spec.requested_start_date or spec.start_date,
+        "warmup_start_date": snapshot["actual_start_date"],
+        "evaluation_start_date": evaluation_start,
+        "evaluation_end_date": spec.evaluation_end_date or spec.end_date,
+        "warmup_bars": len(frame[frame["date"] < evaluation_start]),
         "actual_start_date": snapshot["actual_start_date"],
         "actual_end_date": snapshot["actual_end_date"],
         "history_years": round(actual_years, 2),
@@ -274,6 +382,7 @@ async def compare_strategies(spec: StrategyComparisonSpec) -> dict[str, Any]:
         }[spec.ranking_metric],
         "task_contract": spec.task_contract.model_dump(mode="json"),
         "data_snapshot": snapshot,
+        "data_validation": cross_validation,
         "execution": _account_config(spec, base).effective_trading_rules(spec.asset_type).model_dump(mode="json")
         | {"fill_time": spec.fill_time},
         "comparisons": results,
@@ -283,6 +392,21 @@ async def compare_strategies(spec: StrategyComparisonSpec) -> dict[str, Any]:
         "parameter_sensitivity": sensitivity,
     }
     payload["acceptance"] = _acceptance(spec, payload).model_dump(mode="json")
+    conclusion = build_comparison_conclusion(payload, minimum_history_years=spec.task_contract.minimum_history_years)
+    if generate_explanation:
+        conclusion = await enrich_comparison_conclusion(conclusion, payload)
+    payload["conclusion"] = conclusion.model_dump(mode="json")
+    payload["artifacts"] = []
+    if publish_artifacts:
+        from application.comparison_artifacts import create_comparison_artifacts
+
+        try:
+            payload["artifacts"] = await create_comparison_artifacts(
+                payload,
+                selected_rows=frame.to_dict(orient="records"),
+            )
+        except Exception as exc:
+            payload["artifact_error"] = str(exc)[:500]
     return payload
 
 
@@ -316,6 +440,7 @@ def _comparison_row(strategy: StrategySpec, result: dict[str, Any]) -> dict[str,
         "final_value": result.get("final_value", 0),
         "total_trades": result.get("total_trades", 0),
         "equity_curve": result.get("equity_curve", []),
+        "signal_curve": result.get("signal_curve", []),
         "drawdown_curve": _drawdown_curve(result.get("equity_curve", [])),
         "trades": result.get("trades", []),
         "error": result.get("error"),
@@ -334,6 +459,7 @@ async def _run_cost_scenarios(
     spec: StrategyComparisonSpec,
     prepared: tuple[pd.DataFrame, dict[str, Any]],
     base_results: dict[str, dict[str, Any]],
+    evaluation_start_date: str,
 ) -> dict[str, list[dict[str, Any]]]:
     output: dict[str, list[dict[str, Any]]] = {}
     for scenario in spec.cost_scenarios:
@@ -357,6 +483,7 @@ async def _run_cost_scenarios(
                     strategy_spec=strategy.model_dump(mode="json"),
                     prepared_data=prepared,
                     account_config=_account_config(spec, scenario),
+                    evaluation_start_date=evaluation_start_date,
                 )
             rows.append(
                 {
@@ -399,6 +526,16 @@ def _base_cost_consistency(
 
 def _parameter_variants(strategy: StrategySpec) -> list[StrategySpec]:
     variants: list[StrategySpec] = []
+    if strategy.position_model and strategy.position_model.type in {
+        "volatility_target",
+        "trend_volatility_target",
+    }:
+        for target in (0.10, 0.15, 0.20):
+            clone = strategy.model_copy(deep=True)
+            clone.name = f"{strategy.name}_{int(target * 100)}"
+            clone.position_model.target_volatility = target
+            variants.append(clone)
+        return variants
     if strategy.name.startswith("ma_"):
         pairs = [(3, 15), (5, 20), (10, 30)] if strategy.name == "ma_5_20" else [(15, 50), (20, 60), (30, 90)]
         for fast, slow in pairs:
@@ -410,6 +547,7 @@ def _parameter_variants(strategy: StrategySpec) -> list[StrategySpec]:
     else:
         windows = {
             "momentum_20": (10, 20, 60),
+            "momentum_252": (126, 189, 252),
             "bollinger_reversal": (15, 20, 30),
             "breakout_20": (10, 20, 55),
         }.get(strategy.name)
@@ -443,6 +581,7 @@ async def _run_parameter_sensitivity(
     spec: StrategyComparisonSpec,
     prepared: tuple[pd.DataFrame, dict[str, Any]],
     base: CostScenario,
+    evaluation_start_date: str,
 ) -> dict[str, Any]:
     output: dict[str, Any] = {}
     for strategy in spec.strategies:
@@ -463,6 +602,7 @@ async def _run_parameter_sensitivity(
                 strategy_spec=variant.model_dump(mode="json"),
                 prepared_data=prepared,
                 account_config=_account_config(spec, base),
+                evaluation_start_date=evaluation_start_date,
             )
             rows.append(
                 {
@@ -579,9 +719,144 @@ def _acceptance(spec: StrategyComparisonSpec, payload: dict[str, Any]) -> TaskAc
         "out_of_sample": all(bool(row.get("diagnostics", {}).get("out_of_sample")) for row in rows),
         "stability": bool(payload.get("parameter_sensitivity")),
         "shared_data_snapshot": bool(payload.get("data_snapshot", {}).get("sha256")),
+        "cross_validation_attempted": bool(payload.get("data_validation", {}).get("rule_version")),
+        "fair_evaluation_period": all(
+            row.get("equity_curve")
+            and row["equity_curve"][0].get("date") == payload.get("evaluation_start_date")
+            for row in rows
+        ),
     }
     return TaskAcceptance(
         satisfied=all(checks.values()),
         checks=checks,
         missing=[name for name, passed in checks.items() if not passed],
     )
+
+
+def _winner(row: dict[str, Any] | None, metric: str, value: Any) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "strategy_name": row.get("strategy_name"),
+        "display_name": row.get("display_name"),
+        "metric": metric,
+        "value": value,
+    }
+
+
+def build_comparison_conclusion(
+    payload: dict[str, Any],
+    *,
+    minimum_history_years: float = 5.0,
+) -> ComparisonConclusion:
+    rows = [row for row in payload.get("comparisons", []) if not row.get("error")]
+    validation = payload.get("data_validation") or {}
+    official = (
+        float(payload.get("history_years", 0)) >= minimum_history_years
+        and validation.get("status") != "conflict"
+        and bool(rows)
+    )
+    warnings = []
+    if validation.get("status") != "verified":
+        warnings.append(f"历史行情交叉核验状态为 {validation.get('status', 'unknown')}。")
+    if float(payload.get("history_years", 0)) < minimum_history_years:
+        warnings.append(f"正式评价期不足 {minimum_history_years:g} 年，不输出正式优胜策略。")
+    limitations = [
+        "固定参数历史模拟不代表未来表现。",
+        "日线回测不模拟盘口排队、部分成交和真实流动性冲击。",
+        "样本外结果是固定策略留出段诊断，不等同于独立训练后的实盘验证。",
+    ]
+    if not official:
+        return ComparisonConclusion(
+            official=False,
+            tradeoffs=["数据或历史覆盖未达到正式排名标准，当前结果仅作探索性比较。"],
+            data_warnings=warnings,
+            limitations=limitations,
+        )
+
+    total = max(
+        rows,
+        key=lambda row: float(row["total_return"]) if row.get("total_return") is not None else float("-inf"),
+    )
+    sharpe_rows = [row for row in rows if row.get("sharpe_ratio") is not None]
+    sharpe = max(sharpe_rows, key=lambda row: float(row["sharpe_ratio"])) if sharpe_rows else None
+    drawdown = min(
+        rows,
+        key=lambda row: float(row["max_drawdown"]) if row.get("max_drawdown") is not None else float("inf"),
+    )
+    oos_rows = [
+        row
+        for row in rows
+        if row.get("diagnostics", {}).get("out_of_sample", {}).get("out_of_sample_return") is not None
+    ]
+    oos = (
+        max(
+            oos_rows,
+            key=lambda row: float(row["diagnostics"]["out_of_sample"]["out_of_sample_return"]),
+        )
+        if oos_rows
+        else None
+    )
+    stable = [
+        row
+        for row in rows
+        if payload.get("parameter_sensitivity", {}).get(row.get("strategy_name"), {}).get("status") == "stable"
+    ]
+    robustness_pool = stable or rows
+    stress_by_name = {
+        row.get("strategy_name"): row for row in payload.get("cost_scenarios", {}).get("stress", [])
+    }
+    robustness = max(
+        robustness_pool,
+        key=lambda row: (
+            float(stress_by_name[row.get("strategy_name")]["total_return"])
+            if stress_by_name.get(row.get("strategy_name"), {}).get("total_return") is not None
+            else float("-inf")
+        ),
+    )
+    return ComparisonConclusion(
+        official=True,
+        absolute_return_winner=_winner(total, "total_return", total.get("total_return")),
+        risk_adjusted_winner=_winner(sharpe, "sharpe_ratio", sharpe.get("sharpe_ratio") if sharpe else None),
+        drawdown_winner=_winner(drawdown, "max_drawdown", drawdown.get("max_drawdown")),
+        out_of_sample_winner=_winner(
+            oos,
+            "out_of_sample_return",
+            oos.get("diagnostics", {}).get("out_of_sample", {}).get("out_of_sample_return") if oos else None,
+        ),
+        robustness_winner=_winner(
+            robustness,
+            "stress_total_return",
+            stress_by_name.get(robustness.get("strategy_name"), {}).get("total_return"),
+        ),
+        tradeoffs=[
+            "绝对收益、风险调整收益、回撤控制和样本外表现使用不同评价维度，因此不存在唯一最好策略。",
+            "低仓位策略通常能降低回撤，但也可能牺牲趋势行情中的绝对收益。",
+        ],
+        data_warnings=warnings,
+        limitations=limitations,
+    )
+
+
+async def enrich_comparison_conclusion(
+    conclusion: ComparisonConclusion,
+    payload: dict[str, Any],
+) -> ComparisonConclusion:
+    """Let the LLM explain frozen facts without changing winners or metrics."""
+    prompt = {
+        "ticker": payload.get("ticker"),
+        "evaluation_period": [payload.get("evaluation_start_date"), payload.get("evaluation_end_date")],
+        "winners": conclusion.model_dump(mode="json", exclude={"interpretations"}),
+        "instruction": "只补充 2 至 4 条简洁权衡解释，不得修改优胜策略、指标或数值。",
+    }
+    try:
+        raw = await get_llm_service().chat_json(
+            json.dumps(prompt, ensure_ascii=False, default=str),
+            system='只返回 JSON：{"interpretations":["..."]}。不得返回策略排名或新数值。',
+        )
+        items = raw.get("interpretations") if isinstance(raw, dict) else None
+        if isinstance(items, list) and 1 <= len(items) <= 4 and all(isinstance(item, str) for item in items):
+            return conclusion.model_copy(update={"interpretations": [item[:300] for item in items]})
+    except Exception:
+        pass
+    return conclusion

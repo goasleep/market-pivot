@@ -45,6 +45,21 @@ def generate_target_positions(frame):
 
 
 @pytest.mark.asyncio
+async def test_sandbox_accepts_bounded_fractional_target_exposure():
+    source = """
+def generate_target_positions(frame):
+    volatility = frame["close"].pct_change().rolling(3).std()
+    return (0.08 / (volatility * (252 ** 0.5))).clip(0, 0.95).fillna(0)
+"""
+
+    positions, validation = await validate_and_run_signals(source, _frame())
+
+    assert validation.passed is True
+    assert validation.output_checks["bounded_exposure"] is True
+    assert any(value not in {0.0, 0.95} for value in positions)
+
+
+@pytest.mark.asyncio
 async def test_sandbox_rejects_future_dependent_signal_by_prefix_invariance():
     source = """
 def generate_target_positions(frame):

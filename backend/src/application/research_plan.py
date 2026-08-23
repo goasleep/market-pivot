@@ -188,7 +188,10 @@ class ResearchPlanService:
                     "report": "save_artifacts",
                 }.get(step.kind, step.kind)
                 result_payload = dict(result.output)
-                tool_name = str(result_payload.get("_tool_name") or tool_name)
+                if result_payload.get("data_type") == "strategy_backtest_comparison":
+                    tool_name = "compare_strategy_backtests"
+                else:
+                    tool_name = str(result_payload.get("_tool_name") or tool_name)
                 if result.status == "failed" and result.error and not result_payload.get("error"):
                     result_payload["error"] = result.error
                 yield {

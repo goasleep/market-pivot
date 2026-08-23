@@ -1,7 +1,7 @@
 """Restricted subprocess sandbox for LLM-authored research signals.
 
 This is deliberately not a general Python runner. Candidate code can only
-transform an immutable OHLCV frame into a binary target-position series. The
+transform an immutable OHLCV frame into a bounded target-exposure series. The
 trusted trading engine remains the only component allowed to create fills and
 performance metrics.
 """
@@ -22,8 +22,9 @@ import numpy as np
 import pandas as pd
 
 from engine.backtester import _calc_metrics, _execution_manifest
-from engine.trading_engine import TimeAwareTradingEngine, decision_shares
-from models.schemas import AssetType, Decision, SimulationAccountConfig, TradeDecision, TradePlan
+from engine.portfolio_allocator import rebalance_portfolio
+from engine.trading_engine import TimeAwareTradingEngine
+from models.schemas import AssetType, SimulationAccountConfig
 from models.strategy_research import SandboxPolicy, SandboxValidation
 
 
@@ -180,7 +181,7 @@ def _limit_child(policy: SandboxPolicy) -> Any:
     return apply_limits
 
 
-async def _run_child(source: str, frame: pd.DataFrame, policy: SandboxPolicy) -> list[int]:
+async def _run_child(source: str, frame: pd.DataFrame, policy: SandboxPolicy) -> list[float]:
     records = frame.where(pd.notna(frame), None).to_dict(orient="records")
     payload = json.dumps(
         {
@@ -220,18 +221,20 @@ async def _run_child(source: str, frame: pd.DataFrame, policy: SandboxPolicy) ->
         raise SandboxError("候选代码没有返回可解析的目标仓位") from exc
     if not isinstance(positions, list) or len(positions) != len(frame):
         raise SandboxError("目标仓位长度必须与输入数据完全一致")
-    normalized: list[int] = []
+    normalized: list[float] = []
     for value in positions:
         if isinstance(value, bool):
-            normalized.append(int(value))
+            normalized.append(float(value))
             continue
         try:
             number = float(value)
         except (TypeError, ValueError) as exc:
-            raise SandboxError("目标仓位必须全部为 0 或 1") from exc
-        if not np.isfinite(number) or number not in {0.0, 1.0}:
-            raise SandboxError("MVP 沙盒仅接受 0/1 二元目标仓位")
-        normalized.append(int(number))
+            raise SandboxError("目标仓位必须全部为 0 到 0.95 的数值") from exc
+        if number == 1.0:
+            number = 0.95  # Backward-compatible mapping for legacy binary scripts.
+        if not np.isfinite(number) or not 0.0 <= number <= 0.95:
+            raise SandboxError("沙盒目标仓位必须位于 0 到 0.95 之间")
+        normalized.append(round(number, 10))
     return normalized
 
 
@@ -239,7 +242,7 @@ async def validate_and_run_signals(
     source: str,
     frame: pd.DataFrame,
     policy: SandboxPolicy | None = None,
-) -> tuple[list[int], SandboxValidation]:
+) -> tuple[list[float], SandboxValidation]:
     """Run twice and on historical prefixes to detect nondeterminism/leakage."""
     policy = policy or SandboxPolicy()
     static = validate_source(source, policy)
@@ -259,14 +262,17 @@ async def validate_and_run_signals(
             errors.append("相同输入重复执行得到不同信号")
         if not causal:
             errors.append("前缀不变性失败，候选信号可能使用未来数据")
+        output_checks = {
+            "length_matches": len(first) == len(frame),
+            "bounded_exposure": all(0 <= value <= 0.95 for value in first),
+            "finite": True,
+        }
+        if all(value in {0, 0.95} for value in first):
+            output_checks["binary_positions"] = True
         validation = SandboxValidation(
             passed=deterministic and causal,
             static_checks=static,
-            output_checks={
-                "length_matches": len(first) == len(frame),
-                "binary_positions": all(value in {0, 1} for value in first),
-                "finite": True,
-            },
+            output_checks=output_checks,
             deterministic=deterministic,
             causal=causal,
             errors=errors,
@@ -288,7 +294,7 @@ def replay_target_positions(
     ticker: str,
     asset_type: AssetType | str,
     frame: pd.DataFrame,
-    positions: list[int],
+    positions: list[float],
     initial_capital: float = 1_000_000,
     account_config: SimulationAccountConfig | None = None,
 ) -> dict[str, Any]:
@@ -306,24 +312,18 @@ def replay_target_positions(
     engine = TimeAwareTradingEngine(initial_capital=initial_capital, rules=rules)
     dates = frame["date"].astype(str).tolist()
     engine.set_available_dates(dates)
-    pending: int | None = None
+    pending: float | None = None
     curve: list[dict[str, Any]] = []
     for index, row in frame.reset_index(drop=True).iterrows():
         current_date = str(row["date"])
         engine.advance_to_date(current_date)
         if pending is not None:
-            current = engine._find_position(ticker)
-            if pending == 1 and current is None:
-                decision = TradeDecision(
-                    ticker=ticker,
-                    asset_type=kind,
-                    decision=Decision.BUY,
-                    plan=TradePlan(position_size=0.95),
-                )
-                shares = decision_shares(engine.portfolio, rules, decision, float(row["open"]))
-                engine.buy(ticker, shares, float(row["open"]), current_date)
-            elif pending == 0 and current is not None:
-                engine.sell(ticker, current.available_shares, float(row["open"]), current_date)
+            rebalance_portfolio(
+                engine,
+                {ticker: pending} if pending > 0 else {},
+                {ticker: float(row["open"])},
+                trade_date=current_date,
+            )
         engine.update_prices({ticker: float(row["close"])}, trigger_exits=False)
         total = engine.portfolio.total_value
         market_value = total - engine.portfolio.cash
@@ -334,6 +334,7 @@ def replay_target_positions(
                 "cash": round(engine.portfolio.cash, 2),
                 "market_value": round(market_value, 2),
                 "exposure": round(market_value / total, 8) if total else 0.0,
+                "target_exposure": round(float(positions[index]), 8),
             }
         )
         pending = positions[index]

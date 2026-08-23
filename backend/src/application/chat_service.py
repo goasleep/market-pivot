@@ -322,6 +322,15 @@ class ChatTaskManager:
                 surface = render_tool_result(name, str(result))
                 if surface:
                     await self._emit_a2ui(task_input, surface)
+                    if any(
+                        component.get("component") == "ArtifactLink"
+                        for message in surface
+                        for component in message.get("updateComponents", {}).get("components", [])
+                        if isinstance(component, dict)
+                    ):
+                        # The surface already exposes these files as one compact bundle.
+                        # Do not persist and stream a second set of standalone cards.
+                        artifacts = []
                 references = self._tool_references(name, tool_payload)
         return artifacts, references
 

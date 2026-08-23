@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import operator
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, TypedDict, get_args
@@ -147,8 +148,10 @@ def derive_task_contract(request: dict[str, Any]) -> TaskContract:
     """Translate user wording into terminal acceptance criteria before planning."""
     message = str(request.get("message", ""))
     intent = str(request.get("intent", "analyze"))
-    compares_strategies = intent == "backtest" and "策略" in message and any(
-        term in message for term in ("不同", "多个", "几个", "多种", "对比", "比较")
+    compares_strategies = (
+        intent == "backtest"
+        and "策略" in message
+        and any(term in message for term in ("不同", "多个", "几个", "多种", "对比", "比较"))
     )
     if compares_strategies:
         return strategy_comparison_contract()
@@ -318,8 +321,7 @@ def _validate_plan_contract(
     if any(step.kind in SINGLE_ATTEMPT_STEP_KINDS and step.max_attempts != 1 for step in plan.steps):
         raise ValueError("带外部写入副作用的报告步骤只允许执行一次")
     if plan.asset_type in {AssetType.ETF, AssetType.LOF} and any(
-        step.kind in {"technical", "comprehensive_analysis", "backtest", "comparison", "news"}
-        for step in plan.steps
+        step.kind in {"technical", "comprehensive_analysis", "backtest", "comparison", "news"} for step in plan.steps
     ):
         kinds = {step.kind for step in plan.steps}
         if not {"fund_nav", "liquidity"} <= kinds:
@@ -1124,25 +1126,45 @@ async def _execute_step(
     if step.kind == "comparison":
         return await _call_tool(context, "compare_quotes", {"tickers": tickers, "asset_type": asset_type})
     if step.kind == "backtest":
-        end_date = str(step.inputs.get("end_date") or request.get("as_of_date") or date.today().isoformat())
-        objective = str(step.inputs.get("objective") or request.get("message", ""))
-        compares_strategies = "策略" in objective and any(
-            term in objective for term in ("不同", "多个", "几个", "对比", "比较")
+        original_objective = str(request.get("message", ""))
+        explicit_dates = re.findall(r"\d{4}-\d{2}-\d{2}", original_objective)
+        explicit_start = explicit_end = None
+        if len(explicit_dates) >= 2:
+            try:
+                first_date = date.fromisoformat(explicit_dates[0])
+                second_date = date.fromisoformat(explicit_dates[1])
+                if first_date < second_date:
+                    explicit_start, explicit_end = first_date.isoformat(), second_date.isoformat()
+            except ValueError:
+                pass
+        end_date = str(
+            explicit_end or step.inputs.get("end_date") or request.get("as_of_date") or date.today().isoformat()
         )
-        sandbox_requested = any(term in objective.lower() for term in ("python", "代码", "沙盒", "自定义因子"))
+        objective = str(step.inputs.get("objective") or request.get("message", ""))
+        contract_operation = str((state.get("task_contract") or {}).get("operation") or "")
+        compares_strategies = contract_operation == "strategy_comparison" or (
+            "策略" in original_objective
+            and any(term in original_objective for term in ("不同", "多个", "几个", "多种", "对比", "比较"))
+        )
+        sandbox_requested = contract_operation == "sandbox_research" or any(
+            term in original_objective.lower() for term in ("python", "代码", "沙盒", "自定义因子")
+        )
         execution_mode = str(step.inputs.get("execution_mode") or "").lower()
-        if execution_mode == "comparison":
-            compares_strategies = True
-            sandbox_requested = False
-        elif execution_mode == "sandbox":
-            sandbox_requested = True
-            compares_strategies = False
-        elif execution_mode == "agent":
-            sandbox_requested = False
-            compares_strategies = False
+        if contract_operation not in {"strategy_comparison", "sandbox_research"}:
+            if execution_mode == "comparison":
+                compares_strategies = True
+                sandbox_requested = False
+            elif execution_mode == "sandbox":
+                sandbox_requested = True
+                compares_strategies = False
+            elif execution_mode == "agent":
+                sandbox_requested = False
+                compares_strategies = False
         default_days = 3652 if compares_strategies else 1826 if sandbox_requested else 365
         start_date = str(
-            step.inputs.get("start_date") or (date.fromisoformat(end_date) - timedelta(days=default_days)).isoformat()
+            explicit_start
+            or step.inputs.get("start_date")
+            or (date.fromisoformat(end_date) - timedelta(days=default_days)).isoformat()
         )
         shared_backtest_args = {
             "start_date": start_date,
@@ -1152,9 +1174,7 @@ async def _execute_step(
         if "initial_capital" in step.inputs:
             shared_backtest_args["initial_capital"] = float(step.inputs["initial_capital"])
         interval_args = (
-            {"decision_interval": int(step.inputs["decision_interval"])}
-            if "decision_interval" in step.inputs
-            else {}
+            {"decision_interval": int(step.inputs["decision_interval"])} if "decision_interval" in step.inputs else {}
         )
         if len(tickers) == 1 and sandbox_requested:
             return await _call_tool(
@@ -1300,10 +1320,13 @@ async def run_worker(
     runtime: Runtime[ResearchPlanContext],
 ) -> dict[str, Any]:
     step = ResearchStep.model_validate(state["step"])
-    prior = StepResult.model_validate((state.get("step_results") or {}).get(step.id) or {
-        "step_id": step.id,
-        "status": "pending",
-    })
+    prior = StepResult.model_validate(
+        (state.get("step_results") or {}).get(step.id)
+        or {
+            "step_id": step.id,
+            "status": "pending",
+        }
+    )
     attempt = prior.attempt + 1
     budget = ResearchBudget.model_validate(state["budget"])
     if state.get("tool_calls", 0) >= budget.max_tool_calls:

@@ -202,7 +202,7 @@ export function A2UIRenderer({ messages, onAction }: A2UIRendererProps) {
   if (!baseSurfaces.length) return null;
 
   return (
-    <div className="w-full space-y-3">
+    <div className="w-full min-w-0 max-w-full space-y-3">
       {baseSurfaces.map((surface) => (
         <SurfaceRenderer
           key={surface.id}
@@ -379,6 +379,73 @@ function LineChart({ points }: { points: unknown }) {
   );
 }
 
+function MultiLineChart({ series, ariaLabel }: { series: unknown; ariaLabel: string }) {
+  const palette = ["#2563eb", "#7c3aed", "#0891b2", "#ea580c"];
+  const validSeries = (Array.isArray(series) ? series : [])
+    .map((item, seriesIndex) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      const points = (Array.isArray(record.points) ? record.points : [])
+        .map((point) => {
+          if (!point || typeof point !== "object") return null;
+          const pointRecord = point as Record<string, unknown>;
+          const value = Number(pointRecord.value);
+          if (!Number.isFinite(value)) return null;
+          return { label: String(pointRecord.label || ""), value };
+        })
+        .filter((point): point is { label: string; value: number } => point !== null);
+      if (points.length < 2) return null;
+      return { name: String(record.name || `策略 ${seriesIndex + 1}`), points };
+    })
+    .filter((item): item is { name: string; points: Array<{ label: string; value: number }> } => item !== null);
+
+  const labels = validSeries[0]?.points.map((point) => point.label) || [];
+  const option = useMemo<EChartsOption>(() => ({
+    animation: false,
+    color: palette,
+    tooltip: { trigger: "axis" },
+    legend: {
+      type: "scroll",
+      top: 4,
+      left: 8,
+      right: 8,
+      textStyle: { fontSize: 11 },
+    },
+    grid: { left: 54, right: 20, top: 52, bottom: 44 },
+    xAxis: {
+      type: "category",
+      boundaryGap: false,
+      data: labels,
+      axisLabel: { hideOverlap: true },
+    },
+    yAxis: { type: "value", scale: true },
+    series: validSeries.map((item) => ({
+      name: item.name,
+      type: "line",
+      data: item.points.map((point) => point.value),
+      smooth: false,
+      showSymbol: false,
+      lineStyle: { width: 2 },
+    })),
+  }), [labels, validSeries]);
+
+  if (!validSeries.length) {
+    return <p className="text-xs text-muted-foreground">暂无足够的对比曲线数据</p>;
+  }
+  return (
+    <div className="min-w-0 overflow-hidden rounded-lg border border-border/70 bg-background/50 p-2">
+      <EChart option={option} height={320} ariaLabel={ariaLabel} />
+    </div>
+  );
+}
+
+function safeArtifactUrl(value: unknown, suffix: "preview" | "download") {
+  const url = displayValue(value).trim();
+  return /^\/api\/artifacts\/[A-Za-z0-9_-]+\/(preview|download)$/.test(url) && url.endsWith(`/${suffix}`)
+    ? url
+    : "";
+}
+
 function RenderComponent({
   component,
   surface,
@@ -546,6 +613,36 @@ function RenderComponent({
     }
     case "LineChart":
       return <LineChart points={resolve(component.points)} />;
+    case "MultiLineChart":
+      return (
+        <MultiLineChart
+          series={resolve(component.series)}
+          ariaLabel={displayValue(resolve(component.ariaLabel)) || "多策略对比曲线"}
+        />
+      );
+    case "ArtifactLink": {
+      const previewUrl = safeArtifactUrl(resolve(component.previewUrl), "preview");
+      const downloadUrl = safeArtifactUrl(resolve(component.downloadUrl), "download");
+      const size = Number(resolve(component.size) || 0);
+      const name = displayValue(resolve(component.name)) || "研究成果";
+      return (
+        <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-border/70 bg-background/50 px-3 py-2 text-xs">
+          <span className="min-w-0 flex-1 truncate font-medium" title={name}>{name}</span>
+          {size > 0 && <span className="text-muted-foreground">{(size / 1024).toFixed(1)} KB</span>}
+          {previewUrl && (
+            <a className="rounded-md border px-2 py-1 text-primary hover:bg-muted" href={previewUrl} target="_blank" rel="noreferrer">
+              预览
+            </a>
+          )}
+          {downloadUrl && (
+            <a className="rounded-md bg-primary px-2 py-1 text-primary-foreground hover:opacity-90" href={downloadUrl} download>
+              下载
+            </a>
+          )}
+          {!previewUrl && !downloadUrl && <span className="text-destructive">链接无效</span>}
+        </div>
+      );
+    }
     case "Activity": {
       const status = displayValue(resolve(component.status));
       const error = displayValue(resolve(component.error));

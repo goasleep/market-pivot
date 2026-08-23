@@ -443,7 +443,7 @@ def get_stock_history(
     else:
         end_date = end_date.replace("-", "")
 
-    cache_key = f"hist:{ticker}:{start_date}:{end_date}:{adjust}"
+    cache_key = f"hist:v2:{ticker}:{start_date}:{end_date}:{adjust}"
     cached = _cache.get(cache_key, ttl=TTL_DAILY)
     if cached is None and end_date < datetime.now().strftime("%Y%m%d"):
         cached = _cache.get_stale(cache_key)
@@ -451,7 +451,20 @@ def get_stock_history(
             logger.warning(f"Using stale historical cache for immutable query: {cache_key}")
     if cached is not None:
         logger.debug(f"Cache hit: {cache_key}")
-        return pd.DataFrame(cached)
+        if isinstance(cached, dict) and isinstance(cached.get("records"), list):
+            frame = pd.DataFrame(cached["records"])
+            frame.attrs["source_metadata"] = dict(cached.get("source_metadata") or {}) | {"cache": "hit"}
+            return frame
+        frame = pd.DataFrame(cached)
+        frame.attrs["source_metadata"] = {
+            "source_id": "unknown",
+            "source_name": "未知历史缓存",
+            "endpoint": "unknown",
+            "fallback": False,
+            "source_chain": ["unknown"],
+            "cache": "legacy_hit",
+        }
+        return frame
 
     # Check failure cache to avoid hammering a broken source
     fail_key = f"fail:{cache_key}"
@@ -466,7 +479,7 @@ def get_stock_history(
         import akshare as ak
 
         try:
-            return ak.stock_zh_a_hist(
+            frame = ak.stock_zh_a_hist(
                 symbol=ticker,
                 period="daily",
                 start_date=start_date,
@@ -474,6 +487,13 @@ def get_stock_history(
                 adjust=adjust,
                 timeout=UPSTREAM_TIMEOUT_SECONDS,
             )
+            frame.attrs["source_metadata"] = _fund_history_source_metadata(
+                source_id="eastmoney",
+                source_name="东方财富（AkShare）",
+                endpoint="stock_zh_a_hist",
+                fallback=False,
+            )
+            return frame
         except Exception as primary_exc:
             # Eastmoney occasionally closes the connection before returning a
             # response. AkShare also exposes Tencent's historical endpoint;
@@ -483,13 +503,21 @@ def get_stock_history(
                 f"History primary source failed for {ticker}, trying Tencent fallback: {primary_exc}"
             )
             try:
-                return ak.stock_zh_a_hist_tx(
+                frame = ak.stock_zh_a_hist_tx(
                     symbol=f"{market}{ticker}",
                     start_date=start_date,
                     end_date=end_date,
                     adjust=adjust,
                     timeout=UPSTREAM_TIMEOUT_SECONDS,
                 )
+                frame.attrs["source_metadata"] = _fund_history_source_metadata(
+                    source_id="tencent",
+                    source_name="腾讯证券（AkShare）",
+                    endpoint="stock_zh_a_hist_tx",
+                    fallback=True,
+                    fallback_reason=str(primary_exc),
+                )
+                return frame
             except Exception:
                 raise primary_exc
 
@@ -508,7 +536,13 @@ def get_stock_history(
         }
         df = df.rename(columns=col_map)
         df["ticker"] = ticker
-        _cache.set(cache_key, df.to_dict(orient="records"))
+        _cache.set(
+            cache_key,
+            {
+                "records": df.to_dict(orient="records"),
+                "source_metadata": dict(df.attrs.get("source_metadata") or {}),
+            },
+        )
         return df
     except Exception as e:
         logger.error(f"Failed to fetch history for {ticker}: {e}")

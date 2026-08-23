@@ -46,6 +46,11 @@ class StrategyComparisonSpec(BaseModel):
     asset_type: AssetType
     start_date: str
     end_date: str
+    requested_start_date: str | None = None
+    warmup_start_date: str | None = None
+    evaluation_start_date: str | None = None
+    evaluation_end_date: str | None = None
+    warmup_bars: int = Field(default=252, ge=0, le=1000)
     initial_capital: float = Field(default=1_000_000, gt=0)
     fill_time: Literal["next_open", "same_close"] = "next_open"
     benchmark: str = "buy_hold"
@@ -65,6 +70,43 @@ class StrategyComparisonSpec(BaseModel):
         if len(names) != len(set(names)):
             raise ValueError("策略名称不能重复")
         return self
+
+
+class DataSourceCandidateReport(BaseModel):
+    source_id: str
+    source_name: str = ""
+    eligible: bool
+    selected: bool = False
+    quality_score: float = Field(ge=0, le=100)
+    actual_start_date: str | None = None
+    actual_end_date: str | None = None
+    row_count: int = 0
+    adjustment: str = "provider_default"
+    sha256: str = ""
+    issues: list[str] = Field(default_factory=list)
+
+
+class CrossValidationReport(BaseModel):
+    status: Literal["verified", "degraded", "unverified", "conflict"]
+    selected_source: str | None = None
+    selection_reason: str
+    rule_version: str = "history-cross-validation-v1"
+    candidates: list[DataSourceCandidateReport] = Field(default_factory=list)
+    comparison: dict[str, Any] = Field(default_factory=dict)
+    differences: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ComparisonConclusion(BaseModel):
+    official: bool = True
+    absolute_return_winner: dict[str, Any] | None = None
+    risk_adjusted_winner: dict[str, Any] | None = None
+    drawdown_winner: dict[str, Any] | None = None
+    out_of_sample_winner: dict[str, Any] | None = None
+    robustness_winner: dict[str, Any] | None = None
+    tradeoffs: list[str] = Field(default_factory=list)
+    data_warnings: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    interpretations: list[str] = Field(default_factory=list)
 
 
 class StrategyPerformance(BaseModel):

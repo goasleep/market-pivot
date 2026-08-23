@@ -135,7 +135,7 @@ export function ChatMessage({
   return (
     <div
       className={cn(
-        "flex gap-3 px-4 py-3",
+        "flex min-w-0 gap-3 px-4 py-3",
         isUser ? "flex-row-reverse" : "flex-row",
       )}
     >
@@ -154,17 +154,17 @@ export function ChatMessage({
       {/* Message body */}
       <div
         className={cn(
-          "group flex max-w-[85%] flex-col gap-2",
-          isUser ? "items-end" : "items-start",
+          "group flex w-full min-w-0 flex-col gap-2",
+          isUser ? "max-w-[85%] items-end" : "max-w-[calc(100%-2.75rem)] items-start",
         )}
       >
-        <div className="flex items-start gap-2">
-          <div className={cn("flex flex-col gap-2", isUser ? "items-end" : "items-start")}>
+        <div className="flex w-full min-w-0 max-w-full items-start gap-2">
+          <div className={cn("flex w-full min-w-0 max-w-full flex-col gap-2", isUser ? "items-end" : "items-start")}>
             {message.parts.map((part, i) => {
               if (part.type === "text") {
                 if (!isUser) {
                   return (
-                    <div key={i} className="w-full overflow-hidden rounded-lg">
+                    <div key={i} className="w-full min-w-0 max-w-full overflow-hidden rounded-lg">
                       <A2UIRenderer
                         messages={createMarkdownSurface(
                           String(part.content),
@@ -191,7 +191,7 @@ export function ChatMessage({
               }
               if (part.type === "widget") {
                 return (
-                  <div key={i} className="w-full overflow-hidden rounded-lg">
+                  <div key={i} className="w-full min-w-0 max-w-full overflow-hidden rounded-lg">
                     <WidgetRenderer html={String(part.content)} />
                   </div>
                 );
@@ -201,7 +201,7 @@ export function ChatMessage({
                   ? part.content
                   : [part.content];
                 return (
-                  <div key={i} className="w-full overflow-hidden rounded-lg">
+                  <div key={i} className="w-full min-w-0 max-w-full overflow-hidden rounded-lg">
                     <A2UIRenderer
                       messages={messages as A2UIMessage[]}
                       onAction={onAction}
@@ -211,7 +211,7 @@ export function ChatMessage({
               }
               if (part.type === "artifact") {
                 return (
-                  <div key={i} className="w-full overflow-hidden rounded-lg">
+                  <div key={i} className="w-full min-w-0 max-w-full overflow-hidden rounded-lg">
                     <ArtifactCard artifact={part.content as Artifact} />
                   </div>
                 );

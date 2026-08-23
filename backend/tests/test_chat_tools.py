@@ -439,8 +439,9 @@ def test_compare_strategy_backtests_runs_same_assumptions_for_builtin_strategies
 
     captured = {}
 
-    async def fake_compare(spec):
+    async def fake_compare(spec, **kwargs):
         captured["spec"] = spec
+        captured["options"] = kwargs
         return {
             "data_type": "strategy_backtest_comparison",
             "strategy_count": len(spec.strategies),
@@ -464,12 +465,13 @@ def test_compare_strategy_backtests_runs_same_assumptions_for_builtin_strategies
     )
     payload = json.loads(result)
 
-    assert payload["strategy_count"] == 8
+    assert payload["strategy_count"] == 11
     assert payload["ranking"][0] == "buy_hold"
     assert captured["spec"].asset_type == AssetType.ETF
     assert captured["spec"].initial_capital == 1_000_000
     assert captured["spec"].ranking_metric == "total_return"
     assert captured["spec"].task_contract.minimum_strategy_count == 7
+    assert captured["options"] == {"publish_artifacts": True, "generate_explanation": True}
 
 
 def test_sandbox_strategy_tool_keeps_source_code_for_a2ui(monkeypatch):

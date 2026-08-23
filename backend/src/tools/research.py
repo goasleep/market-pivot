@@ -207,12 +207,15 @@ async def compare_strategy_backtests(
         strategies=strategies,
         objective=objective,
     )
-    payload = await compare_strategies(spec)
+    payload = await compare_strategies(spec, publish_artifacts=True, generate_explanation=True)
     payload.update(
         {
             "_tool_name": "compare_strategy_backtests",
             "decision_interval": decision_interval,
-            "provenance": provenance("akshare", freshness="historical"),
+            "provenance": provenance(
+                str(payload.get("data_validation", {}).get("selected_source") or "akshare"),
+                freshness="historical",
+            ),
         }
     )
     return _dump(payload)

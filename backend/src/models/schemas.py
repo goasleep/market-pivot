@@ -183,6 +183,24 @@ class IndicatorSpec(BaseModel):
     params: dict[str, float | int | str] = Field(default_factory=dict)
 
 
+class PositionModel(BaseModel):
+    """Bounded target-exposure model evaluated by the trusted runtime."""
+
+    type: Literal["fixed", "volatility_target", "trend_volatility_target"] = "fixed"
+    volatility_window: int = Field(default=20, ge=2, le=252)
+    target_volatility: float = Field(default=0.15, gt=0, le=1)
+    trend_window: int = Field(default=60, ge=2, le=252)
+    min_exposure: float = Field(default=0.0, ge=0, le=1)
+    max_exposure: float = Field(default=0.95, ge=0, le=1)
+    rebalance_frequency: Literal["daily", "weekly", "monthly"] = "weekly"
+
+    @model_validator(mode="after")
+    def validate_exposure_bounds(self):
+        if self.min_exposure > self.max_exposure:
+            raise ValueError("min_exposure 不能大于 max_exposure")
+        return self
+
+
 class StrategySpec(BaseModel):
     """Versioned strategy definition produced by YAML or an LLM."""
 
@@ -200,6 +218,7 @@ class StrategySpec(BaseModel):
     take_profit_pct: float | None = Field(default=None, ge=0)
     position_size_pct: float = Field(default=0.2, ge=0, le=1)
     rebalance_frequency: Literal["daily", "weekly", "manual"] = "daily"
+    position_model: PositionModel | None = None
     source: Literal["yaml", "llm", "user", "sandbox"] = "yaml"
 
 

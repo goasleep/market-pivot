@@ -19,7 +19,7 @@ from application.research_sandbox import (
 from data.db_models import ResearchStrategyCandidateRecord
 from data.tortoise_db import init_database
 from engine.backtester import prepare_single_backtest_data
-from engine.strategy_runtime import decision_from_strategy
+from engine.strategy_runtime import decision_from_strategy, target_exposure_from_strategy
 from llm.service import get_llm_service
 from models.schemas import AssetType, Decision, Position, StrategyCondition, StrategySpec
 from models.strategy_research import ResearchStrategyCandidate
@@ -27,7 +27,10 @@ from strategies.compiler import available_indicators, strategy_from_mapping
 
 SANDBOX_DESIGN_SYSTEM = """你是量化研究代码 Agent。只返回 JSON，不要 Markdown。
 JSON 必须包含 source_code 和 strategy_spec。source_code 只能定义同步函数
-generate_target_positions(frame)，输入列仅有 date/open/high/low/close/volume，返回与 frame 等长且只含 0/1 的序列。
+generate_target_positions(frame)，输入列仅有 date/open/high/low/close/volume，
+返回与 frame 等长、位于 0 到 0.95 的目标仓位序列。
+若 strategy_spec 使用 fixed 仓位模型，position_size_pct 必须设为 0.95，代码中的持仓值也必须使用 0.95；
+动态仓位必须通过 position_model 表达，且代码输出需与该结构化模型逐日等价。
 函数必须只使用截至当前行的 rolling/expanding/shift 数据，禁止 iloc[-1] 影响历史行，禁止负数 shift，禁止网络、文件、
 进程、线程、反射、动态执行和随机数。pandas 以 pd、numpy 以 np 预置。
 strategy_spec 必须使用给定受控指标描述与代码完全相同的信号，source=sandbox；只有两者逐日信号完全一致才可进入模拟盘审批。
@@ -130,7 +133,12 @@ class StrategyCandidateService:
         frame, snapshot = prepared
         positions, validation = await validate_and_run_signals(source, frame)
         dsl_positions = _strategy_target_positions(strategy, frame) if validation.passed and not strategy_error else []
-        equivalent = bool(positions) and positions == dsl_positions and not strategy_error
+        equivalent = (
+            bool(positions)
+            and len(positions) == len(dsl_positions)
+            and all(abs(float(left) - float(right)) <= 1e-8 for left, right in zip(positions, dsl_positions))
+            and not strategy_error
+        )
         history_years = (
             date.fromisoformat(str(snapshot["actual_end_date"]))
             - date.fromisoformat(str(snapshot["actual_start_date"]))
@@ -261,12 +269,17 @@ def _strip_code_fence(source: str) -> str:
     return text
 
 
-def _strategy_target_positions(spec: StrategySpec, frame: pd.DataFrame) -> list[int]:
+def _strategy_target_positions(spec: StrategySpec, frame: pd.DataFrame) -> list[float]:
+    if spec.position_model is not None:
+        return [
+            float(target_exposure_from_strategy(spec, frame.iloc[: index + 1]) or 0.0)
+            for index in range(len(frame))
+        ]
     holding = False
     entry_price = 0.0
     stop_loss: float | None = None
     take_profit: float | None = None
-    output: list[int] = []
+    output: list[float] = []
     for index, row in frame.reset_index(drop=True).iterrows():
         current_price = float(row["close"])
         position = (
@@ -300,7 +313,7 @@ def _strategy_target_positions(spec: StrategySpec, frame: pd.DataFrame) -> list[
             holding = False
             stop_loss = None
             take_profit = None
-        output.append(int(holding))
+        output.append(0.95 if holding else 0.0)
     return output
 
 
