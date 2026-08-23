@@ -45,7 +45,7 @@ async def lifespan(_app: FastAPI):
         await close_database()
 
 app = FastAPI(
-    title="A-Share Agent API",
+    title="Fund Agent API",
     description="AI Agent 驱动的 A 股模拟交易系统",
     version="0.3.0",
     lifespan=lifespan,

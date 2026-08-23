@@ -9,12 +9,14 @@ from typing import Any, AsyncIterator
 
 from loguru import logger
 
-from agents.asset_agent import asset_agent
+from agents.fund_agent import fund_agent
 from application.chat_store import ChatStore
 from application.research_plan import RESEARCH_GRAPH_NAME
 from config import resolve_llm_profile
 from llm_runtime import use_llm_profile
 from widgets.a2ui import render_activity, render_markdown, render_research_plan, render_tool_result
+
+asset_agent = fund_agent  # Backward-compatible injection point for existing task workers and tests.
 
 
 def _json(value: Any) -> str:
@@ -370,6 +372,18 @@ class ChatTaskManager:
                     state["execution_version"] = int(event.get("execution_version", 2))
                     state["graph_name"] = str(event.get("graph_name") or state.get("graph_name"))
                     state["thread_id"] = str(event.get("thread_id") or task_input.task_id)
+                    if isinstance(event.get("task_spec"), dict):
+                        state["fund_task_spec"] = event["task_spec"]
+                    await self.store.set_task_state(task_input.task_id, state)
+                continue
+            if event.get("type") == "task_outcome":
+                state = await self.store.get_task_state(task_input.task_id)
+                if state is not None:
+                    if isinstance(event.get("task_spec"), dict):
+                        state["fund_task_spec"] = event["task_spec"]
+                    if isinstance(event.get("acceptance"), dict):
+                        state["task_acceptance"] = event["acceptance"]
+                        state["outcome_status"] = str(event["acceptance"].get("outcome") or "")
                     await self.store.set_task_state(task_input.task_id, state)
                 continue
             if event.get("type") == "interaction_required":
@@ -435,7 +449,7 @@ class ChatTaskManager:
         task_id = task_input.task_id
         heartbeat = asyncio.create_task(self._heartbeat(task_id), name=f"chat-heartbeat-{task_id}")
         try:
-            await self._emit_text(task_input, "A-Share Agent：正在让模型判断任务并选择数据工具。")
+            await self._emit_text(task_input, "Fund Agent：正在识别任务、风险边界和所需数据。")
             orchestration_surface = f"orchestration-{task_id}"
             await self._emit_a2ui(
                 task_input,

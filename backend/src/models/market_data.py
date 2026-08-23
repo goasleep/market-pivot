@@ -25,6 +25,7 @@ class DatasetDefinition(BaseModel):
     provider_ids: list[str]
     capabilities: list[str] = Field(default_factory=list)
     temporal_field: str | None = None
+    required_query_terms: list[str] = Field(default_factory=list)
 
 
 class MarketDataQuery(BaseModel):

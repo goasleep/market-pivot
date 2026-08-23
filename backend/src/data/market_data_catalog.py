@@ -49,6 +49,7 @@ DIVIDEND_DATASET = DatasetDefinition(
     provider_ids=["akshare"],
     capabilities=["screen", "rank", "aggregate", "time_series"],
     temporal_field="fiscal_year",
+    required_query_terms=["a股", "股票", "上市公司", "公司分红", "每股分红"],
 )
 
 
@@ -65,11 +66,19 @@ class MarketDataCatalog:
     def search(self, query: str, *, asset_type: str | None = None, limit: int = 5) -> list[DatasetDefinition]:
         """Rank datasets by catalog vocabulary; this selects data, not conversation routes."""
         normalized = re.sub(r"\s+", " ", query.lower()).strip()
-        query_tokens = set(re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]{2,}", normalized))
+        query_tokens = {
+            token
+            for token in re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]{2,}", normalized)
+            if len(token) >= 2 and not token.isdigit()
+        }
         scored: list[tuple[int, DatasetDefinition]] = []
         for dataset in self._datasets.values():
             if asset_type and asset_type not in dataset.asset_types and not (
                 asset_type == "fund" and any(item in dataset.asset_types for item in ("etf", "lof"))
+            ):
+                continue
+            if dataset.required_query_terms and not any(
+                term.lower() in normalized for term in dataset.required_query_terms
             ):
                 continue
             phrases = [dataset.title, dataset.description, dataset.dataset_id, *dataset.aliases]

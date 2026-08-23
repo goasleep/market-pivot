@@ -13,6 +13,8 @@ from langchain_core.tools import StructuredTool
 from loguru import logger
 
 from agents.asset_requests import AssetAgentRequest, AssetIntent, AssetRequestResolver, RequestMode
+from application.fund_response import execute_direct_fund_task
+from application.fund_task_compiler import compile_fund_task, uses_direct_fund_executor
 from application.research import research_service
 from application.research_plan import research_plan_service
 from graph.agent_loop import (
@@ -24,9 +26,10 @@ from graph.agent_loop import (
 )
 from graph.checkpointing import checkpoint_manager
 from llm.context import select_conversation_history
+from models.fund_task import FundTaskKind
 from models.schemas import AssetType
 from observability import build_trace_config
-from tools.registry import build_artifact_tools, build_chat_tools
+from tools.registry import build_artifact_tools, build_chat_tools, build_task_tools
 
 _HTML_SOURCE_BLOCK = re.compile(
     r"```(?:html|xhtml)?\s*(?:<!doctype\s+html|<html\b).*?```",
@@ -132,23 +135,63 @@ class AssetAgent(AssetRequestResolver):
                 "resume": {"request": self.request_payload(request)},
             }
             return
-        tools = build_chat_tools(
-            self._analysis_tool(
-                progress_callback,
-                conversation_id=request.conversation_id,
-                task_id=request.task_id,
-            ),
-            artifact_tools=build_artifact_tools(
-                conversation_id=request.conversation_id,
-                task_id=request.task_id,
-            ),
-            allow_mutating_tools=request.allow_mutating_tools,
+        task_spec = compile_fund_task(
+            request.message,
+            tickers=request.tickers,
+            asset_type=request.asset_type.value,
+            mutation_requested=request.allow_mutating_tools,
+        )
+        if task_spec is not None and uses_direct_fund_executor(task_spec):
+            yield {
+                "type": "execution_metadata",
+                "execution_version": 3,
+                "graph_name": "fund-task-orchestrator",
+                "thread_id": request.task_id,
+                "task_spec": task_spec.model_dump(mode="json"),
+            }
+            yield {
+                "type": "reasoning",
+                "text": f"已识别为基金任务：{task_spec.task_kind.value}；本题不需要调用市场数据工具。",
+            }
+            answer, acceptance = await execute_direct_fund_task(request.message, task_spec)
+            yield {
+                "type": "task_outcome",
+                "task_spec": task_spec.model_dump(mode="json"),
+                "acceptance": acceptance.model_dump(mode="json"),
+            }
+            yield {"type": "text", "text": answer}
+            return
+        analysis_tool = self._analysis_tool(
+            progress_callback,
             conversation_id=request.conversation_id,
             task_id=request.task_id,
+        )
+        artifact_tools = build_artifact_tools(
+            conversation_id=request.conversation_id,
+            task_id=request.task_id,
+        )
+        tools = (
+            build_task_tools(
+                task_spec,
+                analysis_tool,
+                artifact_tools=artifact_tools,
+                allow_mutating_tools=request.allow_mutating_tools,
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+            )
+            if task_spec is not None
+            else build_chat_tools(
+                analysis_tool,
+                artifact_tools=artifact_tools,
+                allow_mutating_tools=request.allow_mutating_tools,
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+            )
         )
         if (
             request.mode == RequestMode.FINANCIAL_RESEARCH
             and request.intent != AssetIntent.PORTFOLIO
+            and (task_spec is None or task_spec.task_kind != FundTaskKind.UNIVERSE_RESEARCH)
             and not request.allow_mutating_tools
             and request.task_id
             and checkpoint_manager.saver is not None
@@ -173,7 +216,7 @@ class AssetAgent(AssetRequestResolver):
                 yield event
             return
         system = (
-            "你是 A-Share Agent 的对话入口。用户意图已经通过系统闸门确认，你只执行该意图范围内的任务；"
+            "你是 Fund Agent 的对话入口。用户意图已经通过系统闸门确认，你只执行该意图范围内的任务；"
             "禁止根据记忆编造行情、历史价格或新闻。行情、历史、新闻、对比和策略都必须通过工具获取。"
             "用户明确指定历史区间时，调用 get_historical_prices 必须传入对应的 start_date 和 end_date。"
             "当前价格、历史价格、成交量、净值、折溢价、技术指标和候选筛选属于结构化市场数据，"
@@ -233,13 +276,13 @@ class AssetAgent(AssetRequestResolver):
             stream_agent_loop(
                 messages,
                 tools,
-                max_steps=100,
+                max_steps=12 if task_spec is not None else 100,
                 config=chat_config,
                 native_interrupts=True,
                 task_id=request.task_id,
             )
             if native_checkpoints
-            else stream_agent_loop(messages, tools, max_steps=100, config=chat_config)
+            else stream_agent_loop(messages, tools, max_steps=12 if task_spec is not None else 100, config=chat_config)
         )
         async for update in stream:
             native_interrupt = update.get("__interrupt__")

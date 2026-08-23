@@ -188,12 +188,18 @@ def normalize_steps(raw: Any, request: dict[str, Any], depth: str) -> list[dict[
         value.setdefault("depends_on", [])
         value.setdefault("inputs", {})
         value.setdefault("success_criteria", ["返回带来源和数据状态的可审计结果"])
+        if isinstance(value.get("success_criteria"), str):
+            value["success_criteria"] = [value["success_criteria"]]
         if value.get("kind") in SINGLE_ATTEMPT_STEP_KINDS:
             value["max_attempts"] = 1
         elif value.get("kind") in REFLECTABLE_LONG_STEP_KINDS:
             value["max_attempts"] = 2
         else:
             value.setdefault("max_attempts", 2)
+            try:
+                value["max_attempts"] = max(1, min(int(value["max_attempts"]), 2))
+            except (TypeError, ValueError):
+                value["max_attempts"] = 2
         normalized.append(value)
     return normalized or fallback_steps(request, depth)
 

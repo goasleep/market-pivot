@@ -85,7 +85,7 @@ function Brand() {
       </div>
       <div className="min-w-0">
         <p className="truncate text-sm font-semibold tracking-tight text-white">
-          A-Share Agent
+          Fund Agent
         </p>
         <p className="truncate text-[10px] font-medium uppercase tracking-[0.18em] text-blue-200/65">
           Research OS
@@ -227,7 +227,7 @@ export function AppShell() {
             <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-violet-500 text-white shadow-lg shadow-blue-500/20">
               <Sparkles className="h-3.5 w-3.5" />
             </span>
-            <span className="text-sm font-semibold">A-Share Agent</span>
+            <span className="text-sm font-semibold">Fund Agent</span>
           </div>
           <span
             className="flex h-9 w-9 items-center justify-center"

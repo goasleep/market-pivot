@@ -1,11 +1,14 @@
 """Canonical asset research chat entry point."""
 
-from agents.stock_agent import (
-    AssetAgent,
+from agents.fund_agent import (
     AssetAgentRequest,
     AssetIntent,
-    asset_agent,
+    FundAgent,
     capabilities_text,
+    fund_agent,
 )
+
+AssetAgent = FundAgent
+asset_agent = fund_agent
 
 __all__ = ["AssetAgent", "AssetAgentRequest", "AssetIntent", "asset_agent", "capabilities_text"]
