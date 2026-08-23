@@ -3,6 +3,7 @@
 from langchain_core.tools import StructuredTool
 
 from tools import artifacts, assets, data, methodology, research, simulation
+from tools.market_data import build_market_data_tools
 from tools.policies import tool_policy
 
 
@@ -30,6 +31,8 @@ def build_chat_tools(
     artifact_tools: list[StructuredTool] | None = None,
     *,
     allow_mutating_tools: bool = True,
+    conversation_id: str | None = None,
+    task_id: str | None = None,
 ) -> list[StructuredTool]:
     """Build the provider-agnostic tool surface from business groups."""
     tools: list[StructuredTool] = []
@@ -37,6 +40,7 @@ def build_chat_tools(
     for candidate in [
         *assets.TOOLS,
         *data.TOOLS,
+        *build_market_data_tools(conversation_id=conversation_id, task_id=task_id),
         *methodology.TOOLS,
         *research.TOOLS,
         *simulation.TOOLS,

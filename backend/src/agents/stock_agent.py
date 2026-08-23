@@ -12,7 +12,7 @@ from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
 from loguru import logger
 
-from agents.asset_requests import AssetAgentRequest, AssetIntent, AssetRequestResolver
+from agents.asset_requests import AssetAgentRequest, AssetIntent, AssetRequestResolver, RequestMode
 from application.research import research_service
 from application.research_plan import research_plan_service
 from graph.agent_loop import (
@@ -143,9 +143,12 @@ class AssetAgent(AssetRequestResolver):
                 task_id=request.task_id,
             ),
             allow_mutating_tools=request.allow_mutating_tools,
+            conversation_id=request.conversation_id,
+            task_id=request.task_id,
         )
         if (
-            request.intent in self._research_intents
+            request.mode == RequestMode.FINANCIAL_RESEARCH
+            and request.intent != AssetIntent.PORTFOLIO
             and not request.allow_mutating_tools
             and request.task_id
             and checkpoint_manager.saver is not None
@@ -175,6 +178,9 @@ class AssetAgent(AssetRequestResolver):
             "用户明确指定历史区间时，调用 get_historical_prices 必须传入对应的 start_date 和 end_date。"
             "当前价格、历史价格、成交量、净值、折溢价、技术指标和候选筛选属于结构化市场数据，"
             "必须使用行情、历史或筛选工具，不能用网页摘要代替。"
+            "全市场筛选、排序、聚合和跨年度财务问题先调用 search_market_data_catalog 解析数据集与字段，"
+            "再通过 query_market_data 执行结构化查询、受限变换和业务验收；不能为新问题臆造工具名，"
+            "也不能用 search_web 拼接精确数值表。"
             "当用户要求走势、对比或可视化时，优先获取结构化历史/行情数据；聊天界面会把已知工具结果自动渲染为图表或数据表，"
             "不要在文本中伪造数据，也不要输出 SVG/HTML 源码。"
             "需要网页正文时调用 fetch_web_content；需要财务或基金基础数据时调用 "
@@ -313,6 +319,8 @@ class AssetAgent(AssetRequestResolver):
                 task_id=request.task_id,
             ),
             allow_mutating_tools=request.allow_mutating_tools,
+            conversation_id=request.conversation_id,
+            task_id=request.task_id,
         )
         config = checkpoint_manager.graph_config(
             request.task_id,
@@ -385,6 +393,8 @@ class AssetAgent(AssetRequestResolver):
                 task_id=request.task_id,
             ),
             allow_mutating_tools=False,
+            conversation_id=request.conversation_id,
+            task_id=request.task_id,
         )
         config = build_trace_config(
             "market-research-plan-recover",
@@ -426,6 +436,8 @@ class AssetAgent(AssetRequestResolver):
                 task_id=request.task_id,
             ),
             allow_mutating_tools=request.allow_mutating_tools,
+            conversation_id=request.conversation_id,
+            task_id=request.task_id,
         )
         approved = option_id == "approve"
         if payload.get("native_checkpoint"):
