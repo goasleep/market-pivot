@@ -13,6 +13,16 @@ from models.research_plan import EvidenceRef
 def _compact(value: Any, *, depth: int = 0) -> Any:
     if depth == 0 and isinstance(value, dict) and value.get("data_type") == "strategy_backtest_comparison":
         return _compact_strategy_comparison(value)
+    if depth == 0 and isinstance(value, dict) and value.get("data_type") == "market_dataset":
+        return {
+            key: (
+                [dict(item) for item in child[:30] if isinstance(item, dict)]
+                if key == "preview" and isinstance(child, list)
+                else _compact(child, depth=depth + 1)
+            )
+            for key, child in value.items()
+            if key != "rows"
+        }
     if depth >= 5:
         return str(value)[:500]
     if isinstance(value, dict):

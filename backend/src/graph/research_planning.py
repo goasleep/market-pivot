@@ -210,6 +210,15 @@ def validate_plan_contract(plan: ResearchPlan, request: dict[str, Any], budget: 
         kinds = {step.kind for step in plan.steps}
         if not {"fund_nav", "liquidity"} <= kinds:
             raise ValueError("ETF/LOF 标准或深度研究必须包含 fund_nav 和 liquidity 步骤")
+    kinds = {step.kind for step in plan.steps}
+    if "data_query" in kinds:
+        if not {"data_catalog", "data_query", "data_validation", "synthesis"} <= kinds:
+            raise ValueError("结构化数据研究必须包含目录、查询、验收与综合步骤")
+        if next(step for step in plan.steps if step.kind == "data_validation").id not in next(
+            step for step in plan.steps if step.kind == "synthesis"
+        ).depends_on:
+            raise ValueError("结构化数据综合必须依赖业务验收步骤")
+        return
     if str(request.get("intent")) in {"analyze", "compare", "backtest", "news"}:
         by_kind = {step.kind: step for step in plan.steps}
         if not {"risk", "synthesis"} <= set(by_kind):
