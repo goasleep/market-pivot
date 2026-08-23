@@ -6,12 +6,28 @@ from contextlib import AsyncExitStack
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import aiosqlite
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from loguru import logger
 
 from config import settings
+
+CHECKPOINT_ALLOWED_MSGPACK_TYPES = (
+    ("models.schemas", "AssetType"),
+    ("models.schemas", "MarketContext"),
+    ("models.schemas", "Decision"),
+    ("models.schemas", "AgentReport"),
+    ("models.schemas", "SignalType"),
+    ("models.schemas", "TradeDecision"),
+)
+
+
+def _checkpoint_serializer() -> JsonPlusSerializer:
+    """Allow only the application state types intentionally persisted by LangGraph."""
+    return JsonPlusSerializer(allowed_msgpack_modules=CHECKPOINT_ALLOWED_MSGPACK_TYPES)
 
 
 def _psycopg_url(value: str) -> str:
@@ -32,15 +48,17 @@ class CheckpointManager:
             return self.saver
         stack = AsyncExitStack()
         database_url = settings.resolved_checkpoint_database_url
+        serializer = _checkpoint_serializer()
         if database_url:
             saver = await stack.enter_async_context(
-                AsyncPostgresSaver.from_conn_string(_psycopg_url(database_url))
+                AsyncPostgresSaver.from_conn_string(_psycopg_url(database_url), serde=serializer)
             )
             backend = "postgres"
         else:
-            saver = await stack.enter_async_context(
-                AsyncSqliteSaver.from_conn_string(str(settings.checkpoint_file_path))
+            connection = await stack.enter_async_context(
+                aiosqlite.connect(str(settings.checkpoint_file_path))
             )
+            saver = AsyncSqliteSaver(connection, serde=serializer)
             backend = "sqlite"
         await saver.setup()
         self._stack = stack

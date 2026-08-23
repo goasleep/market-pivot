@@ -176,13 +176,27 @@ async def get_fund_nav_history(ticker: str, asset_type: str = "etf", limit: int 
         raise ValueError("asset_type 必须是 etf 或 lof")
     frame = await async_get_fund_nav_history(ticker, asset_type=kind.value)
     records = frame.tail(max(1, min(int(limit), 250))).to_dict("records")
+    available = bool(records)
     return _dump(
         {
             "data_type": "fund_nav",
             "ticker": ticker,
             "asset_type": kind.value,
+            "available": available,
+            "data_status": "available" if available else "unavailable",
+            "message": None if available else "没有可用的基金净值数据",
+            "error": (
+                None
+                if available
+                else {"code": "fund_nav_unavailable", "message": "没有可用的基金净值数据"}
+            ),
             "history": records,
-            "provenance": provenance("akshare", as_of=_as_of(records), freshness="historical"),
+            "provenance": provenance(
+                "akshare",
+                as_of=_as_of(records),
+                freshness="historical",
+                status="available" if available else "unavailable",
+            ),
         }
     )
 
@@ -193,25 +207,42 @@ async def get_fundamentals(ticker: str, asset_type: str = "stock") -> str:
     kind = AssetType(asset_type)
     if kind == AssetType.STOCK:
         data = await async_get_financial_data(ticker)
+        available = any(key != "ticker" for key in data)
         return _dump(
             {
                 "data_type": "fundamentals",
                 "ticker": ticker,
                 "asset_type": kind.value,
+                "available": available,
+                "data_status": "available" if available else "unavailable",
+                "message": None if available else "没有可用的财务数据",
                 "data": data,
-                "provenance": provenance("akshare", freshness="latest_available"),
+                "provenance": provenance(
+                    "akshare",
+                    freshness="latest_available",
+                    status="available" if available else "unavailable",
+                ),
             }
         )
-    realtime = await async_get_fund_realtime(ticker, asset_type=kind.value)
+    realtime, realtime_status, _ = await _realtime_quote_with_fallback(ticker, kind)
     nav = await async_get_fund_nav_history(ticker, asset_type=kind.value)
     latest_nav = nav.tail(1).to_dict("records") if not nav.empty else []
+    available = bool(realtime or latest_nav)
     return _dump(
         {
             "data_type": "fundamentals",
             "ticker": ticker,
             "asset_type": kind.value,
+            "available": available,
+            "data_status": "degraded" if available and realtime_status != "available" else realtime_status,
+            "message": None if available else "没有可用的基金基础数据",
             "data": {"realtime": realtime, "latest_nav": latest_nav},
-            "provenance": provenance("akshare", freshness="latest_available"),
+            "provenance": provenance(
+                "akshare",
+                as_of=_as_of(latest_nav),
+                freshness="latest_available",
+                status="degraded" if available and realtime_status != "available" else realtime_status,
+            ),
         }
     )
 

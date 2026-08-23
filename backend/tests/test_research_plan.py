@@ -160,6 +160,26 @@ def test_comparison_synthesis_uses_frozen_winners_and_artifact_count():
     assert "共 7 个文件" in text
 
 
+def test_comparison_synthesis_treats_no_data_as_observation_not_tool_failure():
+    text = _comparison_synthesis_text(
+        {
+            "ticker": "159999",
+            "available": False,
+            "message": "所有历史行情源均不可用",
+            "comparisons": [],
+            "conclusion": {
+                "official": False,
+                "limitations": ["未产生回测结果，不能比较策略盈利情况。"],
+            },
+        }
+    )
+
+    assert "工具已正常返回" in text
+    assert "所有历史行情源均不可用" in text
+    assert "没有产生回测结果" in text
+    assert "成果包已生成" not in text
+
+
 @pytest.mark.asyncio
 async def test_synthesis_step_uses_deterministic_comparison_conclusion_without_llm():
     step = ResearchStep.model_validate(_step("synthesis", "synthesis"))
@@ -320,7 +340,116 @@ async def test_draft_sandbox_candidate_with_valid_backtest_is_completed_research
         }
     )
 
-    assert result["step_results"] == {}
+    update = result["step_results"]["sandbox"]
+    assert update["status"] == "completed"
+    assert update["evidence_status"] == "sufficient"
+    assert update["evidence_issues"] == []
+
+
+@pytest.mark.asyncio
+async def test_unmet_strategy_contract_is_a_completed_limited_observation():
+    result = await verify_evidence(
+        {
+            "plan": _plan([_step("backtest", "backtest")]),
+            "step_results": {
+                "backtest": {
+                    "step_id": "backtest",
+                    "status": "completed",
+                    "attempt": 1,
+                    "evidence": [
+                        {
+                            "source": "tencent",
+                            "source_type": "backtest",
+                            "retrieved_at": "2026-08-23T00:00:00+00:00",
+                            "data_status": "available",
+                        }
+                    ],
+                    "output": {
+                        "data_type": "strategy_backtest_comparison",
+                        "comparisons": [{"strategy_name": "buy_hold"}],
+                        "acceptance": {
+                            "satisfied": False,
+                            "missing": ["minimum_history_years"],
+                        },
+                    },
+                }
+            },
+            "budget": {
+                "max_steps": 8,
+                "max_tool_calls": 12,
+                "max_replans": 1,
+                "deadline_seconds": 900,
+            },
+            "tool_calls": 1,
+            "deadline_at": "2099-01-01T00:00:00+00:00",
+        }
+    )
+
+    update = result["step_results"]["backtest"]
+    assert update["status"] == "completed"
+    assert update["evidence_status"] == "limited"
+    assert update["error"] is None
+    assert "minimum_history_years" in update["evidence_issues"][0]
+    assert result["needs_replan"] is False
+    snapshot = _plan_snapshot(
+        {
+            "plan": _plan([_step("backtest", "backtest")]),
+            "step_results": result["step_results"],
+        },
+        status="completed",
+    )
+    assert snapshot is not None
+    assert snapshot["status"] == "completed_with_gaps"
+    assert snapshot["steps"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_empty_market_data_is_a_completed_unavailable_observation():
+    result = await verify_evidence(
+        {
+            "plan": _plan([_step("history", "price_history")]),
+            "step_results": {
+                "history": {
+                    "step_id": "history",
+                    "status": "completed",
+                    "attempt": 1,
+                    "evidence": [
+                        {
+                            "source": "akshare",
+                            "source_type": "market_data",
+                            "retrieved_at": "2026-08-23T00:00:00+00:00",
+                            "data_status": "unavailable",
+                        }
+                    ],
+                    "output": {
+                        "data_type": "price_history_collection",
+                        "items": [
+                            {
+                                "ticker": "159999",
+                                "available": False,
+                                "history": [],
+                                "error": {"message": "历史价格数据不可用"},
+                            }
+                        ],
+                    },
+                }
+            },
+            "budget": {
+                "max_steps": 8,
+                "max_tool_calls": 12,
+                "max_replans": 1,
+                "deadline_seconds": 900,
+            },
+            "tool_calls": 1,
+            "deadline_at": "2099-01-01T00:00:00+00:00",
+        }
+    )
+
+    update = result["step_results"]["history"]
+    assert update["status"] == "completed"
+    assert update["evidence_status"] == "unavailable"
+    assert update["error"] is None
+    assert result["needs_replan"] is False
 
 
 @pytest.mark.asyncio

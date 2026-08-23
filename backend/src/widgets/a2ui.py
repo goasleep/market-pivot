@@ -185,6 +185,9 @@ def render_research_plan(
         children.append(component_id)
         recovery = step.get("recovery") if isinstance(step.get("recovery"), dict) else None
         detail = str(step.get("error") or "")
+        evidence_issues = [str(item) for item in step.get("evidence_issues", []) if str(item)]
+        if not detail and evidence_issues:
+            detail = "数据说明：" + "；".join(evidence_issues)
         if recovery:
             recovery_label = {
                 "retry": "自动重试",

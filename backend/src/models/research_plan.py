@@ -28,6 +28,7 @@ ResearchStepKind = Literal[
     "report",
 ]
 ResearchStepStatus = Literal["pending", "running", "completed", "failed", "skipped"]
+EvidenceStatus = Literal["not_assessed", "sufficient", "limited", "unavailable"]
 RecoveryClassification = Literal["transient", "correctable", "terminal", "unknown"]
 RecoveryAction = Literal["retry", "adjust", "abort"]
 
@@ -118,6 +119,8 @@ class StepResult(BaseModel):
     evidence: list[EvidenceRef] = Field(default_factory=list)
     artifact_ids: list[str] = Field(default_factory=list)
     output: dict[str, Any] = Field(default_factory=dict)
+    evidence_status: EvidenceStatus = "not_assessed"
+    evidence_issues: list[str] = Field(default_factory=list)
     error: str | None = None
     failure_context: dict[str, Any] = Field(default_factory=dict)
     recovery_history: list[StepRecovery] = Field(default_factory=list)

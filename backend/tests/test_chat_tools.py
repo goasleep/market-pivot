@@ -9,10 +9,12 @@ from langchain_core.tools import StructuredTool
 import graph.agent_loop as agent_loop_module
 from agents.sentiment_analyst import analyze as analyze_sentiment
 from agents.stock_agent import StockAgent, _compact_generated_report
+from application import strategy_comparison
 from application.research import research_service
 from artifacts.service import ArtifactService
 from artifacts.storage import LocalArtifactStorage
 from data import serper_provider
+from data.backtest_data import BacktestDataError
 from data.web_content import extract_article_content
 from engine.simulation_account import SimulationAccountService
 from graph.agent_loop import (
@@ -434,6 +436,39 @@ def test_realtime_stock_quote_uses_retrieval_time_when_provider_has_no_market_da
     assert payload["provenance"][0]["as_of"] == payload["quote"]["updated_at"]
 
 
+def test_empty_fund_nav_is_returned_as_unavailable_observation(monkeypatch):
+    async def empty_nav(*_args, **_kwargs):
+        return pd.DataFrame()
+
+    monkeypatch.setattr(assets, "async_get_fund_nav_history", empty_nav)
+
+    result = asyncio.run(
+        assets.get_fund_nav_history.ainvoke({"ticker": "159999", "asset_type": "etf"})
+    )
+    payload = json.loads(result)
+
+    assert payload["available"] is False
+    assert payload["data_status"] == "unavailable"
+    assert payload["history"] == []
+    assert payload["error"]["code"] == "fund_nav_unavailable"
+
+
+def test_empty_technical_history_is_returned_as_unavailable_observation(monkeypatch):
+    async def empty_history(*_args, **_kwargs):
+        return pd.DataFrame()
+
+    monkeypatch.setattr(research, "async_get_fund_history", empty_history)
+
+    result = asyncio.run(
+        research.compute_technical_indicators.ainvoke({"ticker": "159999", "asset_type": "etf"})
+    )
+    payload = json.loads(result)
+
+    assert payload["available"] is False
+    assert payload["data_status"] == "unavailable"
+    assert payload["indicators"] == {}
+
+
 def test_compare_strategy_backtests_runs_same_assumptions_for_builtin_strategies(monkeypatch):
     import application.strategy_comparison as comparison_module
 
@@ -472,6 +507,30 @@ def test_compare_strategy_backtests_runs_same_assumptions_for_builtin_strategies
     assert captured["spec"].ranking_metric == "total_return"
     assert captured["spec"].task_contract.minimum_strategy_count == 7
     assert captured["options"] == {"publish_artifacts": True, "generate_explanation": True}
+
+
+def test_strategy_comparison_without_history_returns_completed_observation(monkeypatch):
+    async def no_history(*_args, **_kwargs):
+        raise BacktestDataError("159999 所有历史行情源均不可用")
+
+    monkeypatch.setattr(strategy_comparison, "compare_strategies", no_history)
+    result = asyncio.run(
+        research.compare_strategy_backtests.ainvoke(
+            {
+                "ticker": "159999",
+                "asset_type": "etf",
+                "start_date": "2016-08-22",
+                "end_date": "2026-08-21",
+            }
+        )
+    )
+    payload = json.loads(result)
+
+    assert payload["available"] is False
+    assert payload["data_status"] == "unavailable"
+    assert payload["comparisons"] == []
+    assert payload["acceptance"]["satisfied"] is False
+    assert payload["error"]["code"] == "backtest_data_unavailable"
 
 
 def test_sandbox_strategy_tool_keeps_source_code_for_a2ui(monkeypatch):

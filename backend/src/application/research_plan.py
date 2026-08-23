@@ -45,14 +45,19 @@ def _plan_snapshot(
                 "title": step.title,
                 "status": result.status if result else "running" if step.id in (running_ids or set()) else "pending",
                 "summary": result.summary if result else "",
+                "evidence_status": result.evidence_status if result else "not_assessed",
+                "evidence_issues": result.evidence_issues if result else [],
                 "error": result.error if result else None,
                 "recovery_history": recovery_history,
                 "recovery": recovery_history[-1] if recovery_history else None,
             }
         )
     completed = sum(item["status"] in {"completed", "failed", "skipped"} for item in steps)
-    failed = any(item["status"] == "failed" for item in steps)
-    if status == "completed" and failed:
+    has_gaps = any(
+        item["status"] in {"failed", "skipped"} or item["evidence_status"] in {"limited", "unavailable"}
+        for item in steps
+    )
+    if status == "completed" and has_gaps:
         status = "completed_with_gaps"
     return {
         "plan_id": plan.plan_id,

@@ -9,6 +9,7 @@ from typing import Any
 from langchain_core.tools import tool
 
 from agents.technical_analyst import calculate_technical_indicators
+from data.backtest_data import BacktestDataError
 from data.fund_provider import async_get_fund_history
 from data.source_registry import provenance
 from data.stock_provider import async_get_stock_history
@@ -32,14 +33,23 @@ async def compute_technical_indicators(ticker: str, asset_type: str = "stock", l
         else await async_get_fund_history(ticker, asset_type=kind.value)
     )
     frame = frame.tail(max(20, min(int(limit), 500)))
+    indicators = calculate_technical_indicators(frame)
+    available = bool(indicators)
     return _dump(
         {
             "data_type": "technical_indicators",
             "ticker": ticker,
             "asset_type": kind.value,
+            "available": available,
+            "data_status": "available" if available else "unavailable",
+            "message": None if available else "没有可用于计算技术指标的历史数据",
             "history_count": len(frame),
-            "indicators": calculate_technical_indicators(frame),
-            "provenance": provenance("akshare", freshness="historical"),
+            "indicators": indicators,
+            "provenance": provenance(
+                "akshare",
+                freshness="historical",
+                status="available" if available else "unavailable",
+            ),
         }
     )
 
@@ -115,15 +125,30 @@ async def run_backtest(
     """按指定区间和策略运行研究回测；结果仅用于模拟，不执行真实交易。"""
     from application.backtest_service import run_backtest as execute_backtest
 
-    result = await execute_backtest(
-        ticker=ticker,
-        start_date=start_date,
-        end_date=end_date,
-        asset_type=asset_type,
-        initial_capital=initial_capital,
-        strategy_name=strategy_name,
-        decision_interval=decision_interval,
-    )
+    try:
+        result = await execute_backtest(
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            asset_type=asset_type,
+            initial_capital=initial_capital,
+            strategy_name=strategy_name,
+            decision_interval=decision_interval,
+        )
+    except BacktestDataError as exc:
+        return _dump(
+            {
+                "data_type": "backtest",
+                "backtest": True,
+                "paper_trading": False,
+                "available": False,
+                "data_status": "unavailable",
+                "result": None,
+                "message": str(exc),
+                "error": {"code": "backtest_data_unavailable", "message": str(exc)},
+                "provenance": provenance("akshare", freshness="historical", status="unavailable"),
+            }
+        )
     return _dump(
         {
             "data_type": "backtest",
@@ -151,18 +176,33 @@ async def design_and_run_backtest(
     """让 Agent 设计策略和组合规则，运行回测并保存完整实验报告附件。"""
     from application.backtest_experiment import run_backtest_experiment
 
-    experiment = await run_backtest_experiment(
-        objective=objective,
-        ticker=ticker,
-        tickers=tickers,
-        mode=mode,
-        start_date=start_date,
-        end_date=end_date,
-        asset_type=asset_type,
-        initial_capital=initial_capital,
-        decision_interval=decision_interval,
-        portfolio_spec=portfolio_spec,
-    )
+    try:
+        experiment = await run_backtest_experiment(
+            objective=objective,
+            ticker=ticker,
+            tickers=tickers,
+            mode=mode,
+            start_date=start_date,
+            end_date=end_date,
+            asset_type=asset_type,
+            initial_capital=initial_capital,
+            decision_interval=decision_interval,
+            portfolio_spec=portfolio_spec,
+        )
+    except BacktestDataError as exc:
+        return _dump(
+            {
+                "data_type": "backtest_experiment",
+                "backtest": True,
+                "paper_trading": False,
+                "available": False,
+                "data_status": "unavailable",
+                "result": None,
+                "message": str(exc),
+                "error": {"code": "backtest_data_unavailable", "message": str(exc)},
+                "provenance": provenance("akshare", freshness="historical", status="unavailable"),
+            }
+        )
     return _dump(
         {
             "data_type": "backtest_experiment",
@@ -210,7 +250,34 @@ async def compare_strategy_backtests(
         market_benchmark_ticker=market_benchmark_ticker,
         market_benchmark_name="沪深300" if market_benchmark_ticker == "000300" else market_benchmark_ticker,
     )
-    payload = await compare_strategies(spec, publish_artifacts=True, generate_explanation=True)
+    try:
+        payload = await compare_strategies(spec, publish_artifacts=True, generate_explanation=True)
+    except BacktestDataError as exc:
+        payload = {
+            "data_type": "strategy_backtest_comparison",
+            "ticker": ticker,
+            "asset_type": kind.value,
+            "start_date": start_date,
+            "end_date": end_date,
+            "available": False,
+            "data_status": "unavailable",
+            "strategy_count": 0,
+            "comparisons": [],
+            "task_contract": spec.task_contract.model_dump(mode="json"),
+            "acceptance": {
+                "satisfied": False,
+                "checks": {"data_available": False},
+                "missing": ["data_available"],
+            },
+            "conclusion": {
+                "official": False,
+                "tradeoffs": ["没有可用历史数据，无法运行策略比较。"],
+                "data_warnings": [str(exc)],
+                "limitations": ["未产生回测结果，不能比较策略盈利情况。"],
+            },
+            "message": str(exc),
+            "error": {"code": "backtest_data_unavailable", "message": str(exc)},
+        }
     payload.update(
         {
             "_tool_name": "compare_strategy_backtests",
@@ -218,6 +285,7 @@ async def compare_strategy_backtests(
             "provenance": provenance(
                 str(payload.get("data_validation", {}).get("selected_source") or "akshare"),
                 freshness="historical",
+                status="unavailable" if payload.get("available") is False else "available",
             ),
         }
     )
@@ -236,14 +304,28 @@ async def design_and_run_sandbox_strategy(
     """让代码 Agent 生成受限目标仓位函数，在隔离子进程验证后由可信核心回测。"""
     from application.strategy_candidates import strategy_candidates
 
-    candidate = await strategy_candidates.generate(
-        objective=objective,
-        ticker=ticker,
-        start_date=start_date,
-        end_date=end_date,
-        asset_type=AssetType(asset_type),
-        initial_capital=initial_capital,
-    )
+    try:
+        candidate = await strategy_candidates.generate(
+            objective=objective,
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            asset_type=AssetType(asset_type),
+            initial_capital=initial_capital,
+        )
+    except BacktestDataError as exc:
+        return _dump(
+            {
+                "data_type": "sandbox_strategy_candidate",
+                "paper_trading": False,
+                "live_trading": False,
+                "available": False,
+                "data_status": "unavailable",
+                "message": str(exc),
+                "error": {"code": "backtest_data_unavailable", "message": str(exc)},
+                "provenance": provenance("sandbox", freshness="historical", status="unavailable"),
+            }
+        )
     payload = candidate.model_dump(mode="json")
     payload.update(
         {

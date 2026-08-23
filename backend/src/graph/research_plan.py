@@ -655,6 +655,8 @@ async def _execute_step(
         evidence = _result_summaries(state.get("step_results", {}))
         system = (
             "基于给定证据生成简洁中文市场研究结论。明确数据日期、缺失和风险；"
+            "工具已正常返回但 evidence_status 为 limited 或 unavailable 时，应说明限制并继续基于其余证据判断，"
+            "不得把无数据或验收条件未满足描述成工具调用失败；"
             "面向短中期基金交易研究，不承诺收益；股票分析只能表述为底层资产研究。"
         )
         try:
@@ -779,6 +781,7 @@ async def run_worker(
 
 
 async def verify_evidence(state: ResearchPlanState) -> dict[str, Any]:
+    """Annotate evidence quality without rewriting successful tool calls as failures."""
     plan = ResearchPlan.model_validate(state["plan"])
     results = {key: StepResult.model_validate(value) for key, value in (state.get("step_results") or {}).items()}
     evidence_kinds = {
@@ -800,50 +803,95 @@ async def verify_evidence(state: ResearchPlanState) -> dict[str, Any]:
         result = results.get(step.id)
         if result is None or result.status != "completed" or step.kind not in evidence_kinds:
             continue
-        evidence_is_valid = bool(result.evidence) and all(
-            item.source and item.retrieved_at and item.data_status not in {"unavailable", "failed"}
-            for item in result.evidence
-        )
         output = result.output
-        has_coverage = output.get("available") is not False
+        issues: list[str] = []
+        unavailable = output.get("available") is False
+        if not result.evidence:
+            issues.append("缺少可审计来源信息")
+        elif any(not item.source or not item.retrieved_at for item in result.evidence):
+            issues.append("部分证据缺少来源或检索时间")
+        evidence_statuses = {item.data_status for item in result.evidence}
+        if evidence_statuses & {"unavailable", "failed"}:
+            issues.append("一个或多个数据源未返回可用数据")
+        elif evidence_statuses & {"degraded", "partial", "unverified"}:
+            issues.append("一个或多个数据源仅提供降级或部分数据")
+
+        if unavailable:
+            error = output.get("error")
+            message = error.get("message") if isinstance(error, dict) else error
+            issues.append(str(message or output.get("message") or "工具正常返回，但没有可用数据"))
+
+        items = output.get("items") or []
+        if items:
+            missing_items = [item for item in items if isinstance(item, dict) and item.get("available") is False]
+            if missing_items:
+                unavailable = len(missing_items) == len(items)
+                issues.append(
+                    "所有标的均无可用数据" if unavailable else f"{len(missing_items)} 个标的缺少可用数据"
+                )
+
         if step.kind == "news":
-            has_coverage = has_coverage and bool(output.get("results") or output.get("news"))
+            if not (output.get("results") or output.get("news")):
+                unavailable = True
+                issues.append("未检索到相关资讯")
         elif step.kind == "price_history":
-            items = output.get("items") or []
-            has_coverage = has_coverage and bool(items) and all(item.get("history") for item in items)
+            covered = [item for item in items if isinstance(item, dict) and item.get("history")]
+            if not covered:
+                unavailable = True
+                issues.append("未取得可用历史价格")
+            elif len(covered) < len(items):
+                issues.append(f"{len(items) - len(covered)} 个标的缺少历史价格")
         elif step.kind == "fund_nav":
-            items = output.get("items") or []
-            has_coverage = has_coverage and bool(items) and all(item.get("history") for item in items)
+            covered = [item for item in items if isinstance(item, dict) and item.get("history")]
+            if not covered:
+                unavailable = True
+                issues.append("未取得可用基金净值")
+            elif len(covered) < len(items):
+                issues.append(f"{len(items) - len(covered)} 个标的缺少基金净值")
+        elif step.kind == "technical":
+            covered = [item for item in items if isinstance(item, dict) and item.get("indicators")]
+            if not covered:
+                unavailable = True
+                issues.append("未取得可用技术指标")
+            elif len(covered) < len(items):
+                issues.append(f"{len(items) - len(covered)} 个标的缺少技术指标")
+        elif step.kind == "methodology":
+            if not (output.get("results") or output.get("strategies")):
+                unavailable = True
+                issues.append("未检索到相关方法论")
         elif step.kind == "market_snapshot":
-            has_coverage = has_coverage and bool(output.get("quote") or output.get("quotes") or output.get("results"))
+            if not (output.get("quote") or output.get("quotes") or output.get("results")):
+                unavailable = True
+                issues.append("未取得可用行情快照")
         elif step.kind == "comparison":
             quotes = output.get("quotes") or []
-            has_coverage = has_coverage and bool(quotes) and all(item.get("quote") for item in quotes)
+            covered = [item for item in quotes if isinstance(item, dict) and item.get("quote")]
+            if not covered:
+                unavailable = True
+                issues.append("所有对比标的均缺少行情")
+            elif len(covered) < len(quotes):
+                issues.append(f"{len(quotes) - len(covered)} 个对比标的缺少行情")
         elif step.kind == "backtest" and output.get("data_type") == "strategy_backtest_comparison":
             acceptance = output.get("acceptance") or {}
-            has_coverage = has_coverage and acceptance.get("satisfied") is True
+            if acceptance.get("satisfied") is False:
+                missing = [str(item) for item in acceptance.get("missing", [])]
+                issues.append("任务验收条件未满足" + (f": {', '.join(missing)}" if missing else ""))
         elif step.kind == "backtest" and output.get("data_type") == "sandbox_strategy_candidate":
             sandbox_backtest = output.get("result", {}).get("backtest", {})
-            has_coverage = (
-                has_coverage
-                and bool(output.get("candidate_id"))
-                and output.get("validation", {}).get("passed") is True
-                and sandbox_backtest.get("final_value") is not None
-            )
+            if output.get("validation", {}).get("passed") is not True:
+                issues.append("沙盒候选未通过全部验证")
+            if not output.get("candidate_id") or sandbox_backtest.get("final_value") is None:
+                unavailable = True
+                issues.append("沙盒候选缺少可信回测结果")
         requires_as_of = step.kind in {"market_snapshot", "price_history", "fund_nav", "news", "comparison"}
         has_as_of = not requires_as_of or all(item.as_of for item in result.evidence)
-        if not evidence_is_valid or not has_coverage or not has_as_of:
+        if not has_as_of:
+            issues.append("部分证据缺少数据截止时间")
+        issues = list(dict.fromkeys(issues))
+        evidence_status = "unavailable" if unavailable else "limited" if issues else "sufficient"
+        if result.evidence_status != evidence_status or result.evidence_issues != issues:
             updates[step.id] = result.model_copy(
-                update={
-                    "status": "failed",
-                    "error": (
-                        "任务验收契约未满足: " + ", ".join(output.get("acceptance", {}).get("missing", []))
-                        if step.kind == "backtest" and output.get("acceptance", {}).get("satisfied") is False
-                        else "沙盒验证或可信回测未完成"
-                        if step.kind == "backtest" and output.get("data_type") == "sandbox_strategy_candidate"
-                        else "证据缺少来源、检索时间或所需数据覆盖范围"
-                    ),
-                }
+                update={"evidence_status": evidence_status, "evidence_issues": issues}
             ).model_dump(mode="json")
     results.update({key: StepResult.model_validate(value) for key, value in updates.items()})
     failed = [step for step in plan.steps if step.id in results and results[step.id].status == "failed"]

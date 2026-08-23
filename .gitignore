@@ -13,7 +13,7 @@ __pycache__/
 coverage/
 htmlcov/
 *.log
-**/data/cache.db
+**/data/*.db
 **/data/*.db-shm
 **/data/*.db-wal
 **/data/artifacts/

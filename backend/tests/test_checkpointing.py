@@ -12,7 +12,8 @@ from langgraph.graph import START, StateGraph
 import graph.agent_loop as agent_loop
 import graph.checkpointing as checkpointing
 from application.research import ResearchService
-from graph.checkpointing import CheckpointManager, _psycopg_url
+from graph.checkpointing import CheckpointManager, _checkpoint_serializer, _psycopg_url
+from models.schemas import AgentReport, AssetType, Decision, MarketContext, SignalType, TradeDecision
 
 
 def test_checkpoint_graph_config_and_postgres_url_normalization():
@@ -20,6 +21,23 @@ def test_checkpoint_graph_config_and_postgres_url_normalization():
     assert config["configurable"] == {"tenant": "local", "thread_id": "task-1"}
     assert config["recursion_limit"] == 120
     assert _psycopg_url("postgresql+asyncpg://user:pass@db/app") == "postgresql://user:pass@db/app"
+
+
+def test_checkpoint_serializer_round_trips_explicit_application_types():
+    serializer = _checkpoint_serializer()
+    values = (
+        AssetType.ETF,
+        MarketContext(ticker="510300", asset_type=AssetType.ETF),
+        Decision.HOLD,
+        AgentReport(agent_name="technical"),
+        SignalType.WATCH,
+        TradeDecision(ticker="510300", asset_type=AssetType.ETF),
+    )
+
+    for value in values:
+        decoded = serializer.loads_typed(serializer.dumps_typed(value))
+        assert type(decoded) is type(value)
+        assert decoded == value
 
 
 def test_background_research_does_not_allocate_checkpoints(monkeypatch):
@@ -49,6 +67,7 @@ async def test_checkpoint_manager_uses_independent_sqlite(monkeypatch, tmp_path)
 
         class CounterState(TypedDict):
             count: int
+            asset_type: AssetType
 
         async def increment(state: CounterState):
             return {"count": state["count"] + 1}
@@ -58,9 +77,11 @@ async def test_checkpoint_manager_uses_independent_sqlite(monkeypatch, tmp_path)
         builder.add_edge(START, "increment")
         graph = builder.compile(checkpointer=saver)
         config = manager.graph_config("sqlite-integration")
-        assert (await graph.ainvoke({"count": 0}, config=config))["count"] == 1
+        result = await graph.ainvoke({"count": 0, "asset_type": AssetType.ETF}, config=config)
+        assert result == {"count": 1, "asset_type": AssetType.ETF}
         rebuilt = builder.compile(checkpointer=saver)
         assert (await rebuilt.aget_state(config)).values["count"] == 1
+        assert (await rebuilt.aget_state(config)).values["asset_type"] is AssetType.ETF
     finally:
         await manager.stop()
     assert manager.saver is None
@@ -68,7 +89,7 @@ async def test_checkpoint_manager_uses_independent_sqlite(monkeypatch, tmp_path)
 
 @pytest.mark.asyncio
 async def test_checkpoint_manager_prefers_postgres_and_runs_setup(monkeypatch):
-    observed = {"url": "", "setup": False, "closed": False}
+    observed = {"url": "", "setup": False, "closed": False, "serde": None}
 
     class FakeSaver:
         async def setup(self):
@@ -85,8 +106,9 @@ async def test_checkpoint_manager_prefers_postgres_and_runs_setup(monkeypatch):
 
     class FakePostgresSaver:
         @staticmethod
-        def from_conn_string(url):
+        def from_conn_string(url, *, serde=None):
             observed["url"] = url
+            observed["serde"] = serde
             return FakeContext()
 
     monkeypatch.setattr(checkpointing, "AsyncPostgresSaver", FakePostgresSaver)
@@ -97,11 +119,10 @@ async def test_checkpoint_manager_prefers_postgres_and_runs_setup(monkeypatch):
     )
     manager = CheckpointManager()
     assert await manager.start() is saver
-    assert observed == {
-        "url": "postgresql://user:pass@db/app",
-        "setup": True,
-        "closed": False,
-    }
+    assert observed["url"] == "postgresql://user:pass@db/app"
+    assert observed["setup"] is True
+    assert observed["closed"] is False
+    assert observed["serde"].__class__.__name__ == "JsonPlusSerializer"
     await manager.stop()
     assert observed["closed"] is True
 

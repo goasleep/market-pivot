@@ -78,6 +78,10 @@ def _compact_strategy_comparison(payload: dict[str, Any]) -> dict[str, Any]:
         "comparison_id",
         "data_type",
         "_tool_name",
+        "available",
+        "data_status",
+        "message",
+        "error",
         "ticker",
         "asset_type",
         "start_date",
@@ -208,6 +212,8 @@ def _result_summaries(results: dict[str, dict[str, Any]]) -> list[dict[str, Any]
             "step_id": item.get("step_id"),
             "status": item.get("status"),
             "summary": item.get("summary"),
+            "evidence_status": item.get("evidence_status", "not_assessed"),
+            "evidence_issues": item.get("evidence_issues", []),
             "output": _synthesis_output(item.get("output", {})),
         }
         for item in results.values()
@@ -229,7 +235,14 @@ def _synthesis_request(request: dict[str, Any]) -> dict[str, Any]:
 
 def _deterministic_synthesis_fallback(evidence: list[dict[str, Any]]) -> str:
     completed = [
-        f"- {item.get('step_id')}: {item.get('summary') or '已完成'}"
+        (
+            f"- {item.get('step_id')}: {item.get('summary') or '已完成'}"
+            + (
+                f"（证据{item.get('evidence_status')}：{'；'.join(item.get('evidence_issues') or [])}）"
+                if item.get("evidence_status") in {"limited", "unavailable"}
+                else ""
+            )
+        )
         for item in evidence
         if item.get("status") == "completed"
     ]
@@ -257,6 +270,10 @@ def _synthesis_output(output: Any) -> Any:
     )
     return {
         "data_type": output.get("data_type"),
+        "available": output.get("available", True),
+        "data_status": output.get("data_status"),
+        "message": output.get("message"),
+        "error": output.get("error"),
         "ticker": output.get("ticker"),
         "evaluation_start_date": output.get("evaluation_start_date"),
         "evaluation_end_date": output.get("evaluation_end_date"),
@@ -328,6 +345,21 @@ def _format_winner_metric(metric: str, value: Any) -> str:
 def _comparison_synthesis_text(payload: dict[str, Any]) -> str:
     """Render frozen comparison facts without asking an LLM to re-rank strategies."""
     conclusion = payload.get("conclusion") or {}
+    if payload.get("available") is False:
+        error = payload.get("error")
+        message = error.get("message") if isinstance(error, dict) else error
+        warnings = [str(item) for item in conclusion.get("data_warnings", []) if str(item)]
+        reason = str(message or payload.get("message") or (warnings[0] if warnings else "没有可用历史数据"))
+        limitations = [str(item) for item in conclusion.get("limitations", []) if str(item)]
+        lines = [
+            f"{payload.get('ticker') or '该标的'} 的多策略回测工具已正常返回，但没有产生回测结果。",
+            f"数据说明：{reason}",
+            "由于没有可比较的策略结果，本步骤不形成优胜策略；应结合其他已取得的证据继续判断。",
+        ]
+        if limitations:
+            lines.append("局限：" + "；".join(limitations))
+        lines.append("以上仅用于研究与模拟盘，不构成收益承诺或直接交易建议。")
+        return "\n".join(lines)
     validation = payload.get("data_validation") or {}
     execution = payload.get("execution") or {}
     snapshot = payload.get("data_snapshot") or {}
@@ -397,9 +429,13 @@ def _comparison_synthesis_text(payload: dict[str, Any]) -> str:
     elif market_benchmark.get("status") == "unavailable":
         lines.append(f"同期大盘对比暂不可用：{market_benchmark.get('error') or '未取得指数行情'}。")
     artifacts = payload.get("artifacts") or []
-    lines.append(
-        f"完整可审计成果包已生成，共 {len(artifacts)} 个文件，包含 HTML、XLSX、JSON 与 CSV；可在上方成果区预览或下载。"
-    )
+    if artifacts:
+        lines.append(
+            f"完整可审计成果包已生成，共 {len(artifacts)} 个文件，包含 HTML、XLSX、JSON 与 CSV；"
+            "可在上方成果区预览或下载。"
+        )
+    else:
+        lines.append("本次未生成可下载的回测成果文件。")
     lines.append("以上仅用于研究与模拟盘，不构成收益承诺或直接交易建议。")
     return "\n".join(lines)
 

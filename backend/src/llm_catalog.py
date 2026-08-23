@@ -63,24 +63,6 @@ OPENAI_COMPATIBLE_MODELS: dict[str, dict[str, Any]] = {
         "supports_tools": True,
         "supports_reasoning": True,
     },
-    "gpt-4o-mini": {
-        "context_window": 128000,
-        "max_output_tokens": 8192,
-        "max_tokens": 8192,
-        "temperature": 0.3,
-        "description": "OpenAI GPT-4o mini",
-        "supports_tools": True,
-        "supports_reasoning": False,
-    },
-    "gpt-4o": {
-        "context_window": 128000,
-        "max_output_tokens": 8192,
-        "max_tokens": 8192,
-        "temperature": 0.3,
-        "description": "OpenAI GPT-4o",
-        "supports_tools": True,
-        "supports_reasoning": False,
-    },
 }
 
 
