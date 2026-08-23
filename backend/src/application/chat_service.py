@@ -392,6 +392,11 @@ class ChatTaskManager:
                     state["execution_version"] = 2
                     state["graph_name"] = RESEARCH_GRAPH_NAME
                     state["thread_id"] = task_input.thread_id or task_input.task_id
+                if state is not None:
+                    if plan.get("outcome_status"):
+                        state["outcome_status"] = str(plan["outcome_status"])
+                    if isinstance(plan.get("acceptance"), dict):
+                        state["task_acceptance"] = plan["acceptance"]
                     await self.store.set_task_state(task_input.task_id, state)
                 await self._emit_a2ui(
                     task_input,

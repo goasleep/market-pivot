@@ -172,12 +172,20 @@ def render_research_plan(
 ) -> list[dict[str, Any]]:
     """Render one replaceable public plan snapshot without exposing chain of thought."""
     steps = [item for item in plan.get("steps", []) if isinstance(item, dict)]
-    children = ["title", "meta", "objective", "progress"]
+    children = ["title", "meta", "objective", "outcome", "progress"]
+    outcome = str(plan.get("outcome_status") or "")
+    outcome_labels = {
+        "satisfied": "业务验收：通过",
+        "partial": "业务验收：部分完成",
+        "data_unavailable": "业务验收：数据不可用",
+        "invalid_result": "业务验收：结果无效",
+    }
     components: list[dict[str, Any]] = [
         {"id": "root", "component": "Card", "children": children},
-        _text("title", "市场研究执行计划", "h3"),
+        _text("title", "股票 / 基金研究执行计划", "h3"),
         _text("meta", _ref("/meta"), "caption"),
         _text("objective", _ref("/objective"), "body"),
+        {"id": "outcome", "component": "Badge", "text": _ref("/outcomeLabel"), "tone": _ref("/outcomeTone")},
         {"id": "progress", "component": "Progress", "value": _ref("/progress")},
     ]
     for index, step in enumerate(steps):
@@ -218,6 +226,14 @@ def render_research_plan(
         components,
         {
             "objective": str(plan.get("objective") or "市场研究"),
+            "outcomeLabel": outcome_labels.get(outcome, "业务验收：执行中"),
+            "outcomeTone": (
+                "positive"
+                if outcome == "satisfied"
+                else "negative"
+                if outcome in {"data_unavailable", "invalid_result"}
+                else "secondary"
+            ),
             "progress": int(plan.get("progress") or 0),
             "meta": (
                 f"{depth_labels.get(str(plan.get('depth')), str(plan.get('depth') or '标准'))} · "
