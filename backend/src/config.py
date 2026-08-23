@@ -232,6 +232,19 @@ class Settings(BaseSettings):
     s3_addressing_style: str = "path"
     s3_artifacts_prefix: str = "a-share-agent/artifacts"
 
+    # Dedicated S3-compatible storage for immutable historical market data.
+    # Keep this separate from generated artifacts so credentials, retention,
+    # and storage lifecycle policies can evolve independently.
+    market_history_cache_enabled: bool = False
+    market_history_s3_endpoint_url: str = ""
+    market_history_s3_bucket: str = ""
+    market_history_s3_region: str = "us-east-1"
+    market_history_s3_access_key_id: str = ""
+    market_history_s3_secret_access_key: str = ""
+    market_history_s3_session_token: str = ""
+    market_history_s3_addressing_style: str = "path"
+    market_history_s3_prefix: str = "a-share-agent/market-history/v1"
+
     # Serper web search. The search tool stays disabled until a key is set.
     serper_api_key: str = ""
     serper_base_url: str = "https://google.serper.dev"
