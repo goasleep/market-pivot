@@ -1,9 +1,11 @@
 import pandas as pd
+from strategy_helpers import compare_expression, strategy_mapping
 
 from agents.asset_agent import AssetAgent
+from engine.strategy_runtime import evaluate_strategy_intent
 from engine.trading_engine import TradingEngine
 from models.schemas import AssetType, Decision, SimulationAccountConfig, TradeDecision
-from strategies.compiler import evaluate_strategy, strategy_from_mapping
+from strategies.compiler import strategy_from_mapping
 
 
 def test_stock_and_fund_share_one_trade_plan_shape():
@@ -43,15 +45,12 @@ def test_etf_uses_fund_trading_costs_and_auto_exit_levels():
 
 def test_llm_strategy_spec_compiles_into_deterministic_conditions():
     spec = strategy_from_mapping(
-        {
-            "name": "etf_momentum",
-            "asset_types": ["etf"],
-            "entry_conditions": [
-                {"indicator": "return_pct", "operator": "gt", "value": 0, "window": 5}
-            ],
-            "stop_loss_pct": 0.05,
-            "take_profit_pct": 0.1,
-        },
+        strategy_mapping(
+            "etf_momentum",
+            entry=compare_expression("return_pct", "gt", 0, 5),
+            stop_loss_pct=0.05,
+            take_profit_pct=0.1,
+        ),
         source="llm",
     )
     history = pd.DataFrame(
@@ -61,9 +60,9 @@ def test_llm_strategy_spec_compiles_into_deterministic_conditions():
             "volume": [100] * 6,
         }
     )
-    result = evaluate_strategy(spec, history, asset_type=AssetType.ETF)
-    assert result["matched"] is True
-    assert result["conditions"][0]["value"] > 0
+    intent, _state, result = evaluate_strategy_intent(spec, history, asset_type=AssetType.ETF)
+    assert intent.decision == Decision.BUY
+    assert result["expression_traces"]["entry"]["left"] > 0
 
 
 def test_asset_agent_is_the_canonical_chat_alias():

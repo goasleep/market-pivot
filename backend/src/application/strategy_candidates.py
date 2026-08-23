@@ -19,23 +19,26 @@ from application.research_sandbox import (
 from data.db_models import ResearchStrategyCandidateRecord
 from data.tortoise_db import init_database
 from engine.backtester import prepare_single_backtest_data
-from engine.strategy_runtime import decision_from_strategy, target_exposure_from_strategy
+from engine.strategy_runtime import evaluate_strategy_intent
 from llm.service import get_llm_service
-from models.schemas import AssetType, Decision, Position, StrategyCondition, StrategySpec
+from models.schemas import AssetType, StrategyRuntimeState, StrategySpec
 from models.strategy_research import ResearchStrategyCandidate
 from strategies.compiler import available_indicators, strategy_from_mapping
+from strategies.plugin_registry import strategy_plugins_manifest
 
 SANDBOX_DESIGN_SYSTEM = """你是量化研究代码 Agent。只返回 JSON，不要 Markdown。
 JSON 必须包含 source_code 和 strategy_spec。source_code 只能定义同步函数
 generate_target_positions(frame)，输入列仅有 date/open/high/low/close/volume，
 返回与 frame 等长、位于 0 到 0.95 的目标仓位序列。
-若 strategy_spec 使用 fixed 仓位模型，position_size_pct 必须设为 0.95，代码中的持仓值也必须使用 0.95；
-动态仓位必须通过 position_model 表达，且代码输出需与该结构化模型逐日等价。
+strategy_spec 必须使用统一策略协议：components 表达 DSL 或已注册 Python 组件，fusion 表达融合规则，
+position_policy.mode 必须为 continuous，state_policy 表达冷却等状态规则；代码输出需与结构化策略逐日等价。
 函数必须只使用截至当前行的 rolling/expanding/shift 数据，禁止 iloc[-1] 影响历史行，禁止负数 shift，禁止网络、文件、
 进程、线程、反射、动态执行和随机数。pandas 以 pd、numpy 以 np 预置。
 strategy_spec 必须使用给定受控指标描述与代码完全相同的信号，source=sandbox；只有两者逐日信号完全一致才可进入模拟盘审批。
 指标名称只能来自 available_indicators，不能发明 fast_ma 或 slow_ma。均线交叉必须使用 ma_spread_pct，并在
-indicator_specs.params 中提供 fast_window、slow_window，通过 alias 在入场条件中与数值 0 比较。
+indicator_specs.params 中提供 fast_window、slow_window，通过 alias 在 DSL expression 中与数值 0 比较。
+Python component 只能引用已注册插件 core.trend_score、core.market_regime 或 core.volatility_target，
+禁止内嵌任意插件代码。
 不要计算成交价、订单、资金、费用或绩效，这些由可信交易引擎负责。"""
 
 
@@ -120,8 +123,20 @@ class StrategyCandidateService:
                 name=str(strategy_payload.get("name") or f"sandbox_{ticker}_{uuid4().hex[:6]}"),
                 description="原始结构化策略未通过验证；当前候选仅保留代码研究结果，不能部署。",
                 asset_types=[kind],
-                indicators=["close"],
-                entry_conditions=[StrategyCondition(indicator="close", operator="lt", value=0)],
+                components=[
+                    {
+                        "id": "invalid_fallback",
+                        "type": "dsl",
+                        "expression": {
+                            "type": "compare",
+                            "left": {"type": "indicator", "indicator": "close"},
+                            "operator": "lt",
+                            "right": {"type": "constant", "value": 0},
+                        },
+                        "score_when_true": 1,
+                        "score_when_false": -1,
+                    }
+                ],
                 source="sandbox",
             )
         prepared = await prepare_single_backtest_data(
@@ -175,6 +190,7 @@ class StrategyCandidateService:
                 "out_of_sample": _out_of_sample(backtest.get("equity_curve") or []),
             }
         )
+        backtest.setdefault("execution", {})["strategy_plugins"] = strategy_plugins_manifest(strategy.components)
         promotion_eligible = validation.passed and equivalent and history_sufficient
         candidate = ResearchStrategyCandidate(
             candidate_id=f"candidate-{uuid4().hex[:16]}",
@@ -270,50 +286,19 @@ def _strip_code_fence(source: str) -> str:
 
 
 def _strategy_target_positions(spec: StrategySpec, frame: pd.DataFrame) -> list[float]:
-    if spec.position_model is not None:
-        return [
-            float(target_exposure_from_strategy(spec, frame.iloc[: index + 1]) or 0.0)
-            for index in range(len(frame))
-        ]
-    holding = False
-    entry_price = 0.0
-    stop_loss: float | None = None
-    take_profit: float | None = None
+    state = StrategyRuntimeState()
+    current_exposure = 0.0
     output: list[float] = []
-    for index, row in frame.reset_index(drop=True).iterrows():
-        current_price = float(row["close"])
-        position = (
-            Position(
-                ticker="candidate",
-                asset_type=spec.asset_types[0],
-                shares=100,
-                available_shares=100,
-                avg_cost=entry_price,
-                current_price=current_price,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-            )
-            if holding
-            else None
-        )
-        decision, _ = decision_from_strategy(
+    for index in range(len(frame)):
+        intent, state, _ = evaluate_strategy_intent(
             spec,
             frame.iloc[: index + 1],
             asset_type=spec.asset_types[0],
-            ticker="candidate",
-            current_price=current_price,
-            position=position,
+            current_exposure=current_exposure,
+            state=state,
         )
-        if decision.decision == Decision.BUY:
-            holding = True
-            entry_price = current_price
-            stop_loss = decision.stop_loss
-            take_profit = decision.take_profit
-        elif decision.decision == Decision.SELL:
-            holding = False
-            stop_loss = None
-            take_profit = None
-        output.append(0.95 if holding else 0.0)
+        current_exposure = intent.target_exposure
+        output.append(current_exposure)
     return output
 
 

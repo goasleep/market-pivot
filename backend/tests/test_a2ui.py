@@ -202,12 +202,20 @@ def test_sandbox_candidate_renders_source_validation_and_backtest_in_one_surface
                 "strategy_spec": {
                     "name": "ma_rsi_demo",
                     "description": "均线与 RSI 趋势信号",
-                    "entry_conditions": [
-                        {"indicator": "rsi", "operator": "lt", "value": 30, "window": 14}
+                    "components": [
+                        {
+                            "id": "rsi_entry",
+                            "type": "dsl",
+                            "role": "signal",
+                            "expression": {
+                                "type": "compare",
+                                "left": {"type": "indicator", "indicator": "rsi", "window": 14},
+                                "operator": "lt",
+                                "right": {"type": "constant", "value": 30},
+                            },
+                        }
                     ],
-                    "exit_conditions": [
-                        {"indicator": "rsi", "operator": "gte", "value": 55, "window": 14}
-                    ],
+                    "position_policy": {"mode": "continuous", "max_exposure": 0.95},
                 },
                 "validation": {
                     "passed": True,
@@ -284,7 +292,7 @@ def test_strategy_comparison_renders_auditable_research_sections_and_safe_artifa
             "out_of_sample": {"out_of_sample_return": 0.03},
             "rolling": [{"total_return": 0.1}, {"total_return": -0.1}],
         },
-        "strategy_spec": {"position_size_pct": 0.95},
+        "strategy_spec": {"position_policy": {"mode": "continuous", "max_exposure": 0.95}},
         "entry_rules": [],
         "exit_rules": [],
     }
@@ -330,7 +338,7 @@ def test_strategy_comparison_renders_auditable_research_sections_and_safe_artifa
     components = messages[1]["updateComponents"]["components"]
     model = messages[2]["updateDataModel"]["value"]
 
-    assert sum(item.get("component") == "MultiLineChart" for item in components) == 2
+    assert sum(item.get("component") == "MultiLineChart" for item in components) == 3
     assert any(item.get("component") == "ArtifactLink" for item in components)
     assert model["winners"][0]["strategy"] == "买入持有"
     assert model["stabilityRows"][0]["rollingPositive"] == "+50.00%"

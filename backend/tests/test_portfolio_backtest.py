@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+from strategy_helpers import compare_expression, strategy_mapping
 
 from engine.backtester import run_pool_backtest
 
@@ -42,11 +43,10 @@ async def test_portfolio_backtest_allocates_and_rebalances_with_shared_cash(monk
         asset_type="etf",
         decision_interval=1,
         fill_time="same_close",
-        strategy_spec={
-            "name": "portfolio_test",
-            "asset_types": ["etf"],
-            "entry_conditions": [{"indicator": "return_pct", "operator": "gt", "value": -1, "window": 1}],
-        },
+        strategy_spec=strategy_mapping(
+            "portfolio_test",
+            entry=compare_expression("return_pct", "gt", -1, 1),
+        ),
         portfolio_spec={
             "allocation_method": "equal_weight",
             "rebalance_frequency": "weekly",

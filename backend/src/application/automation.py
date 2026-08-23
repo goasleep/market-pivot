@@ -29,11 +29,9 @@ from engine.simulation_account import simulation_accounts
 from engine.simulation_events import simulation_events
 from engine.strategy_runtime import (
     decision_from_intent,
-    decision_from_strategy,
     evaluate_strategy_intent,
     normalize_target_exposures,
     plan_rebalance,
-    target_weights_for_decisions,
 )
 from engine.trading_engine import decision_shares
 from models.schemas import AgentRunSummary, AutomationTaskConfig, Decision, LiveOrderIntent, TradeDecision
@@ -249,9 +247,9 @@ class AutomationService:
                 completed_at=datetime.now(SHANGHAI).isoformat(),
                 error="LLM/沙盒研究策略禁止进入实盘执行链路",
             )
-        if deployment.strategy_spec.schema_version == 2 and deployment.execution.get(
-            "strategy_plugins"
-        ) != strategy_plugins_manifest(deployment.strategy_spec.components):
+        if deployment.execution.get("strategy_plugins") != strategy_plugins_manifest(
+            deployment.strategy_spec.components
+        ):
             return await automation_store.update_run(
                 summary.run_id,
                 status="failed",
@@ -309,40 +307,37 @@ class AutomationService:
                 freshness_error = self._data_freshness_error(context, effective_date, config.data_max_age_seconds)
                 if freshness_error:
                     raise ValueError(freshness_error)
-                target_exposure = None
-                if deployment.strategy_spec.schema_version == 2:
-                    runtime_state = await self.strategy_states.get(deployment.deployment_id, ticker)
-                    held = positions.get(ticker)
-                    current_exposure = (
-                        held.market_value / account.portfolio.total_value
-                        if held is not None and account.portfolio.total_value
-                        else 0.0
-                    )
-                    intent, runtime_state, evaluation = evaluate_strategy_intent(
-                        deployment.strategy_spec,
-                        normalized,
-                        asset_type=deployment.asset_type,
-                        current_exposure=current_exposure,
-                        state=runtime_state,
-                    )
-                    await self.strategy_states.save(deployment.deployment_id, ticker, runtime_state)
-                    target_exposure = intent.target_exposure
-                    base_decision = decision_from_intent(
-                        deployment.strategy_spec,
-                        intent,
-                        ticker=ticker,
-                        asset_type=deployment.asset_type,
-                        current_price=current_price,
-                    )
-                else:
-                    base_decision, evaluation = decision_from_strategy(
-                        deployment.strategy_spec,
-                        normalized,
-                        asset_type=deployment.asset_type,
-                        ticker=ticker,
-                        current_price=current_price,
-                        position=positions.get(ticker),
-                    )
+                runtime_state = await self.strategy_states.get(deployment.deployment_id, ticker)
+                held = positions.get(ticker)
+                marked_total = account.portfolio.cash + sum(
+                    position.shares * (current_price if position.ticker == ticker else position.current_price)
+                    for position in account.portfolio.positions
+                )
+                current_exposure = (
+                    held.shares * current_price / marked_total
+                    if held is not None and marked_total
+                    else 0.0
+                )
+                if held is not None and runtime_state.entry_price is None:
+                    runtime_state.entry_price = held.avg_cost
+                    runtime_state.lifecycle = "active"
+                    runtime_state.target_exposure = current_exposure
+                intent, runtime_state, evaluation = evaluate_strategy_intent(
+                    deployment.strategy_spec,
+                    normalized,
+                    asset_type=deployment.asset_type,
+                    current_exposure=current_exposure,
+                    state=runtime_state,
+                )
+                await self.strategy_states.save(deployment.deployment_id, ticker, runtime_state)
+                target_exposure = intent.target_exposure
+                base_decision = decision_from_intent(
+                    deployment.strategy_spec,
+                    intent,
+                    ticker=ticker,
+                    asset_type=deployment.asset_type,
+                    current_price=current_price,
+                )
                 gate = {"approved": True, "reason": "策略为 HOLD，无需 Agent 审核"}
                 if base_decision.decision != Decision.HOLD:
                     agent_result = await research_service.run(
@@ -383,69 +378,43 @@ class AutomationService:
         }
         prices = {ticker: item["price"] for ticker, item in analyses.items()}
         proposals: dict[str, dict] = {}
-        if deployment.strategy_spec.schema_version == 2:
-            policy = deployment.strategy_spec.position_policy
-            if policy is None:
-                raise ValueError("StrategySpec v2 缺少 position_policy")
-            raw_targets = {}
-            for ticker, item in analyses.items():
-                held = positions.get(ticker)
-                current_weight = (
-                    held.market_value / account.portfolio.total_value
-                    if held is not None and account.portfolio.total_value
-                    else 0.0
-                )
-                raw_targets[ticker] = (
-                    float(item["target_exposure"])
-                    if item["gate"].get("approved") and item["target_exposure"] is not None
-                    else current_weight
-                )
-            for ticker, held in positions.items():
-                raw_targets.setdefault(
-                    ticker,
-                    held.market_value / account.portfolio.total_value if account.portfolio.total_value else 0.0,
-                )
-            portfolio_spec = deployment.portfolio_spec
-            weights = normalize_target_exposures(
-                raw_targets,
-                max_position_weight=(portfolio_spec.max_position_weight if portfolio_spec else policy.max_exposure),
-                max_positions=(portfolio_spec.max_positions if portfolio_spec else len(raw_targets)),
-                cash_reserve=(portfolio_spec.cash_reserve if portfolio_spec else 1 - policy.max_exposure),
+        policy = deployment.strategy_spec.position_policy
+        marked_total = account.portfolio.cash + sum(
+            position.shares * float(prices.get(position.ticker, position.current_price))
+            for position in account.portfolio.positions
+        )
+        raw_targets = {}
+        for ticker, item in analyses.items():
+            held = positions.get(ticker)
+            current_weight = (
+                held.shares * float(item["price"]) / marked_total
+                if held is not None and marked_total
+                else 0.0
             )
-            planned = plan_rebalance(account.portfolio, account.config, weights, prices, approved_decisions)
-            proposals = {
-                proposal["ticker"]: proposal
-                for proposal in planned
-                if proposal["ticker"] in approved_decisions
-                and approved_decisions[proposal["ticker"]].decision.value == proposal["side"]
-            }
-        elif deployment.portfolio_spec:
-            weights = target_weights_for_decisions(
-                approved_decisions,
-                account.portfolio,
-                deployment.portfolio_spec,
+            raw_targets[ticker] = (
+                float(item["target_exposure"])
+                if item["gate"].get("approved") and item["target_exposure"] is not None
+                else current_weight
             )
-            planned = plan_rebalance(account.portfolio, account.config, weights, prices, approved_decisions)
-            proposals = {
-                proposal["ticker"]: proposal
-                for proposal in planned
-                if proposal["ticker"] in approved_decisions
-                and approved_decisions[proposal["ticker"]].decision.value == proposal["side"]
-            }
-        else:
-            for ticker, decision in approved_decisions.items():
-                if decision.decision == Decision.HOLD:
-                    continue
-                shares = decision_shares(account.portfolio, account.config, decision, prices[ticker])
-                if shares > 0:
-                    proposals[ticker] = {
-                        "ticker": ticker,
-                        "side": decision.decision.value,
-                        "shares": shares,
-                        "price": prices[ticker],
-                        "stop_loss": decision.stop_loss,
-                        "take_profit": decision.take_profit,
-                    }
+        for ticker, held in positions.items():
+            raw_targets.setdefault(
+                ticker,
+                held.shares * float(prices.get(ticker, held.current_price)) / marked_total if marked_total else 0.0,
+            )
+        portfolio_spec = deployment.portfolio_spec
+        weights = normalize_target_exposures(
+            raw_targets,
+            max_position_weight=(portfolio_spec.max_position_weight if portfolio_spec else policy.max_exposure),
+            max_positions=(portfolio_spec.max_positions if portfolio_spec else len(raw_targets)),
+            cash_reserve=(portfolio_spec.cash_reserve if portfolio_spec else 1 - policy.max_exposure),
+        )
+        planned = plan_rebalance(account.portfolio, account.config, weights, prices, approved_decisions)
+        proposals = {
+            proposal["ticker"]: proposal
+            for proposal in planned
+            if proposal["ticker"] in approved_decisions
+            and approved_decisions[proposal["ticker"]].decision.value == proposal["side"]
+        }
 
         orders_count = 0
         ordered_tickers = sorted(

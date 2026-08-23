@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+from strategy_helpers import compare_expression, strategy_mapping
 
 import application.strategy_candidates as candidate_module
 from application.backtest_experiment import BacktestExperimentStore
@@ -38,24 +39,21 @@ async def test_candidate_requires_equivalence_and_human_review_then_remains_pape
 def generate_target_positions(frame):
     fast = frame["close"].rolling(2).mean()
     slow = frame["close"].rolling(4).mean()
-    return (fast > slow).fillna(False).astype(int)
+    return (fast > slow).fillna(False).astype(float) * 0.95
 """,
-                "strategy_spec": {
-                    "name": "sandbox_ma_2_4",
-                    "asset_types": ["etf"],
-                    "indicators": ["spread"],
-                    "indicator_specs": [
+                "strategy_spec": strategy_mapping(
+                    "sandbox_ma_2_4",
+                    indicator_specs=[
                         {
                             "name": "ma_spread_pct",
                             "alias": "spread",
                             "params": {"fast_window": 2, "slow_window": 4},
                         }
                     ],
-                    "entry_conditions": [{"indicator": "spread", "operator": "gt", "value": 0}],
-                    "exit_conditions": [{"indicator": "spread", "operator": "lte", "value": 0}],
-                    "position_size_pct": 0.95,
-                    "source": "sandbox",
-                },
+                    entry=compare_expression("spread", "gt", 0),
+                    exit=compare_expression("spread", "lte", 0),
+                    source="sandbox",
+                ),
             }
 
     async def fake_prepared(**_kwargs):
@@ -119,8 +117,9 @@ def generate_target_positions(frame):
                 "strategy_spec": {
                     "name": "invalid_aliases",
                     "asset_types": ["etf"],
-                    "indicators": ["fast_ma", "slow_ma"],
-                    "entry_conditions": [{"indicator": "fast_ma", "operator": "gt", "value": 0}],
+                    "components": [
+                        {"id": "invalid", "expression": compare_expression("fast_ma", "gt", 0)}
+                    ],
                 },
             }
 

@@ -1,9 +1,11 @@
 import pandas as pd
 import pytest
+from strategy_helpers import compare_expression, strategy_mapping
 
 from data.backtest_data import BacktestDataError, prepare_backtest_data
+from engine.strategy_runtime import evaluate_strategy_intent
 from models.schemas import AssetType, Decision
-from strategies.compiler import available_indicators, evaluate_strategy, strategy_from_mapping
+from strategies.compiler import available_indicators, strategy_from_mapping
 
 
 def _history() -> pd.DataFrame:
@@ -48,64 +50,15 @@ def test_indicator_contract_and_extended_indicators_are_deterministic():
     assert {"price_vs_ma_pct", "rsi", "atr", "volatility"}.issubset(names)
 
     spec = strategy_from_mapping(
-        {
-            "name": "controlled_trend",
-            "asset_types": ["etf"],
-            "indicators": ["price_vs_ma_pct", "rsi"],
-            "entry_conditions": [
-                {"indicator": "price_vs_ma_pct", "operator": "gt", "value": -5, "window": 3}
-            ],
-        },
+        strategy_mapping(
+            "controlled_trend",
+            entry=compare_expression("price_vs_ma_pct", "gt", -5, 3),
+        ),
         source="llm",
     )
-    result = evaluate_strategy(spec, _history(), asset_type=AssetType.ETF)
-    assert result["matched"] is True
-    assert result["conditions"][0]["value"] is not None
-
-
-def test_entry_conditions_default_to_all_and_exit_conditions_default_to_any():
-    spec = strategy_from_mapping(
-        {
-            "name": "condition_logic",
-            "asset_types": ["etf"],
-            "entry_conditions": [
-                {"indicator": "close", "operator": "gt", "value": 10},
-                {"indicator": "close", "operator": "gt", "value": 100},
-            ],
-            "exit_conditions": [
-                {"indicator": "close", "operator": "lt", "value": 11},
-                {"indicator": "rsi", "operator": "gte", "value": 78, "window": 3},
-            ],
-        },
-        source="llm",
-    )
-
-    result = evaluate_strategy(spec, _history(), asset_type=AssetType.ETF)
-
-    assert result["matched"] is False
-    assert result["exit_matched"] is True
-    assert result["entry_condition_logic"] == "all"
-    assert result["exit_condition_logic"] == "any"
-
-
-def test_condition_logic_can_explicitly_require_all_exit_conditions():
-    spec = strategy_from_mapping(
-        {
-            "name": "strict_exit_logic",
-            "asset_types": ["etf"],
-            "exit_condition_logic": "all",
-            "exit_conditions": [
-                {"indicator": "close", "operator": "lt", "value": 11},
-                {"indicator": "close", "operator": "gt", "value": 100},
-            ],
-        },
-        source="llm",
-    )
-
-    result = evaluate_strategy(spec, _history(), asset_type=AssetType.ETF)
-
-    assert result["exit_matched"] is False
-    assert result["exit_condition_logic"] == "all"
+    intent, _state, trace = evaluate_strategy_intent(spec, _history(), asset_type=AssetType.ETF)
+    assert intent.decision == Decision.BUY
+    assert trace["expression_traces"]["entry"]["left"] is not None
 
 
 def test_unknown_indicator_is_rejected_before_backtest():
@@ -114,7 +67,12 @@ def test_unknown_indicator_is_rejected_before_backtest():
             {
                 "name": "unsafe",
                 "asset_types": ["etf"],
-                "entry_conditions": [{"indicator": "future_magic", "operator": "gt", "value": 0}],
+                "components": [
+                    {
+                        "id": "unsafe",
+                        "expression": compare_expression("future_magic", "gt", 0),
+                    }
+                ],
             },
             source="llm",
         )
@@ -124,39 +82,27 @@ def test_unknown_indicator_is_rejected_before_backtest():
         raise AssertionError("unknown indicators must be rejected")
 
 
-def test_llm_strategy_mapping_normalizes_common_shapes_and_percentages():
+def test_llm_strategy_mapping_normalizes_indicator_shapes_and_percentages():
     spec = strategy_from_mapping(
-        {
-            "name": "llm_shape_variants",
-            "asset_types": "etf",
-            "indicators": [
-                {"name": "rsi", "window": 14, "calculation": "Wilder RSI"},
-                {"name": "ma", "window": 20, "calculation": "rolling mean"},
-            ],
-            "indicator_specs": {
+        strategy_mapping(
+            "llm_shape_variants",
+            indicator_specs={
                 "rsi": {"type": "rsi", "period": 14, "source": "close", "role": "momentum"},
                 "ma": {"length": 20, "source": "close", "role": "trend"},
             },
-            "entry_conditions": {
-                "indicator": "rsi",
-                "op": "lt",
-                "threshold": 35,
-                "period": 14,
-            },
-            "stop_loss_pct": 5,
-            "take_profit_pct": "12%",
-            "position_size_pct": 20,
-        },
+            entry=compare_expression("rsi", "lt", 35, 14),
+            stop_loss_pct=5,
+            take_profit_pct="12%",
+        ),
         source="llm",
     )
     assert spec.asset_types == [AssetType.ETF]
     assert {item.name for item in spec.indicator_specs} == {"rsi", "ma"}
     assert {item.role for item in spec.indicator_specs} == {"confirmation", "filter"}
-    assert spec.entry_conditions[0].operator == "lt"
-    assert spec.entry_conditions[0].window == 14
+    assert spec.components[0].expression.operator == "lt"
+    assert spec.components[0].expression.left.window == 14
     assert spec.stop_loss_pct == 0.05
     assert spec.take_profit_pct == 0.12
-    assert spec.position_size_pct == 0.2
 
 
 @pytest.mark.asyncio
@@ -167,14 +113,12 @@ async def test_agent_strategy_design_is_converted_to_a_validated_spec(monkeypatc
         async def chat_json(self, prompt, system):
             assert "available_indicators" in prompt
             assert "受控指标" in system
-            return {
-                "name": "agent_rsi_strategy",
-                "description": "Momentum with a bounded oscillator.",
-                "asset_types": ["etf"],
-                "indicators": ["rsi"],
-                "entry_conditions": [{"indicator": "rsi", "operator": "lt", "value": 35, "window": 14}],
-                "exit_conditions": [{"indicator": "rsi", "operator": "gt", "value": 70, "window": 14}],
-            }
+            return strategy_mapping(
+                "agent_rsi_strategy",
+                entry=compare_expression("rsi", "lt", 35, 14),
+                exit=compare_expression("rsi", "gt", 70, 14),
+                description="Momentum with a bounded oscillator.",
+            )
 
     monkeypatch.setattr(experiment_module, "get_llm_service", lambda: FakeLLM())
     monkeypatch.setattr(experiment_module, "register_strategy_spec", lambda spec: spec)
@@ -184,7 +128,7 @@ async def test_agent_strategy_design_is_converted_to_a_validated_spec(monkeypatc
         ticker="510300",
     )
     assert spec.source == "llm"
-    assert spec.entry_conditions[0].indicator == "rsi"
+    assert spec.components[0].expression.left.indicator == "rsi"
 
 
 @pytest.mark.asyncio
@@ -202,17 +146,16 @@ async def test_agent_strategy_design_repairs_invented_moving_average_aliases(mon
                 return {
                     "name": "broken_ma_cross",
                     "asset_types": ["etf"],
-                    "indicators": ["fast_ma", "slow_ma"],
-                    "entry_conditions": [{"indicator": "fast_ma", "operator": "gt", "value": 0}],
+                    "components": [
+                        {"id": "broken", "expression": compare_expression("fast_ma", "gt", 0)}
+                    ],
                 }
             assert "validation_error" in prompt
             assert "fast_ma" in prompt
             assert "修复整个策略 JSON" in system
-            return {
-                "name": "repaired_ma_cross",
-                "asset_types": ["etf"],
-                "indicators": ["ma_spread_5_20"],
-                "indicator_specs": [
+            return strategy_mapping(
+                "repaired_ma_cross",
+                indicator_specs=[
                     {
                         "name": "ma_spread_pct",
                         "alias": "ma_spread_5_20",
@@ -221,13 +164,9 @@ async def test_agent_strategy_design_repairs_invented_moving_average_aliases(mon
                         "params": {"fast_window": 5, "slow_window": 20},
                     }
                 ],
-                "entry_conditions": [
-                    {"indicator": "ma_spread_5_20", "operator": "gt", "value": 0}
-                ],
-                "exit_conditions": [
-                    {"indicator": "ma_spread_5_20", "operator": "lte", "value": 0}
-                ],
-            }
+                entry=compare_expression("ma_spread_5_20", "gt", 0),
+                exit=compare_expression("ma_spread_5_20", "lte", 0),
+            )
 
     fake_llm = FakeLLM()
     monkeypatch.setattr(experiment_module, "get_llm_service", lambda: fake_llm)
@@ -240,10 +179,9 @@ async def test_agent_strategy_design_repairs_invented_moving_average_aliases(mon
     )
 
     assert fake_llm.calls == 2
-    assert spec.indicators == ["ma_spread_5_20"]
     assert spec.indicator_specs[0].name == "ma_spread_pct"
     assert spec.indicator_specs[0].params == {"fast_window": 5, "slow_window": 20}
-    assert spec.entry_conditions[0].indicator == "ma_spread_5_20"
+    assert spec.components[0].expression.left.indicator == "ma_spread_5_20"
 
 
 @pytest.mark.asyncio
@@ -362,11 +300,10 @@ async def test_experiment_persists_a_replayable_payload_and_report_artifacts(mon
         start_date="2026-01-01",
         end_date="2026-01-05",
         initial_capital=100000,
-        strategy_spec={
-            "name": "test_trend",
-            "asset_types": ["etf"],
-            "entry_conditions": [{"indicator": "return_pct", "operator": "gt", "value": 0, "window": 1}],
-        },
+        strategy_spec=strategy_mapping(
+            "test_trend",
+            entry=compare_expression("return_pct", "gt", 0, 1),
+        ),
     )
 
     assert payload["status"] == "completed"
@@ -431,11 +368,10 @@ async def test_portfolio_experiment_persists_portfolio_artifacts(monkeypatch, tm
         start_date="2026-01-01",
         end_date="2026-01-05",
         initial_capital=100000,
-        strategy_spec={
-            "name": "test_portfolio",
-            "asset_types": ["etf"],
-            "entry_conditions": [{"indicator": "return_pct", "operator": "gt", "value": 0, "window": 1}],
-        },
+        strategy_spec=strategy_mapping(
+            "test_portfolio",
+            entry=compare_expression("return_pct", "gt", 0, 1),
+        ),
         portfolio_spec={
             "allocation_method": "equal_weight",
             "rebalance_frequency": "weekly",

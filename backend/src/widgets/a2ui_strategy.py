@@ -79,24 +79,20 @@ def render_sandbox_strategy_candidate(
     )
     errors = [str(item) for item in validation.get("errors") or []]
 
-    rules = []
-    for direction, conditions in (
-        ("入场", strategy.get("entry_conditions") or []),
-        ("退出", strategy.get("exit_conditions") or []),
-    ):
-        for condition in conditions:
-            if not isinstance(condition, dict):
-                continue
-            value = condition.get("value")
-            rules.append(
-                {
-                    "direction": direction,
-                    "indicator": condition.get("indicator", ""),
-                    "operator": condition.get("operator", ""),
-                    "value": json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value,
-                    "window": condition.get("window") or "—",
-                }
-            )
+    rules = [
+        {
+            "direction": str(component.get("role") or "signal"),
+            "indicator": str(component.get("id") or ""),
+            "operator": str(component.get("type") or "dsl"),
+            "value": json.dumps(
+                component.get("expression") or {"plugin": component.get("plugin"), "params": component.get("params")},
+                ensure_ascii=False,
+            ),
+            "window": "—",
+        }
+        for component in strategy.get("components") or []
+        if isinstance(component, dict)
+    ]
 
     points = [
         {"label": str(item.get("date", "")), "value": float(item.get("value", 0) or 0)}
@@ -431,8 +427,7 @@ def render_strategy_comparison(
             ],
         }
         for item in comparisons
-        if ((item.get("strategy_spec") or {}).get("position_model") or {}).get("type")
-        in {"volatility_target", "trend_volatility_target"}
+        if (item.get("strategy_spec") or {}).get("position_policy")
     ]
 
     conclusion = dict(payload.get("conclusion") or {})
@@ -501,8 +496,7 @@ def render_strategy_comparison(
             "entry": json.dumps(item.get("entry_rules") or [], ensure_ascii=False),
             "exit": json.dumps(item.get("exit_rules") or [], ensure_ascii=False),
             "position": json.dumps(
-                (item.get("strategy_spec") or {}).get("position_model")
-                or {"type": "fixed", "max_exposure": (item.get("strategy_spec") or {}).get("position_size_pct")},
+                (item.get("strategy_spec") or {}).get("position_policy") or {},
                 ensure_ascii=False,
             ),
         }

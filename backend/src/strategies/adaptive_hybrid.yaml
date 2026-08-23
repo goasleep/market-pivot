@@ -1,7 +1,6 @@
 name: adaptive_hybrid
 display_name: 自适应混合策略
 version: 2.0.0
-schema_version: 2
 description: 趋势 Python 插件与嵌套 DSL 确认信号融合，输出连续目标仓位。
 category: hybrid
 default_active: false
@@ -11,9 +10,6 @@ asset_types:
   - etf
   - lof
 source: yaml
-indicators:
-  - rsi
-  - volume_ratio
 components:
   - id: trend
     type: python

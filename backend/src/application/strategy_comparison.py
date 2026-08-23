@@ -17,9 +17,7 @@ from llm.service import get_llm_service
 from models.schemas import (
     AssetType,
     IndicatorSpec,
-    PositionModel,
     SimulationAccountConfig,
-    StrategyCondition,
     StrategySpec,
 )
 from models.strategy_research import (
@@ -34,109 +32,157 @@ from models.strategy_research import (
 def standard_strategy_suite(asset_type: AssetType | str) -> tuple[StrategySpec, ...]:
     """Return transparent benchmark strategies with materially different signals."""
     kind = AssetType(asset_type)
-    assets = [kind]
-    common = {"asset_types": assets, "position_size_pct": 0.95, "source": "yaml"}
     return (
-        StrategySpec(
+        _single_expression_strategy(
             name="buy_hold",
             description="首个可交易日买入并持有，作为含成本基准",
-            indicators=["close"],
-            entry_conditions=[StrategyCondition(indicator="close", operator="gt", value=0)],
-            **common,
+            asset_type=kind,
+            expression=_compare("close", "gt", 0),
         ),
-        _ma_strategy("ma_5_20", "MA5/20 趋势", 5, 20, common),
-        _ma_strategy("ma_20_60", "MA20/60 趋势", 20, 60, common),
-        StrategySpec(
+        _ma_strategy("ma_5_20", "MA5/20 趋势", 5, 20, kind),
+        _ma_strategy("ma_20_60", "MA20/60 趋势", 20, 60, kind),
+        _entry_exit_strategy(
             name="momentum_20",
             description="20 日动量为正时持有，动量转负时退出",
-            indicators=["return_pct"],
-            entry_conditions=[StrategyCondition(indicator="return_pct", operator="gt", value=0, window=20)],
-            exit_conditions=[StrategyCondition(indicator="return_pct", operator="lte", value=0, window=20)],
-            **common,
+            asset_type=kind,
+            entry=_compare("return_pct", "gt", 0, 20),
+            exit=_compare("return_pct", "lte", 0, 20),
         ),
-        StrategySpec(
+        _entry_exit_strategy(
             name="momentum_252",
             description="252 日动量为正时持有，作为长周期趋势对照",
-            indicators=["return_pct"],
-            entry_conditions=[StrategyCondition(indicator="return_pct", operator="gt", value=0, window=252)],
-            exit_conditions=[StrategyCondition(indicator="return_pct", operator="lte", value=0, window=252)],
-            **common,
+            asset_type=kind,
+            entry=_compare("return_pct", "gt", 0, 252),
+            exit=_compare("return_pct", "lte", 0, 252),
         ),
-        StrategySpec(
+        _entry_exit_strategy(
             name="rsi_reversal",
             description="RSI 低于 30 时买入，恢复至 55 时退出",
-            indicators=["rsi"],
-            entry_conditions=[StrategyCondition(indicator="rsi", operator="lt", value=30, window=14)],
-            exit_conditions=[StrategyCondition(indicator="rsi", operator="gte", value=55, window=14)],
+            asset_type=kind,
+            entry=_compare("rsi", "lt", 30, 14),
+            exit=_compare("rsi", "gte", 55, 14),
             stop_loss_pct=0.08,
-            **common,
         ),
-        StrategySpec(
+        _entry_exit_strategy(
             name="bollinger_reversal",
             description="价格低于布林中轨两个标准差时买入，回归中轨时退出",
-            indicators=["bollinger_zscore"],
-            entry_conditions=[
-                StrategyCondition(indicator="bollinger_zscore", operator="lte", value=-2, window=20)
-            ],
-            exit_conditions=[
-                StrategyCondition(indicator="bollinger_zscore", operator="gte", value=0, window=20)
-            ],
+            asset_type=kind,
+            entry=_compare("bollinger_zscore", "lte", -2, 20),
+            exit=_compare("bollinger_zscore", "gte", 0, 20),
             stop_loss_pct=0.08,
-            **common,
         ),
-        StrategySpec(
+        _entry_exit_strategy(
             name="breakout_20",
             description="收盘价突破此前 20 日高点时买入，跌破 MA20 时退出",
-            indicators=["rolling_breakout_pct", "price_vs_ma_pct"],
-            entry_conditions=[
-                StrategyCondition(indicator="rolling_breakout_pct", operator="gt", value=0, window=20)
-            ],
-            exit_conditions=[
-                StrategyCondition(indicator="price_vs_ma_pct", operator="lt", value=0, window=20)
-            ],
-            **common,
+            asset_type=kind,
+            entry=_compare("rolling_breakout_pct", "gt", 0, 20),
+            exit=_compare("price_vs_ma_pct", "lt", 0, 20),
         ),
-        StrategySpec(
+        _entry_exit_strategy(
             name="trend_pullback",
             description="中期动量为正且价格回踩 MA20 附近时买入，跌破 MA20 退出",
-            indicators=["return_pct", "price_vs_ma_pct"],
-            entry_conditions=[
-                StrategyCondition(indicator="return_pct", operator="gt", value=0, window=60),
-                StrategyCondition(indicator="price_vs_ma_pct", operator="between", value=[-2, 1], window=20),
-            ],
-            exit_conditions=[
-                StrategyCondition(indicator="price_vs_ma_pct", operator="lt", value=-3, window=20)
-            ],
+            asset_type=kind,
+            entry={
+                "type": "all",
+                "children": [
+                    _compare("return_pct", "gt", 0, 60),
+                    _compare("price_vs_ma_pct", "between", [-2, 1], 20),
+                ],
+            },
+            exit=_compare("price_vs_ma_pct", "lt", -3, 20),
             stop_loss_pct=0.06,
-            **common,
         ),
-        StrategySpec(
+        _volatility_strategy(
             name="volatility_target_15",
             description="20 日波动率目标 15%，每周调整 0% 至 95% 的目标仓位",
-            indicators=["volatility"],
-            position_model=PositionModel(
-                type="volatility_target",
-                volatility_window=20,
-                target_volatility=0.15,
-                max_exposure=0.95,
-                rebalance_frequency="weekly",
-            ),
-            **common,
+            asset_type=kind,
         ),
-        StrategySpec(
+        _volatility_strategy(
             name="trend_volatility_target",
             description="位于 MA60 上方时采用 15% 波动率目标，否则空仓",
-            indicators=["ma", "volatility"],
-            position_model=PositionModel(
-                type="trend_volatility_target",
-                volatility_window=20,
-                target_volatility=0.15,
-                trend_window=60,
-                max_exposure=0.95,
-                rebalance_frequency="weekly",
-            ),
-            **common,
+            asset_type=kind,
+            trend_window=60,
         ),
+    )
+
+
+def _compare(indicator: str, operator: str, value: float | list[float], window: int | None = None) -> dict:
+    left = {"type": "indicator", "indicator": indicator}
+    if window is not None:
+        left["window"] = window
+    return {
+        "type": "compare",
+        "left": left,
+        "operator": operator,
+        "right": {"type": "constant", "value": value},
+    }
+
+
+def _single_expression_strategy(
+    *, name: str, description: str, asset_type: AssetType, expression: dict
+) -> StrategySpec:
+    return StrategySpec(
+        name=name,
+        description=description,
+        asset_types=[asset_type],
+        components=[
+            {
+                "id": "signal",
+                "expression": expression,
+                "score_when_true": 1,
+                "score_when_false": -1,
+            }
+        ],
+        source="yaml",
+    )
+
+
+def _entry_exit_strategy(
+    *,
+    name: str,
+    description: str,
+    asset_type: AssetType,
+    entry: dict,
+    exit: dict,
+    stop_loss_pct: float | None = None,
+    indicator_specs: list[IndicatorSpec] | None = None,
+) -> StrategySpec:
+    return StrategySpec(
+        name=name,
+        description=description,
+        asset_types=[asset_type],
+        indicator_specs=indicator_specs or [],
+        stop_loss_pct=stop_loss_pct,
+        components=[
+            {"id": "entry", "expression": entry, "score_when_true": 1, "score_when_false": 0},
+            {"id": "exit", "expression": exit, "score_when_true": -1, "score_when_false": 0},
+        ],
+        fusion={"type": "priority", "entry_threshold": 0.25, "exit_threshold": -0.25, "conflict_policy": "exit"},
+        source="yaml",
+    )
+
+
+def _volatility_strategy(
+    *, name: str, description: str, asset_type: AssetType, trend_window: int = 0, target: float = 0.15
+) -> StrategySpec:
+    params = {"volatility_window": 20, "target_volatility": target, "max_exposure": 0.95}
+    if trend_window:
+        params["trend_window"] = trend_window
+    return StrategySpec(
+        name=name,
+        description=description,
+        asset_types=[asset_type],
+        components=[
+            {
+                "id": "volatility_target",
+                "type": "python",
+                "plugin": "core.volatility_target",
+                "plugin_version": "1.0.0",
+                "params": params,
+            }
+        ],
+        position_policy={"mode": "continuous", "max_exposure": 0.95, "rebalance_frequency": "weekly"},
+        source="yaml",
     )
 
 
@@ -145,13 +191,13 @@ def _ma_strategy(
     label: str,
     fast: int,
     slow: int,
-    common: dict[str, Any],
+    asset_type: AssetType,
 ) -> StrategySpec:
     alias = f"spread_{fast}_{slow}"
-    return StrategySpec(
+    return _entry_exit_strategy(
         name=name,
         description=f"{label} 金叉持有、死叉退出",
-        indicators=[alias],
+        asset_type=asset_type,
         indicator_specs=[
             IndicatorSpec(
                 name="ma_spread_pct",
@@ -160,9 +206,8 @@ def _ma_strategy(
                 params={"fast_window": fast, "slow_window": slow},
             )
         ],
-        entry_conditions=[StrategyCondition(indicator=alias, operator="gt", value=0)],
-        exit_conditions=[StrategyCondition(indicator=alias, operator="lte", value=0)],
-        **common,
+        entry=_compare(alias, "gt", 0),
+        exit=_compare(alias, "lte", 0),
     )
 
 
@@ -433,8 +478,16 @@ def _comparison_row(strategy: StrategySpec, result: dict[str, Any]) -> dict[str,
         "display_name": strategy.description.split("，", 1)[0] or strategy.name,
         "description": strategy.description,
         "strategy_spec": strategy.model_dump(mode="json"),
-        "entry_rules": [item.model_dump(mode="json") for item in strategy.entry_conditions],
-        "exit_rules": [item.model_dump(mode="json") for item in strategy.exit_conditions],
+        "entry_rules": [
+            item.expression.model_dump(mode="json")
+            for item in strategy.components
+            if item.id == "entry" and item.expression is not None
+        ],
+        "exit_rules": [
+            item.expression.model_dump(mode="json")
+            for item in strategy.components
+            if item.id == "exit" and item.expression is not None
+        ],
         **metrics,
         "metrics": metrics,
         "final_value": result.get("final_value", 0),
@@ -526,24 +579,31 @@ def _base_cost_consistency(
 
 def _parameter_variants(strategy: StrategySpec) -> list[StrategySpec]:
     variants: list[StrategySpec] = []
-    if strategy.position_model and strategy.position_model.type in {
-        "volatility_target",
-        "trend_volatility_target",
-    }:
+    volatility_component = next(
+        (item for item in strategy.components if item.plugin == "core.volatility_target"),
+        None,
+    )
+    if volatility_component is not None:
         for target in (0.10, 0.15, 0.20):
             clone = strategy.model_copy(deep=True)
             clone.name = f"{strategy.name}_{int(target * 100)}"
-            clone.position_model.target_volatility = target
+            next(item for item in clone.components if item.plugin == "core.volatility_target").params[
+                "target_volatility"
+            ] = target
             variants.append(clone)
         return variants
     if strategy.name.startswith("ma_"):
         pairs = [(3, 15), (5, 20), (10, 30)] if strategy.name == "ma_5_20" else [(15, 50), (20, 60), (30, 90)]
         for fast, slow in pairs:
-            variants.append(_ma_strategy(f"{strategy.name}_{fast}_{slow}", f"MA{fast}/{slow}", fast, slow, {
-                "asset_types": strategy.asset_types,
-                "position_size_pct": strategy.position_size_pct,
-                "source": "yaml",
-            }))
+            variants.append(
+                _ma_strategy(
+                    f"{strategy.name}_{fast}_{slow}",
+                    f"MA{fast}/{slow}",
+                    fast,
+                    slow,
+                    strategy.asset_types[0],
+                )
+            )
     else:
         windows = {
             "momentum_20": (10, 20, 60),
@@ -555,26 +615,37 @@ def _parameter_variants(strategy: StrategySpec) -> list[StrategySpec]:
             for window in windows:
                 clone = strategy.model_copy(deep=True)
                 clone.name = f"{strategy.name}_{window}"
-                for condition in [*clone.entry_conditions, *clone.exit_conditions]:
-                    if condition.window is not None:
-                        condition.window = window
+                for component in clone.components:
+                    _update_expression_window(component.expression, window)
                 variants.append(clone)
         elif strategy.name == "rsi_reversal":
             for entry, exit_value in ((25, 50), (30, 55), (35, 60)):
                 clone = strategy.model_copy(deep=True)
                 clone.name = f"{strategy.name}_{entry}_{exit_value}"
-                clone.entry_conditions[0].value = float(entry)
-                clone.exit_conditions[0].value = float(exit_value)
+                clone.components[0].expression.right.value = float(entry)
+                clone.components[1].expression.right.value = float(exit_value)
                 variants.append(clone)
         elif strategy.name == "trend_pullback":
             for window in (10, 20, 30):
                 clone = strategy.model_copy(deep=True)
                 clone.name = f"{strategy.name}_{window}"
-                for condition in [*clone.entry_conditions, *clone.exit_conditions]:
-                    if condition.indicator == "price_vs_ma_pct":
-                        condition.window = window
+                for component in clone.components:
+                    _update_expression_window(component.expression, window, indicator="price_vs_ma_pct")
                 variants.append(clone)
     return variants
+
+
+def _update_expression_window(expression, window: int, *, indicator: str | None = None) -> None:
+    if expression is None:
+        return
+    for operand in (expression.left, expression.right):
+        if operand is not None and operand.type == "indicator" and (
+            indicator is None or operand.indicator == indicator
+        ):
+            operand.window = window
+    for child in expression.children:
+        _update_expression_window(child, window, indicator=indicator)
+    _update_expression_window(expression.expression, window, indicator=indicator)
 
 
 async def _run_parameter_sensitivity(

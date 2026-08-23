@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from math import sqrt
 from typing import Any
 
 import pandas as pd
@@ -13,8 +12,6 @@ from models.schemas import (
     Decision,
     PortfolioSpec,
     PortfolioState,
-    Position,
-    PriceEvidence,
     SimulationAccountConfig,
     StrategyIntent,
     StrategyRuntimeState,
@@ -23,108 +20,8 @@ from models.schemas import (
     TradeDecision,
     TradePlan,
 )
-from strategies.compiler import evaluate_expression, evaluate_strategy, validate_strategy_spec
+from strategies.compiler import evaluate_expression, validate_strategy_spec
 from strategies.plugin_registry import get_strategy_plugin
-
-
-def decision_from_strategy(
-    spec: StrategySpec,
-    history: pd.DataFrame,
-    *,
-    asset_type: AssetType,
-    ticker: str,
-    current_price: float,
-    position: Position | None = None,
-    has_position: bool | None = None,
-) -> tuple[TradeDecision, dict[str, Any]]:
-    """Evaluate the exact deployed DSL and return its auditable decision."""
-    holding = bool(position) if has_position is None else has_position
-    evaluation = evaluate_strategy(spec, history, asset_type=asset_type)
-    exit_reason = None
-    if position:
-        if position.stop_loss is not None and current_price <= position.stop_loss:
-            exit_reason = "stop_loss_triggered"
-        elif position.take_profit is not None and current_price >= position.take_profit:
-            exit_reason = "take_profit_triggered"
-    if holding and (exit_reason or evaluation.get("exit_matched")):
-        evaluation = {**evaluation, "exit_reason": exit_reason or "strategy_exit_conditions"}
-        exit_logic_label = "全部" if spec.exit_condition_logic == "all" else "任一"
-        return (
-            TradeDecision(
-                ticker=ticker,
-                asset_type=asset_type,
-                decision=Decision.SELL,
-                reasoning=f"策略 {spec.name} 的退出条件{exit_logic_label}满足。",
-            ),
-            evaluation,
-        )
-    if holding or not evaluation.get("matched"):
-        return TradeDecision(ticker=ticker, asset_type=asset_type, decision=Decision.HOLD), evaluation
-    stop = current_price * (1 - spec.stop_loss_pct) if spec.stop_loss_pct is not None else None
-    target = current_price * (1 + spec.take_profit_pct) if spec.take_profit_pct is not None else None
-    as_of = str(history.iloc[-1].get("date", "")) if not history.empty else ""
-    entry_logic_label = "全部" if spec.entry_condition_logic == "all" else "任一"
-    return (
-        TradeDecision(
-            ticker=ticker,
-            asset_type=asset_type,
-            decision=Decision.BUY,
-            reasoning=f"策略 {spec.name} 的入场条件{entry_logic_label}满足。",
-            plan=TradePlan(
-                entry_price=current_price,
-                stop_loss=stop,
-                take_profit=target,
-                position_size=spec.position_size_pct,
-                entry_explanation="使用当日收盘价作为结构化策略入场基准。",
-                stop_loss_explanation=(
-                    f"按入场价下方 {spec.stop_loss_pct:.1%} 设置止损。"
-                    if spec.stop_loss_pct is not None
-                    else "该策略未设置固定比例止损。"
-                ),
-                take_profit_explanation=(
-                    f"按入场价上方 {spec.take_profit_pct:.1%} 设置止盈。"
-                    if spec.take_profit_pct is not None
-                    else "该策略未设置固定比例止盈。"
-                ),
-                price_evidence=[
-                    PriceEvidence(
-                        metric="close",
-                        value=current_price,
-                        source="strategy/normalized_history",
-                        as_of=as_of,
-                        calculation="当前收盘价作为结构化策略入场基准",
-                    )
-                ],
-            ),
-        ),
-        evaluation,
-    )
-
-
-def target_exposure_from_strategy(spec: StrategySpec, history: pd.DataFrame) -> float | None:
-    """Return a bounded exposure for dynamic position models.
-
-    ``None`` keeps legacy decision-based strategies on their existing path.
-    The calculation only consumes the supplied historical prefix.
-    """
-    model = spec.position_model
-    if model is None or model.type == "fixed":
-        return None
-    close = pd.to_numeric(history.get("close"), errors="coerce").dropna()
-    required = max(model.volatility_window + 1, model.trend_window if model.type == "trend_volatility_target" else 0)
-    if len(close) < required:
-        return 0.0
-    returns = close.pct_change(fill_method=None).dropna().tail(model.volatility_window)
-    realized = float(returns.std(ddof=0) * sqrt(252)) if len(returns) >= model.volatility_window else 0.0
-    if not pd.notna(realized) or realized <= 0:
-        exposure = model.max_exposure
-    else:
-        exposure = model.target_volatility / realized
-    if model.type == "trend_volatility_target":
-        trend = float(close.tail(model.trend_window).mean())
-        if float(close.iloc[-1]) <= trend:
-            exposure = 0.0
-    return round(min(max(float(exposure), model.min_exposure), model.max_exposure), 10)
 
 
 def evaluate_strategy_intent(
@@ -135,10 +32,7 @@ def evaluate_strategy_intent(
     current_exposure: float = 0.0,
     state: StrategyRuntimeState | None = None,
 ) -> tuple[StrategyIntent, StrategyRuntimeState, dict[str, Any]]:
-    """Evaluate StrategySpec v2 into a continuous, pre-trade target exposure."""
-
-    if spec.schema_version != 2:
-        raise ValueError("evaluate_strategy_intent 只接受 StrategySpec v2")
+    """Evaluate a strategy into a continuous, pre-trade target exposure."""
     kind = AssetType(asset_type)
     if kind not in spec.asset_types:
         raise ValueError(f"策略不支持资产类型 {kind.value}")
@@ -191,8 +85,6 @@ def evaluate_strategy_intent(
     ]
     fusion = spec.fusion
     position = spec.position_policy
-    if fusion is None or position is None:
-        raise ValueError("StrategySpec v2 缺少 fusion 或 position_policy")
     fused_score = _fuse_scores(signal_components, fusion.type)
     if router_signals:
         router_multiplier = min(max((sum(item.score for item in router_signals) / len(router_signals) + 1) / 2, 0), 1)
@@ -241,7 +133,7 @@ def evaluate_strategy_intent(
         target = 0.0
     elif exiting:
         target = 0.0
-        state.cooldown_remaining = (spec.state_policy.cooldown_bars_after_exit if spec.state_policy else 0)
+        state.cooldown_remaining = spec.state_policy.cooldown_bars_after_exit
     else:
         target = min(max(raw_target, position.min_exposure), position.max_exposure)
         target = min(target, previous_target + position.max_increase_per_rebalance)
@@ -251,7 +143,9 @@ def evaluate_strategy_intent(
 
     target = round(min(max(float(target), 0.0), position.max_exposure), 10)
     tolerance = max(position.minimum_change, 1e-8)
-    if target > current_exposure + tolerance:
+    if target == 0 and current_exposure > 1e-8:
+        decision = Decision.SELL
+    elif target > current_exposure + tolerance:
         decision = Decision.BUY
     elif target < current_exposure - tolerance:
         decision = Decision.SELL
@@ -269,7 +163,6 @@ def evaluate_strategy_intent(
     state.variables.update(variable_updates)
     state.last_evaluated_date = current_date
     trace = {
-        "schema_version": 2,
         "fusion": fusion.model_dump(mode="json"),
         "fused_score": round(float(fused_score), 10),
         "raw_target_exposure": round(float(raw_target), 10),
@@ -321,7 +214,7 @@ def decision_from_intent(
     asset_type: AssetType,
     current_price: float,
 ) -> TradeDecision:
-    """Expose a v2 target change through the existing audit and Agent-gate contract."""
+    """Expose a target change through the existing audit and Agent-gate contract."""
 
     stop = current_price * (1 - spec.stop_loss_pct) if intent.decision == Decision.BUY and spec.stop_loss_pct else None
     target = (
@@ -335,7 +228,7 @@ def decision_from_intent(
         decision=intent.decision,
         confidence=intent.confidence,
         reasoning=(
-            f"混合策略 {spec.name} 目标仓位调整为 {intent.target_exposure:.1%}，融合得分 {intent.score:.3f}。"
+            f"策略 {spec.name} 目标仓位调整为 {intent.target_exposure:.1%}，融合得分 {intent.score:.3f}。"
         ),
         plan=TradePlan(
             entry_price=current_price if intent.decision == Decision.BUY else None,

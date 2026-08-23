@@ -25,32 +25,30 @@ from strategies.skill_manager import register_strategy_spec
 
 STRATEGY_DESIGN_SYSTEM = """你是一个严格的量化策略设计 Agent。请为 A 股股票或场内基金设计可执行的日线策略。
 只允许使用用户提供的目标、日线 OHLCV 数据字段和下方受控指标，不能引用未来数据、实时新闻或当前才知道的财务数据。
-必须返回 JSON 对象，不能输出 Markdown。普通策略使用 schema_version=1，并包含 name、version、description、
-asset_types、indicators、indicator_specs、entry_conditions、exit_conditions、entry_condition_logic、
-exit_condition_logic、stop_loss_pct、take_profit_pct、position_size_pct、rebalance_frequency、source。
-当且仅当用户明确要求混合策略、嵌套逻辑、连续仓位或 Python 插件时，使用 schema_version=2，并返回
-components、fusion、position_policy、state_policy；不得生成或内嵌任意 Python 源码。
+必须返回 JSON 对象，不能输出 Markdown。所有策略统一包含 name、version、description、asset_types、
+indicator_specs、components、fusion、position_policy、state_policy、stop_loss_pct、take_profit_pct、source；
+不得返回已废弃的扁平条件或固定仓位字段，也不得生成或内嵌任意 Python 源码。
 
 格式约束：
-1. indicators 必须是字符串数组，例如 ["ma", "rsi"]。
-2. indicator_specs 必须是数组，不能是以指标名为 key 的对象；每项格式为
+1. indicator_specs 必须是数组，不能是以指标名为 key 的对象；每项格式为
    {"name":"ma","alias":"ma20","source":"close","window":20,"role":"filter","params":{}}。
-3. stop_loss_pct、take_profit_pct、position_size_pct 必须使用 0 到 1 之间的小数，
+2. stop_loss_pct、take_profit_pct 必须使用 0 到 1 之间的小数，
    例如 0.05 表示 5%，不能填写 5 或 5%。
-4. asset_types 必须是数组，只能包含 stock、etf、lof；source 必须为 llm。
-5. entry_condition_logic 和 exit_condition_logic 只能是 all 或 any；“并且”使用 all，“或者”使用 any。
-   多个入场过滤条件通常使用 all，多个独立退出触发条件通常使用 any。
-6. 指标名称只能来自 available_indicators，不能自行发明 fast_ma、slow_ma、macd_signal 等名称。
+3. asset_types 必须是数组，只能包含 stock、etf、lof；source 必须为 llm。
+4. 指标名称只能来自 available_indicators，不能自行发明 fast_ma、slow_ma、macd_signal 等名称。
    均线交叉必须表示为一个 ma_spread_pct 指标，例如：
-   indicators=["ma_spread_5_20"]，indicator_specs=[{"name":"ma_spread_pct","alias":"ma_spread_5_20",
+   indicator_specs=[{"name":"ma_spread_pct","alias":"ma_spread_5_20",
    "source":"close","role":"entry","params":{"fast_window":5,"slow_window":20}}]；
-   入场使用 ma_spread_5_20 gt 0，退出使用 ma_spread_5_20 lte 0。条件的 value 必须是数值，不能用另一个指标名。
-7. v2 的 DSL component 使用递归 expression，type 可为 compare/all/any/not/crosses_above/crosses_below/
+   在 component.expression 中与常量 0 比较。
+5. DSL component 使用递归 expression，type 可为 compare/all/any/not/crosses_above/crosses_below/
    sustained/count。比较两侧必须是 {"type":"indicator","indicator":"ma","window":20} 或
    {"type":"constant","value":0}。Python component 只能引用已注册插件 core.trend_score@1.0.0 或
-   core.market_regime@1.0.0；YAML 只填写 plugin、plugin_version 和 params。
-8. v2 仓位必须使用 position_policy.mode=continuous，并设置 0 到 1 之间的 min_exposure、max_exposure、
+   core.market_regime@1.0.0、core.volatility_target@1.0.0；只填写 plugin、plugin_version 和 params。
+6. components 可组合多个 signal/router/position；fusion 必须明确 weighted_score、majority_vote 或 priority，
+   并设置 entry_threshold、exit_threshold、conflict_policy。嵌套“并且/或者/非”分别使用 all/any/not。
+7. 仓位必须使用 position_policy.mode=continuous，并设置 0 到 1 之间的 min_exposure、max_exposure、
    minimum_change、max_increase_per_rebalance、max_decrease_per_rebalance，不得使用固定仓位档位。
+8. state_policy.enabled=true，可按需要设置 cooldown_bars_after_exit；无状态需求时设为 0。
 """
 
 STRATEGY_REPAIR_SYSTEM = STRATEGY_DESIGN_SYSTEM + """
@@ -248,14 +246,19 @@ def _build_report_markdown(
         "",
         f"- 名称：{spec.name} v{spec.version}",
         f"- 假设：{spec.description or 'Agent 未提供额外策略假设。'}",
-        f"- 入场条件：{len(spec.entry_conditions)} 条",
-        f"- 出场条件：{len(spec.exit_conditions)} 条",
-        f"- 入场条件关系：{'全部满足' if spec.entry_condition_logic == 'all' else '任一满足'}",
-        f"- 出场条件关系：{'全部满足' if spec.exit_condition_logic == 'all' else '任一满足'}",
+        f"- 策略组件：{len(spec.components)} 个",
+        (
+            f"- 融合方式：{spec.fusion.type}（入场阈值 {spec.fusion.entry_threshold}，"
+            f"退出阈值 {spec.fusion.exit_threshold}）"
+        ),
         f"- 止损：{_format_pct(spec.stop_loss_pct)}",
         f"- 止盈：{_format_pct(spec.take_profit_pct)}",
-        f"- 单次仓位：{_format_pct(spec.position_size_pct)}",
-        f"- 指标：{', '.join(spec.indicators) or '由条件隐式使用'}",
+        (
+            f"- 连续仓位范围：{_format_pct(spec.position_policy.min_exposure)} 至 "
+            f"{_format_pct(spec.position_policy.max_exposure)}"
+        ),
+        f"- 调仓频率：{spec.position_policy.rebalance_frequency}",
+        f"- 退出冷却：{spec.state_policy.cooldown_bars_after_exit} 根 K 线",
         *[
             (
                 f"- 指标定义：{item.alias or item.name}（{item.name}，"
@@ -263,17 +266,13 @@ def _build_report_markdown(
             )
             for item in spec.indicator_specs
         ],
-        "- 入场条件：",
+        "- 组件定义：",
         *[
-            f"  - {condition.indicator} {condition.operator} {condition.value}"
-            f"（窗口 {condition.window or '默认'}）"
-            for condition in spec.entry_conditions
-        ],
-        "- 出场条件：",
-        *[
-            f"  - {condition.indicator} {condition.operator} {condition.value}"
-            f"（窗口 {condition.window or '默认'}）"
-            for condition in spec.exit_conditions
+            (
+                f"  - {component.id}：{component.type}/{component.role}，权重 {component.weight}，"
+                f"{('插件 ' + str(component.plugin)) if component.type == 'python' else '受控 DSL 表达式'}"
+            )
+            for component in spec.components
         ],
         "",
         "## 二、回测结果",

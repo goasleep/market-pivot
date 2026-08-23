@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 from collections.abc import Callable
-from math import tanh
+from math import sqrt, tanh
 from typing import Any
 
 import pandas as pd
@@ -112,4 +112,39 @@ def market_regime(
         "metrics": {"regime_ma": average, "current_close": current},
         "state_updates": {"market_regime": "trend" if bullish else "defensive"},
         "reasons": ["价格位于市场状态均线上方" if bullish else "价格位于市场状态均线下方"],
+    }
+
+
+@register_strategy_plugin("core.volatility_target", "1.0.0")
+def volatility_target(
+    history: pd.DataFrame,
+    params: dict[str, Any],
+    _state: dict[str, Any],
+) -> dict[str, Any]:
+    """Continuous volatility target with an optional moving-average trend gate."""
+
+    volatility_window = int(params.get("volatility_window", 20))
+    target_volatility = float(params.get("target_volatility", 0.15))
+    max_exposure = float(params.get("max_exposure", 0.95))
+    trend_window = int(params.get("trend_window", 0))
+    close = pd.to_numeric(history.get("close"), errors="coerce").dropna()
+    required = max(volatility_window + 1, trend_window)
+    if len(close) < required:
+        return {"score": 0.0, "target_exposure": 0.0, "confidence": 0.0, "reasons": ["波动率预热不足"]}
+    if trend_window and float(close.iloc[-1]) <= float(close.tail(trend_window).mean()):
+        return {
+            "score": -1.0,
+            "target_exposure": 0.0,
+            "confidence": 1.0,
+            "reasons": [f"价格位于 MA{trend_window} 下方"],
+        }
+    returns = close.pct_change(fill_method=None).dropna().tail(volatility_window)
+    realized = float(returns.std(ddof=0) * sqrt(252))
+    exposure = max_exposure if realized <= 0 else min(max_exposure, target_volatility / realized)
+    return {
+        "score": 1.0,
+        "target_exposure": max(0.0, exposure),
+        "confidence": 1.0,
+        "metrics": {"realized_volatility": realized, "target_volatility": target_volatility},
+        "reasons": [f"{volatility_window} 日波动率目标仓位"],
     }

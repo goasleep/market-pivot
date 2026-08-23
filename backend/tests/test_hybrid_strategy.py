@@ -35,7 +35,6 @@ def _history(periods: int = 40) -> pd.DataFrame:
 def _hybrid_mapping() -> dict:
     return {
         "name": "continuous_hybrid",
-        "schema_version": 2,
         "asset_types": ["etf"],
         "components": [
             {
@@ -118,7 +117,7 @@ def test_hybrid_runtime_returns_continuous_exposure_and_is_idempotent_per_bar():
     assert intent.decision.value == "buy"
     assert intent.target_exposure == 0.11
     assert 0 < intent.score < 1
-    assert trace["schema_version"] == 2
+    assert trace["fusion"]["type"] == "weighted_score"
     repeated, repeated_state, _ = evaluate_strategy_intent(
         spec,
         _history(),
@@ -192,7 +191,7 @@ async def test_hybrid_backtest_uses_continuous_target_exposure():
     )
 
     targets = [point["target_exposure"] for point in result["signal_curve"]]
-    assert result["strategy_spec"]["schema_version"] == 2
+    assert result["strategy_spec"]["position_policy"]["mode"] == "continuous"
     assert result["execution"]["strategy_plugins"][0]["name"] == "core.trend_score"
     assert 0.11 in targets
     assert any(0 < target < 0.83 for target in targets)

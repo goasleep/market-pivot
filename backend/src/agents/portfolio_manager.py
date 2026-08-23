@@ -96,13 +96,32 @@ The JSON must contain both a simplified decision and a detailed dashboard:
         "name": "strategy_name",
         "version": "1.0.0",
         "asset_types": ["etf", "lof"],
-        "indicators": ["return_pct", "price_vs_ma_pct"],
-        "entry_conditions": [{"indicator": "return_pct", "operator": "gt", "value": 0, "window": 20}],
-        "exit_conditions": [],
+        "indicator_specs": [],
+        "components": [{
+          "id": "momentum",
+          "type": "dsl",
+          "role": "signal",
+          "expression": {
+            "type": "compare",
+            "left": {"type": "indicator", "indicator": "return_pct", "window": 20},
+            "operator": "gt",
+            "right": {"type": "constant", "value": 0}
+          },
+          "score_when_true": 1,
+          "score_when_false": -1
+        }],
+        "fusion": {
+          "type": "weighted_score", "entry_threshold": 0.25,
+          "exit_threshold": 0.05, "conflict_policy": "hold"
+        },
+        "position_policy": {
+          "mode": "continuous", "min_exposure": 0, "max_exposure": 0.95,
+          "minimum_change": 0.02, "max_increase_per_rebalance": 1,
+          "max_decrease_per_rebalance": 1, "rebalance_frequency": "daily"
+        },
+        "state_policy": {"enabled": true, "cooldown_bars_after_exit": 0},
         "stop_loss_pct": 0.08,
         "take_profit_pct": 0.16,
-        "position_size_pct": 0.2,
-        "rebalance_frequency": "daily",
         "source": "llm"
       }
     },

@@ -9,7 +9,6 @@ import pandas as pd
 from models.schemas import (
     AssetType,
     IndicatorSpec,
-    StrategyCondition,
     StrategyExpression,
     StrategyOperand,
     StrategySpec,
@@ -101,10 +100,7 @@ def _normalize_indicator_specs(value: Any) -> list[dict[str, Any]]:
         if any(key in value for key in ("name", "indicator", "type", "metric")):
             items: list[Any] = [value]
         else:
-            items = [
-                {**(item if isinstance(item, dict) else {}), "name": key}
-                for key, item in value.items()
-            ]
+            items = [{**(item if isinstance(item, dict) else {}), "name": key} for key, item in value.items()]
     elif isinstance(value, list):
         items = value
     else:
@@ -145,43 +141,6 @@ def _normalize_indicator_specs(value: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def _normalize_conditions(value: Any, *, default_operator: str) -> list[Any]:
-    """Normalize a single condition or a keyed condition mapping."""
-    if value is None:
-        return []
-    if isinstance(value, dict):
-        if any(key in value for key in ("indicator", "name", "type", "metric", "operator", "value")):
-            items: list[Any] = [value]
-        else:
-            items = list(value.values())
-    elif isinstance(value, list):
-        items = value
-    else:
-        items = [value]
-
-    normalized: list[Any] = []
-    for item in items:
-        if not isinstance(item, dict):
-            normalized.append(
-                {"indicator": "close", "operator": default_operator, "value": 0, "description": str(item)}
-            )
-            continue
-        item = dict(item)
-        item.setdefault("indicator", item.get("name") or item.get("type") or item.get("metric") or "close")
-        item.setdefault("operator", item.get("op") or default_operator)
-        item.setdefault("value", item.get("threshold") if item.get("threshold") is not None else item.get("target", 0))
-        if "window" not in item:
-            item["window"] = item.get("period") or item.get("length") or item.get("lookback")
-        item.pop("name", None)
-        item.pop("type", None)
-        item.pop("metric", None)
-        item.pop("op", None)
-        item.pop("threshold", None)
-        item.pop("target", None)
-        normalized.append(item)
-    return normalized
-
-
 def strategy_from_mapping(data: dict[str, Any], *, source: str | None = None) -> StrategySpec:
     """Convert YAML/LLM mappings into a validated strategy definition.
 
@@ -192,30 +151,12 @@ def strategy_from_mapping(data: dict[str, Any], *, source: str | None = None) ->
     """
     payload = dict(data)
     payload.setdefault("name", "generated_strategy")
-    if payload.get("components") and "schema_version" not in payload:
-        payload["schema_version"] = 2
     if source:
         payload["source"] = source
     if isinstance(payload.get("asset_types"), str):
         payload["asset_types"] = [payload["asset_types"]]
-    if isinstance(payload.get("indicators"), dict):
-        payload["indicators"] = list(payload["indicators"])
-    elif isinstance(payload.get("indicators"), list):
-        payload["indicators"] = [
-            str(item.get("alias") or item.get("name") or item.get("indicator") or "")
-            if isinstance(item, dict)
-            else item
-            for item in payload["indicators"]
-        ]
-        payload["indicators"] = [item for item in payload["indicators"] if item]
     payload["indicator_specs"] = _normalize_indicator_specs(payload.get("indicator_specs"))
-    payload["entry_conditions"] = _normalize_conditions(
-        payload.get("entry_conditions"), default_operator="gt"
-    )
-    payload["exit_conditions"] = _normalize_conditions(
-        payload.get("exit_conditions"), default_operator="lt"
-    )
-    for field in ("stop_loss_pct", "take_profit_pct", "position_size_pct"):
+    for field in ("stop_loss_pct", "take_profit_pct"):
         if field in payload:
             payload[field] = _normalize_ratio(payload[field])
     if not payload.get("asset_types"):
@@ -325,9 +266,9 @@ def _indicator(
         high = pd.to_numeric(history["high"], errors="coerce")
         low = pd.to_numeric(history["low"], errors="coerce")
         previous_close = pd.to_numeric(history["close"], errors="coerce").shift(1)
-        true_range = pd.concat(
-            [high - low, (high - previous_close).abs(), (low - previous_close).abs()], axis=1
-        ).max(axis=1)
+        true_range = pd.concat([high - low, (high - previous_close).abs(), (low - previous_close).abs()], axis=1).max(
+            axis=1
+        )
         value = true_range.rolling(periods).mean().iloc[-1]
         return float(value) if pd.notna(value) else None
     if canonical == "volatility":
@@ -378,13 +319,8 @@ def validate_strategy_spec(
     """Validate indicators before a strategy is allowed to run."""
     errors: list[str] = []
     definitions = {item["name"].lower(): item for item in available_indicators()}
-    aliases = {
-        item.alias.lower(): item.name.lower()
-        for item in spec.indicator_specs
-        if item.alias
-    }
-    requested = [*spec.indicators, *(item.name for item in spec.indicator_specs)]
-    requested.extend(condition.indicator for condition in [*spec.entry_conditions, *spec.exit_conditions])
+    aliases = {item.alias.lower(): item.name.lower() for item in spec.indicator_specs if item.alias}
+    requested = [item.name for item in spec.indicator_specs]
     for component in spec.components:
         if component.expression is not None:
             names, expression_errors = _expression_indicators(component.expression)
@@ -465,8 +401,10 @@ def evaluate_expression(
             }
         if item.type in {"all", "any"}:
             children = [evaluate(child, frame) for child in item.children]
-            matched = all(child["matched"] for child in children) if item.type == "all" else any(
-                child["matched"] for child in children
+            matched = (
+                all(child["matched"] for child in children)
+                if item.type == "all"
+                else any(child["matched"] for child in children)
             )
             return {"type": item.type, "matched": matched, "children": children}
         if item.type == "not":
@@ -490,68 +428,3 @@ def evaluate_expression(
         return {"type": item.type, "matched": False}
 
     return evaluate(expression, history)
-
-
-def _matches(value: float | None, condition: StrategyCondition) -> bool:
-    if value is None:
-        return False
-    target = condition.value
-    if condition.operator == "between":
-        if not isinstance(target, list) or len(target) != 2:
-            return False
-        return target[0] <= value <= target[1]
-    target_value = float(target) if not isinstance(target, list) else float(target[0])
-    return {
-        "gt": value > target_value,
-        "gte": value >= target_value,
-        "lt": value < target_value,
-        "lte": value <= target_value,
-        "eq": value == target_value,
-    }[condition.operator]
-
-
-def evaluate_strategy(spec: StrategySpec, history: pd.DataFrame, *, asset_type: AssetType | str) -> dict[str, Any]:
-    """Evaluate all conditions without any LLM call or future data."""
-    asset_type = AssetType(asset_type)
-    errors = validate_strategy_spec(spec, available_columns=set(history.columns))
-    if errors:
-        return {"matched": False, "reason": "unsupported_indicator", "errors": errors, "conditions": []}
-    if asset_type not in spec.asset_types:
-        return {"matched": False, "reason": "asset_type_not_supported", "conditions": []}
-    def evaluate_conditions(conditions: list[StrategyCondition]) -> list[dict[str, Any]]:
-        results = []
-        for condition in conditions:
-            value = _indicator(history, condition.indicator, condition.window, spec.indicator_specs)
-            results.append(
-                {
-                    "condition": condition.model_dump(mode="json"),
-                    "value": value,
-                    "matched": _matches(value, condition),
-                }
-            )
-        return results
-
-    results = evaluate_conditions(spec.entry_conditions)
-    exit_results = evaluate_conditions(spec.exit_conditions)
-
-    def combine(condition_results: list[dict[str, Any]], logic: str) -> bool:
-        if not condition_results:
-            return False
-        matches = (item["matched"] for item in condition_results)
-        return any(matches) if logic == "any" else all(matches)
-
-    matched = combine(results, spec.entry_condition_logic)
-    exit_matched = combine(exit_results, spec.exit_condition_logic)
-    return {
-        "matched": matched,
-        "exit_matched": exit_matched,
-        "entry_condition_logic": spec.entry_condition_logic,
-        "exit_condition_logic": spec.exit_condition_logic,
-        "reason": (
-            f"{spec.entry_condition_logic}_entry_conditions_matched"
-            if matched
-            else "entry_conditions_not_matched"
-        ),
-        "conditions": results,
-        "exit_conditions": exit_results,
-    }

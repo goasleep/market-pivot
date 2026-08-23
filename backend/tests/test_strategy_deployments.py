@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from strategy_helpers import compare_expression, strategy_mapping
 
 from application import automation as automation_module
 from application import automation_scheduler as automation_scheduler_module
@@ -11,8 +12,9 @@ from application.automation import AutomationService
 from application.automation_store import AutomationStore
 from application.backtest_experiment import BacktestExperimentStore
 from application.deployments import DeploymentService
+from application.strategy_state import StrategyRuntimeStateStore
 from engine.simulation_account import SimulationAccountService
-from engine.strategy_runtime import decision_from_strategy, plan_rebalance
+from engine.strategy_runtime import evaluate_strategy_intent, plan_rebalance
 from models.schemas import (
     AssetType,
     AutomationTaskConfig,
@@ -20,6 +22,7 @@ from models.schemas import (
     PortfolioState,
     Position,
     SimulationAccountConfig,
+    StrategyRuntimeState,
     StrategySpec,
     TradeDecision,
 )
@@ -49,25 +52,20 @@ async def _deployment_service(tmp_path):
         "exp-1",
         "completed",
         {
-            "strategy_spec": {
-                "name": "deployed_trend",
-                "version": "1.0.0",
-                "asset_types": ["etf"],
-                "entry_conditions": [
-                    {"indicator": "return_pct", "operator": "gt", "value": -1, "window": 1}
-                ],
-                "exit_conditions": [
-                    {"indicator": "return_pct", "operator": "lt", "value": -5, "window": 1}
-                ],
-                "position_size_pct": 0.2,
-            },
+            "strategy_spec": strategy_mapping(
+                "deployed_trend",
+                entry=compare_expression("return_pct", "gt", -1, 1),
+                exit=compare_expression("return_pct", "lt", -5, 1),
+                max_exposure=0.2,
+                stop_loss_pct=0.05,
+            ),
             "portfolio_spec": None,
             "result": {
                 "ticker": "510300",
                 "tickers": ["510300"],
                 "asset_type": "etf",
                 "initial_capital": 100_000,
-                "execution": {"fill_time": "next_open", "min_lot": 100},
+                "execution": {"fill_time": "next_open", "min_lot": 100, "strategy_plugins": []},
             },
         },
     )
@@ -146,10 +144,13 @@ async def test_deployment_api_creates_lists_and_pauses_an_account(monkeypatch, t
 
 
 def test_shared_strategy_runtime_applies_stop_exit_and_sell_first_rebalance():
-    spec = StrategySpec(
-        name="runtime",
-        asset_types=[AssetType.ETF],
-        entry_conditions=[{"indicator": "return_pct", "operator": "gt", "value": -1, "window": 1}],
+    spec = StrategySpec.model_validate(
+        strategy_mapping(
+            "runtime",
+            entry=compare_expression("return_pct", "gt", -1, 1),
+            stop_loss_pct=0.05,
+            max_exposure=0.2,
+        )
     )
     position = Position(
         ticker="510300",
@@ -160,13 +161,14 @@ def test_shared_strategy_runtime_applies_stop_exit_and_sell_first_rebalance():
         current_price=9,
         stop_loss=9.5,
     )
-    decision, evaluation = decision_from_strategy(
+    history = _history()
+    history.loc[history.index[-1], ["open", "high", "low", "close"]] = [9, 9.1, 8.9, 9]
+    decision, _state, evaluation = evaluate_strategy_intent(
         spec,
-        _history(),
+        history,
         asset_type=AssetType.ETF,
-        ticker="510300",
-        current_price=9,
-        position=position,
+        current_exposure=0.2,
+        state=StrategyRuntimeState(lifecycle="active", target_exposure=0.2, entry_price=10),
     )
     assert decision.decision == Decision.SELL
     assert evaluation["exit_reason"] == "stop_loss_triggered"
@@ -211,7 +213,7 @@ async def test_deployed_confirm_mode_waits_for_confirmation_and_is_idempotent(mo
 
     monkeypatch.setattr(automation_module, "build_market_context", fake_context)
     monkeypatch.setattr(automation_module.research_service, "run", fake_agent)
-    service = AutomationService()
+    service = AutomationService(strategy_states=StrategyRuntimeStateStore(tmp_path / "confirm-state.sqlite3"))
     locked_config = (await store.get_task("paper_confirm"))["config"]
     with pytest.raises(ValueError, match="不可在自动化配置中修改"):
         await service.update_task(
@@ -273,7 +275,8 @@ async def test_agent_can_veto_a_deployed_stop_loss_sell(monkeypatch, tmp_path):
     monkeypatch.setattr(automation_module, "build_market_context", fake_context)
     monkeypatch.setattr(automation_module.research_service, "run", veto_agent)
 
-    summary = await AutomationService().run_account("paper_veto", run_date="2026-08-03")
+    service = AutomationService(strategy_states=StrategyRuntimeStateStore(tmp_path / "veto-state.sqlite3"))
+    summary = await service.run_account("paper_veto", run_date="2026-08-03")
     audit = (await store.list_decisions("paper_veto", summary.run_id))[0]
     assert audit.decision.decision == Decision.SELL
     assert audit.strategy_evaluation["exit_reason"] == "stop_loss_triggered"
@@ -309,7 +312,8 @@ async def test_agent_can_veto_a_deployed_buy(monkeypatch, tmp_path):
     monkeypatch.setattr(automation_module, "build_market_context", fake_context)
     monkeypatch.setattr(automation_module.research_service, "run", veto_agent)
 
-    summary = await AutomationService().run_account("paper_buy_veto", run_date="2026-08-03")
+    service = AutomationService(strategy_states=StrategyRuntimeStateStore(tmp_path / "buy-veto-state.sqlite3"))
+    summary = await service.run_account("paper_buy_veto", run_date="2026-08-03")
     audit = (await store.list_decisions("paper_buy_veto", summary.run_id))[0]
     assert audit.decision.decision == Decision.BUY
     assert audit.agent_gate["approved"] is False

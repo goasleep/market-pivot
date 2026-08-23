@@ -164,16 +164,6 @@ class TradePlan(BaseModel):
     price_evidence: list[PriceEvidence] = Field(default_factory=list)
 
 
-class StrategyCondition(BaseModel):
-    """Small deterministic condition vocabulary executable by the backtester."""
-
-    indicator: str
-    operator: Literal["gt", "gte", "lt", "lte", "eq", "between"]
-    value: float | list[float]
-    window: int | None = Field(default=None, ge=1)
-    description: str = ""
-
-
 class IndicatorSpec(BaseModel):
     """A bounded, auditable indicator requested by an Agent strategy."""
 
@@ -185,26 +175,8 @@ class IndicatorSpec(BaseModel):
     params: dict[str, float | int | str] = Field(default_factory=dict)
 
 
-class PositionModel(BaseModel):
-    """Bounded target-exposure model evaluated by the trusted runtime."""
-
-    type: Literal["fixed", "volatility_target", "trend_volatility_target"] = "fixed"
-    volatility_window: int = Field(default=20, ge=2, le=252)
-    target_volatility: float = Field(default=0.15, gt=0, le=1)
-    trend_window: int = Field(default=60, ge=2, le=252)
-    min_exposure: float = Field(default=0.0, ge=0, le=1)
-    max_exposure: float = Field(default=0.95, ge=0, le=1)
-    rebalance_frequency: Literal["daily", "weekly", "monthly"] = "weekly"
-
-    @model_validator(mode="after")
-    def validate_exposure_bounds(self):
-        if self.min_exposure > self.max_exposure:
-            raise ValueError("min_exposure 不能大于 max_exposure")
-        return self
-
-
 class StrategyOperand(BaseModel):
-    """One side of a v2 expression comparison."""
+    """One side of an expression comparison."""
 
     type: Literal["indicator", "constant"]
     indicator: str | None = None
@@ -221,7 +193,7 @@ class StrategyOperand(BaseModel):
 
 
 class StrategyExpression(BaseModel):
-    """Recursive, bounded expression tree used by StrategySpec v2."""
+    """Recursive, bounded expression tree used by executable strategies."""
 
     type: Literal[
         "compare",
@@ -288,7 +260,7 @@ class HybridStrategyComponent(BaseModel):
 
 
 class FusionSpec(BaseModel):
-    """Deterministic signal-fusion policy for StrategySpec v2."""
+    """Deterministic signal-fusion policy."""
 
     type: Literal["weighted_score", "majority_vote", "priority"] = "weighted_score"
     entry_threshold: float = Field(default=0.25, ge=-1.0, le=1.0)
@@ -340,7 +312,7 @@ class StrategySignal(BaseModel):
 
 
 class StrategyIntent(BaseModel):
-    """Auditable, pre-trade output of the v2 runtime."""
+    """Auditable, pre-trade output of the strategy runtime."""
 
     decision: Decision = Decision.HOLD
     target_exposure: float = Field(ge=0.0, le=1.0)
@@ -367,41 +339,26 @@ class StrategyRuntimeState(BaseModel):
 
 
 class StrategySpec(BaseModel):
-    """Versioned strategy definition produced by YAML or an LLM."""
+    """Executable strategy definition produced by YAML or an LLM."""
 
     name: str
-    schema_version: Literal[1, 2] = 1
     version: str = "1.0.0"
     description: str = ""
     asset_types: list[AssetType] = Field(default_factory=lambda: [AssetType.ETF, AssetType.LOF])
-    indicators: list[str] = Field(default_factory=list)
     indicator_specs: list[IndicatorSpec] = Field(default_factory=list)
-    entry_conditions: list[StrategyCondition] = Field(default_factory=list)
-    exit_conditions: list[StrategyCondition] = Field(default_factory=list)
-    entry_condition_logic: Literal["all", "any"] = "all"
-    exit_condition_logic: Literal["all", "any"] = "any"
     stop_loss_pct: float | None = Field(default=None, ge=0, le=1)
     take_profit_pct: float | None = Field(default=None, ge=0)
-    position_size_pct: float = Field(default=0.2, ge=0, le=1)
-    rebalance_frequency: Literal["daily", "weekly", "manual"] = "daily"
-    position_model: PositionModel | None = None
-    components: list[HybridStrategyComponent] = Field(default_factory=list, max_length=50)
-    fusion: FusionSpec | None = None
-    position_policy: ContinuousPositionPolicy | None = None
-    state_policy: StrategyStatePolicy | None = None
+    components: list[HybridStrategyComponent] = Field(min_length=1, max_length=50)
+    fusion: FusionSpec = Field(default_factory=FusionSpec)
+    position_policy: ContinuousPositionPolicy = Field(default_factory=ContinuousPositionPolicy)
+    state_policy: StrategyStatePolicy = Field(default_factory=StrategyStatePolicy)
     source: Literal["yaml", "llm", "user", "sandbox"] = "yaml"
 
     @model_validator(mode="after")
-    def validate_schema_version(self):
-        if self.schema_version == 2:
-            if not self.components:
-                raise ValueError("StrategySpec v2 必须至少包含一个 component")
-            ids = [item.id for item in self.components]
-            if len(ids) != len(set(ids)):
-                raise ValueError("StrategySpec v2 的 component.id 不能重复")
-            self.fusion = self.fusion or FusionSpec()
-            self.position_policy = self.position_policy or ContinuousPositionPolicy()
-            self.state_policy = self.state_policy or StrategyStatePolicy()
+    def validate_components(self):
+        ids = [item.id for item in self.components]
+        if len(ids) != len(set(ids)):
+            raise ValueError("StrategySpec 的 component.id 不能重复")
         return self
 
 

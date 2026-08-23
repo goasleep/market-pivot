@@ -1,4 +1,4 @@
-"""Persistence for deterministic StrategySpec v2 runtime memory."""
+"""Persistence for deterministic strategy runtime memory."""
 
 from __future__ import annotations
 

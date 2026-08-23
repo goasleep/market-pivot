@@ -12,10 +12,28 @@ default_router: true
 default_priority: 10
 market_regimes: ["trending_up"]
 asset_types: [stock, etf, lof]
-indicators: [return_pct, price_vs_ma_pct]
-entry_conditions:
-  - {indicator: return_pct, operator: gt, value: 0, window: 20, description: "20日收益为正"}
-  - {indicator: price_vs_ma_pct, operator: between, value: [-3, 8], window: 20, description: "价格未严重偏离MA20"}
+components:
+  - id: trend_entry
+    type: dsl
+    role: signal
+    score_when_true: 1
+    score_when_false: -1
+    expression:
+      type: all
+      children:
+        - type: compare
+          left: {type: indicator, indicator: return_pct, window: 20}
+          operator: gt
+          right: {type: constant, value: 0}
+          description: 20日收益为正
+        - type: compare
+          left: {type: indicator, indicator: price_vs_ma_pct, window: 20}
+          operator: between
+          right: {type: constant, value: [-3, 8]}
+          description: 价格未严重偏离MA20
+fusion: {type: weighted_score, entry_threshold: 0.25, exit_threshold: 0.05, conflict_policy: hold}
+position_policy: {mode: continuous, min_exposure: 0, max_exposure: 0.95, rebalance_frequency: daily}
+state_policy: {enabled: true, cooldown_bars_after_exit: 0}
 stop_loss_pct: 0.08
 take_profit_pct: 0.16
 instructions: |

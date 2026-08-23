@@ -225,11 +225,11 @@ def _workbook(payload: dict[str, Any], selected_rows: list[dict[str, Any]]) -> b
                 "description": row.get("description"),
                 "entry_rules": row.get("entry_rules"),
                 "exit_rules": row.get("exit_rules"),
-                "position_model": row.get("strategy_spec", {}).get("position_model"),
+                "position_policy": row.get("strategy_spec", {}).get("position_policy"),
             }
             for row in payload.get("comparisons", [])
         ],
-        widths={"description": 45, "entry_rules": 50, "exit_rules": 50, "position_model": 50},
+        widths={"description": 45, "entry_rules": 50, "exit_rules": 50, "position_policy": 50},
     )
     _write_table(workbook, "绩效对比", _comparison_rows(payload))
     cost_rows = [
