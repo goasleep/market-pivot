@@ -108,36 +108,29 @@ async def test_completed_experiment_deploys_idempotently_to_an_empty_account(tmp
 
 
 @pytest.mark.asyncio
-async def test_deployment_api_creates_lists_and_pauses_an_account(monkeypatch, tmp_path):
+async def test_deployment_api_lists_and_pauses_an_account(monkeypatch, tmp_path):
     import api.routers.deployments as deployments_router
 
     service, accounts, _automations = await _deployment_service(tmp_path)
+    created = await service.create_from_experiment(
+        "exp-1",
+        account_id="paper_api",
+        account_name="API 模拟盘",
+        mode="confirm",
+        execution_key="api:test:deploy",
+    )
     monkeypatch.setattr(deployments_router, "deployment_service", service)
     app = FastAPI()
     app.include_router(deployments_router.router, prefix="/api/deployments")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        created = await client.post(
-            "/api/deployments/experiments/exp-1",
-            json={
-                "account_id": "paper_api",
-                "account_name": "API 模拟盘",
-                "mode": "confirm",
-                "execution_key": "api:test:deploy",
-            },
-        )
-        assert created.status_code == 200
-        deployment = created.json()
-        assert deployment["account_id"] == "paper_api"
-        assert deployment["status"] == "active"
-
         listed = await client.get("/api/deployments", params={"account_id": "paper_api"})
         assert listed.status_code == 200
         assert [item["deployment_id"] for item in listed.json()["deployments"]] == [
-            deployment["deployment_id"]
+            created.deployment_id
         ]
 
-        paused = await client.post(f"/api/deployments/{deployment['deployment_id']}/pause")
+        paused = await client.post(f"/api/deployments/{created.deployment_id}/pause")
         assert paused.status_code == 200
         assert paused.json()["status"] == "paused"
         assert (await accounts.get_account("paper_api")).status == "paused"

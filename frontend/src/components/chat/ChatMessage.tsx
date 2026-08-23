@@ -15,6 +15,7 @@ import {
   Check,
   Copy,
   ExternalLink,
+  GitFork,
   Loader2,
   Pencil,
   RefreshCw,
@@ -76,6 +77,8 @@ interface ChatMessageProps {
   editable?: boolean;
   onEdit?: () => void;
   onRegenerate?: () => void;
+  onBranch?: () => void;
+  branching?: boolean;
   onOpenReferences?: (references: ChatReference[]) => void;
   onAction?: (action: A2UIAction) => void;
   onInteraction?: (interaction: ChatInteraction) => void;
@@ -117,6 +120,8 @@ export function ChatMessage({
   editable = false,
   onEdit,
   onRegenerate,
+  onBranch,
+  branching = false,
   onOpenReferences,
   onAction,
   onInteraction,
@@ -375,6 +380,22 @@ export function ChatMessage({
             >
               <RefreshCw className="h-4 w-4" />
             </button>
+            {onBranch && (
+              <button
+                type="button"
+                onClick={onBranch}
+                disabled={branching}
+                aria-label="在新对话中分支"
+                title="在新对话中分支"
+                className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground disabled:cursor-wait disabled:opacity-50"
+              >
+                {branching ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <GitFork className="h-4 w-4" />
+                )}
+              </button>
+            )}
             {references.length > 0 && (
               <>
                 <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />

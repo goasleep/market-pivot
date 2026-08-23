@@ -31,6 +31,10 @@ class ConversationUpdate(BaseModel):
     title: str = Field(..., min_length=1, max_length=100)
 
 
+class ConversationBranchRequest(BaseModel):
+    through_message_id: str = Field(..., min_length=1, max_length=255)
+
+
 class A2UIActionRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     surface_id: str = Field(alias="surfaceId", min_length=1, max_length=200)
@@ -143,6 +147,17 @@ async def get_chat_conversation(conversation_id: str):
     if conversation is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     return conversation
+
+
+@router.post("/conversations/{conversation_id}/branches", status_code=201)
+async def branch_chat_conversation(conversation_id: str, req: ConversationBranchRequest):
+    """Create an independent conversation snapshot through one assistant reply."""
+    if await chat_store.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        return await chat_store.branch_conversation(conversation_id, req.through_message_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.patch("/conversations/{conversation_id}")

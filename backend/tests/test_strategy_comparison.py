@@ -3,9 +3,12 @@ import pytest
 
 import application.strategy_comparison as comparison_module
 from application.strategy_comparison import (
+    _one_strategy_trade_attribution,
     build_comparison_conclusion,
     build_comparison_spec,
+    build_market_regime_attribution,
     compare_strategies,
+    enrich_comparison_conclusion,
     standard_strategy_suite,
 )
 
@@ -148,11 +151,94 @@ async def test_formal_comparison_uses_one_snapshot_and_satisfies_full_contract(m
     assert result["ranking"] == [row["strategy_name"] for row in expected_ranking]
     assert result["ranking_metric"] == "total_return"
     assert result["cost_consistency"] == {"passed": True, "mismatches": []}
+    assert len(result["strategy_assessments"]) == 11
+    assert result["strategy_assessments"][0]["mechanism"]
+    assert result["strategy_assessments"][0]["why_good"]
+    assert result["strategy_assessments"][0]["why_bad"]
+    assert result["strategy_assessments"][0]["suitable_market"]
+    assert result["strategy_assessments"][0]["failure_mode"]
+    assert result["strategy_assessments"][0]["robustness_grade"]
+    assert result["market_regime_attribution"]["available"] is True
+    assert {item["regime"] for item in result["market_regime_attribution"]["distribution"]} == {
+        "uptrend",
+        "downtrend",
+        "range",
+        "high_volatility",
+    }
+    assert len(result["trade_attribution"]["strategies"]) == 11
+    assert result["trade_attribution"]["strategies"][0]["closed_trade_segments"] == 1
+    assert len(result["robustness_assessments"]) == 11
+    assert result["research_decision"]["falsification_risks"]
+    assert result["research_decision"]["next_experiments"]
+    assert result["research_decision"]["deployment_gate"]["status"] == "research_only"
     comparison_by_name = {row["strategy_name"]: row for row in result["comparisons"]}
     for row in result["cost_scenarios"]["base"]:
         comparison = comparison_by_name[row["strategy_name"]]
         assert row["total_return"] == comparison["total_return"]
         assert row["total_trades"] == comparison["total_trades"]
+
+
+def test_fifo_trade_attribution_includes_recorded_fees_and_open_position():
+    attribution = _one_strategy_trade_attribution(
+        {
+            "strategy_name": "test",
+            "display_name": "测试策略",
+            "trades": [
+                {
+                    "date": "2026-01-02",
+                    "action": "buy",
+                    "shares": 200,
+                    "price": 10,
+                    "commission": 10,
+                },
+                {
+                    "date": "2026-01-12",
+                    "action": "sell",
+                    "shares": 100,
+                    "price": 12,
+                    "commission": 5,
+                    "tax": 1,
+                },
+            ],
+        }
+    )
+
+    assert attribution["closed_trade_segments"] == 1
+    assert attribution["open_shares"] == 100
+    assert attribution["realized_pnl"] == 189
+    assert attribution["matched_trades"][0]["holding_days"] == 10
+    assert attribution["matched_trades"][0]["return_pct"] == pytest.approx(189 / 1005, abs=1e-6)
+
+
+def test_market_regime_attribution_keeps_trend_buckets_mutually_exclusive():
+    dates = pd.date_range("2026-01-01", periods=30).strftime("%Y-%m-%d")
+    prices = [10 + index * 0.2 for index in range(10)]
+    prices += [12 - index * 0.25 for index in range(10)]
+    prices += [9.75 + (index % 2) * 0.05 for index in range(10)]
+    payload = {
+        "price_curve": [
+            {"date": day, "value": price} for day, price in zip(dates, prices, strict=True)
+        ],
+        "comparisons": [
+            {
+                "strategy_name": "test",
+                "display_name": "测试策略",
+                "equity_curve": [
+                    {"date": day, "value": 100 + index} for index, day in enumerate(dates)
+                ],
+                "signal_curve": [{"date": day, "actual_exposure": 0.5} for day in dates],
+            }
+        ],
+    }
+
+    attribution = build_market_regime_attribution(payload)
+
+    trend_days = sum(
+        item["days"] for item in attribution["distribution"] if item["regime"] != "high_volatility"
+    )
+    assert attribution["available"] is True
+    assert trend_days == len(dates)
+    assert len(attribution["strategies"][0]["regimes"]) == 4
 
 
 def test_comparison_ranking_metric_follows_explicit_user_goal():
@@ -230,3 +316,44 @@ def test_limited_history_still_produces_conclusions_from_available_data():
     assert "绝对收益领先为高收益策略" in conclusion.tradeoffs[0]
     assert "风险调整表现领先为低风险策略" in conclusion.tradeoffs[0]
     assert any("不会替代或抹去" in item for item in conclusion.tradeoffs)
+    assert "我的首选是低风险策略" in conclusion.recommendations[0]
+    assert any("进攻型备选是高收益策略" in item for item in conclusion.recommendations)
+    assert all("不存在唯一" not in item for item in conclusion.tradeoffs + conclusion.recommendations)
+
+
+@pytest.mark.asyncio
+async def test_agent_enrichment_returns_advice_and_drops_obvious_explanations(monkeypatch):
+    conclusion = build_comparison_conclusion(
+        {
+            "history_years": 6,
+            "comparisons": [
+                {
+                    "strategy_name": "balanced",
+                    "display_name": "平衡策略",
+                    "total_return": 0.2,
+                    "sharpe_ratio": 1.1,
+                    "max_drawdown": 0.08,
+                    "diagnostics": {"out_of_sample": {"out_of_sample_return": 0.05}},
+                }
+            ],
+            "data_validation": {"status": "verified"},
+            "parameter_sensitivity": {"balanced": {"status": "stable"}},
+            "cost_scenarios": {"stress": [{"strategy_name": "balanced", "total_return": 0.12}]},
+        }
+    )
+
+    class FakeLLMService:
+        async def chat_json(self, prompt, system):
+            assert "直接、可执行的策略建议" in prompt
+            assert "不要教育用户" in system
+            return {
+                "recommendations": [
+                    "建议优先用平衡策略做下一轮模拟验证。",
+                    "不存在唯一最好策略。",
+                ]
+            }
+
+    monkeypatch.setattr(comparison_module, "get_llm_service", lambda: FakeLLMService())
+    enriched = await enrich_comparison_conclusion(conclusion, {"ticker": "510300", "comparisons": []})
+
+    assert enriched.recommendations == ["建议优先用平衡策略做下一轮模拟验证。"]

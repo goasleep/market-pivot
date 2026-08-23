@@ -2,7 +2,6 @@ import { useEffect, useState, type ComponentType } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
 import {
   Archive,
-  Bot,
   FlaskConical,
   LayoutDashboard,
   Menu,
@@ -52,15 +51,9 @@ const navigationGroups: Array<{ label: string; items: NavigationItem[] }> = [
         icon: Wallet,
       },
       {
-        to: "/automation",
-        label: "Agent 自动化",
-        description: "盯盘与纸面执行",
-        icon: Bot,
-      },
-      {
         to: "/backtest",
-        label: "回测与部署",
-        description: "验证策略与生成实验",
+        label: "策略回测",
+        description: "确定性验证策略",
         icon: FlaskConical,
       },
     ],

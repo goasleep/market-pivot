@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from collections.abc import Iterable
 from datetime import date, timedelta
 from typing import Any
@@ -448,8 +449,14 @@ async def compare_strategies(
         "parameter_sensitivity": sensitivity,
         "market_benchmark": market_benchmark,
     }
+    payload["market_regime_attribution"] = build_market_regime_attribution(payload)
+    payload["trade_attribution"] = build_trade_attribution(payload)
+    payload["robustness_assessments"] = build_robustness_assessments(payload)
+    payload["strategy_assessments"] = build_strategy_assessments(payload)
     payload["acceptance"] = _acceptance(spec, payload).model_dump(mode="json")
     conclusion = build_comparison_conclusion(payload, minimum_history_years=spec.task_contract.minimum_history_years)
+    payload["conclusion"] = conclusion.model_dump(mode="json")
+    payload["research_decision"] = build_research_decision(payload)
     if generate_explanation:
         conclusion = await enrich_comparison_conclusion(conclusion, payload)
     payload["conclusion"] = conclusion.model_dump(mode="json")
@@ -507,6 +514,630 @@ def _comparison_row(strategy: StrategySpec, result: dict[str, Any]) -> dict[str,
         "drawdown_curve": _drawdown_curve(result.get("equity_curve", [])),
         "trades": result.get("trades", []),
         "error": result.get("error"),
+    }
+
+
+def _compounded_return(values: pd.Series) -> float:
+    clean = pd.to_numeric(values, errors="coerce").dropna()
+    return float((1 + clean).prod() - 1) if not clean.empty else 0.0
+
+
+def build_market_regime_attribution(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attribute strategy returns to deterministic trend and volatility regimes."""
+    price_rows = [row for row in payload.get("price_curve", []) if isinstance(row, dict)]
+    if len(price_rows) < 3:
+        return {"rule_version": "market-regime-v2", "available": False, "reason": "价格序列不足"}
+    frame = pd.DataFrame(
+        {
+            "date": [str(row.get("date")) for row in price_rows],
+            "close": [float(row.get("value") or 0) for row in price_rows],
+        }
+    )
+    returns = frame["close"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    trend_window = min(60, max(5, len(frame) // 5))
+    volatility_window = min(20, max(5, len(frame) // 10))
+    trend = frame["close"].pct_change(trend_window)
+    expanding_trend = frame["close"] / float(frame["close"].iloc[0]) - 1
+    trend = trend.fillna(expanding_trend)
+    volatility = returns.rolling(volatility_window, min_periods=max(3, volatility_window // 2)).std() * np.sqrt(252)
+    valid_volatility = volatility.dropna()
+    volatility_threshold = float(valid_volatility.quantile(0.67)) if not valid_volatility.empty else 0.0
+    trend_threshold = max(0.02, 0.05 * trend_window / 60)
+    direction = np.where(
+        trend >= trend_threshold,
+        "uptrend",
+        np.where(trend <= -trend_threshold, "downtrend", "range"),
+    )
+    high_volatility = (volatility >= volatility_threshold) & volatility.notna() if volatility_threshold else False
+    frame["benchmark_return"] = returns
+    frame["direction"] = direction
+    frame["high_volatility"] = high_volatility
+    direction_labels = {"uptrend": "上涨趋势", "downtrend": "下跌趋势", "range": "横盘震荡"}
+    distribution = [
+        {
+            "regime": label,
+            "label": display,
+            "days": int((frame["direction"] == label).sum()),
+            "share": round(float((frame["direction"] == label).mean()), 6),
+        }
+        for label, display in direction_labels.items()
+    ]
+    distribution.append(
+        {
+            "regime": "high_volatility",
+            "label": "高波动",
+            "days": int(frame["high_volatility"].sum()),
+            "share": round(float(frame["high_volatility"].mean()), 6),
+        }
+    )
+    strategy_rows = []
+    for strategy in payload.get("comparisons", []):
+        if not isinstance(strategy, dict):
+            continue
+        equity = pd.Series(
+            {
+                str(point.get("date")): float(point.get("value"))
+                for point in strategy.get("equity_curve", [])
+                if isinstance(point, dict) and point.get("date") is not None and point.get("value") is not None
+            }
+        )
+        aligned_equity = frame["date"].map(equity).ffill().bfill()
+        strategy_returns = aligned_equity.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        exposure_by_date = {
+            str(point.get("date")): point.get("actual_exposure", point.get("target_exposure"))
+            for point in strategy.get("signal_curve", [])
+            if isinstance(point, dict) and point.get("date") is not None
+        }
+        if not any(value is not None for value in exposure_by_date.values()):
+            exposure_by_date = {
+                str(point.get("date")): point.get("exposure")
+                for point in strategy.get("equity_curve", [])
+                if isinstance(point, dict) and point.get("date") is not None
+            }
+        exposure = pd.to_numeric(frame["date"].map(exposure_by_date), errors="coerce")
+        regimes = []
+        masks = [(label, display, frame["direction"] == label) for label, display in direction_labels.items()]
+        masks.append(("high_volatility", "高波动", frame["high_volatility"]))
+        for label, display, mask in masks:
+            strategy_sample = strategy_returns[mask]
+            benchmark_sample = frame.loc[mask, "benchmark_return"]
+            strategy_return = _compounded_return(strategy_sample)
+            benchmark_return = _compounded_return(benchmark_sample)
+            regimes.append(
+                {
+                    "regime": label,
+                    "label": display,
+                    "days": int(mask.sum()),
+                    "strategy_return": round(strategy_return, 6),
+                    "benchmark_return": round(benchmark_return, 6),
+                    "excess_return": round(strategy_return - benchmark_return, 6),
+                    "win_day_rate": round(float((strategy_sample > 0).mean()), 6)
+                    if not strategy_sample.empty
+                    else 0.0,
+                    "average_exposure": round(float(exposure[mask].dropna().mean()), 6)
+                    if not exposure[mask].dropna().empty
+                    else None,
+                    "worst_day": round(float(strategy_sample.min()), 6) if not strategy_sample.empty else 0.0,
+                }
+            )
+        strategy_rows.append(
+            {
+                "strategy_name": strategy.get("strategy_name"),
+                "display_name": strategy.get("display_name"),
+                "regimes": regimes,
+            }
+        )
+    return {
+        "rule_version": "market-regime-v2",
+        "available": True,
+        "trend_window": trend_window,
+        "trend_threshold": round(trend_threshold, 6),
+        "volatility_window": volatility_window,
+        "high_volatility_threshold": round(volatility_threshold, 6),
+        "distribution": distribution,
+        "strategies": strategy_rows,
+    }
+
+
+def _holding_days(buy_date: str, sell_date: str) -> int:
+    try:
+        return max((date.fromisoformat(sell_date) - date.fromisoformat(buy_date)).days, 0)
+    except ValueError:
+        return 0
+
+
+def _one_strategy_trade_attribution(strategy: dict[str, Any]) -> dict[str, Any]:
+    lots: deque[dict[str, Any]] = deque()
+    matched = []
+    for trade in strategy.get("trades", []):
+        if not isinstance(trade, dict):
+            continue
+        action = str(trade.get("action") or "").lower()
+        shares = int(trade.get("shares") or 0)
+        price = float(trade.get("price") or 0)
+        if shares <= 0 or price <= 0:
+            continue
+        costs = sum(float(trade.get(key) or 0) for key in ("commission", "tax", "transfer_fee"))
+        if action == "buy":
+            lots.append(
+                {
+                    "date": str(trade.get("date") or ""),
+                    "shares": shares,
+                    "cost_per_share": (price * shares + costs) / shares,
+                }
+            )
+            continue
+        if action != "sell":
+            continue
+        remaining = shares
+        net_sell_per_share = (price * shares - costs) / shares
+        while remaining > 0 and lots:
+            lot = lots[0]
+            matched_shares = min(remaining, int(lot["shares"]))
+            cost_basis = float(lot["cost_per_share"]) * matched_shares
+            proceeds = net_sell_per_share * matched_shares
+            pnl = proceeds - cost_basis
+            matched.append(
+                {
+                    "buy_date": lot["date"],
+                    "sell_date": str(trade.get("date") or ""),
+                    "shares": matched_shares,
+                    "holding_days": _holding_days(str(lot["date"]), str(trade.get("date") or "")),
+                    "pnl": round(pnl, 6),
+                    "return_pct": round(pnl / cost_basis, 6) if cost_basis else 0.0,
+                }
+            )
+            lot["shares"] = int(lot["shares"]) - matched_shares
+            remaining -= matched_shares
+            if int(lot["shares"]) <= 0:
+                lots.popleft()
+    profits = [float(item["pnl"]) for item in matched if float(item["pnl"]) > 0]
+    losses = [float(item["pnl"]) for item in matched if float(item["pnl"]) < 0]
+    consecutive_losses = 0
+    max_consecutive_losses = 0
+    for item in matched:
+        consecutive_losses = consecutive_losses + 1 if float(item["pnl"]) < 0 else 0
+        max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+    total_positive = sum(profits)
+    top_profit = sum(sorted(profits, reverse=True)[:3])
+    return {
+        "strategy_name": strategy.get("strategy_name"),
+        "display_name": strategy.get("display_name"),
+        "method": "FIFO matched fills including recorded fees",
+        "closed_trade_segments": len(matched),
+        "open_shares": sum(int(lot["shares"]) for lot in lots),
+        "realized_pnl": round(sum(float(item["pnl"]) for item in matched), 6),
+        "win_rate": round(len(profits) / len(matched), 6) if matched else None,
+        "average_win": round(float(np.mean(profits)), 6) if profits else None,
+        "average_loss": round(float(np.mean(losses)), 6) if losses else None,
+        "payoff_ratio": round(float(np.mean(profits)) / abs(float(np.mean(losses))), 6)
+        if profits and losses
+        else None,
+        "average_holding_days": round(float(np.mean([item["holding_days"] for item in matched])), 2)
+        if matched
+        else None,
+        "max_consecutive_losses": max_consecutive_losses,
+        "top3_profit_concentration": round(top_profit / total_positive, 6) if total_positive > 0 else None,
+        "matched_trades": matched,
+        "best_trades": sorted(matched, key=lambda item: float(item["pnl"]), reverse=True)[:3],
+        "worst_trades": sorted(matched, key=lambda item: float(item["pnl"]))[:3],
+    }
+
+
+def build_trade_attribution(payload: dict[str, Any]) -> dict[str, Any]:
+    rows = [
+        _one_strategy_trade_attribution(strategy)
+        for strategy in payload.get("comparisons", [])
+        if isinstance(strategy, dict)
+    ]
+    return {"rule_version": "fifo-trade-attribution-v1", "strategies": rows}
+
+
+def build_robustness_assessments(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    sensitivity = payload.get("parameter_sensitivity") or {}
+    stress_by_name = {
+        str(row.get("strategy_name")): row
+        for row in (payload.get("cost_scenarios", {}).get("stress") or [])
+        if isinstance(row, dict)
+    }
+    ranking = {str(name): index for index, name in enumerate(payload.get("ranking") or [], 1)}
+    output = []
+    for row in payload.get("comparisons", []):
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("strategy_name"))
+        diagnostics = row.get("diagnostics") or {}
+        rolling = [item for item in diagnostics.get("rolling", []) if isinstance(item, dict)]
+        rolling_returns = [float(item["total_return"]) for item in rolling if item.get("total_return") is not None]
+        parameter = sensitivity.get(name) or {}
+        variants = [item for item in parameter.get("variants", []) if isinstance(item, dict)]
+        variant_returns = [float(item["total_return"]) for item in variants if item.get("total_return") is not None]
+        oos = diagnostics.get("out_of_sample", {}).get("out_of_sample_return")
+        stress_return = stress_by_name.get(name, {}).get("total_return")
+        conditions = {
+            "out_of_sample_positive": oos is not None and float(oos) > 0,
+            "rolling_positive_majority": bool(rolling_returns)
+            and sum(value > 0 for value in rolling_returns) / len(rolling_returns) >= 0.6,
+            "parameters_stable": parameter.get("status") in {"stable", "not_applicable"},
+            "stress_cost_positive": stress_return is not None and float(stress_return) > 0,
+        }
+        passed = sum(conditions.values())
+        grade = "strong" if passed == 4 else "moderate" if passed >= 2 else "weak"
+        output.append(
+            {
+                "strategy_name": name,
+                "display_name": row.get("display_name"),
+                "rank": ranking.get(name),
+                "grade": grade,
+                "checks": conditions,
+                "rolling_window_count": len(rolling_returns),
+                "rolling_positive_ratio": round(
+                    sum(value > 0 for value in rolling_returns) / len(rolling_returns), 6
+                )
+                if rolling_returns
+                else None,
+                "rolling_median_return": round(float(np.median(rolling_returns)), 6)
+                if rolling_returns
+                else None,
+                "rolling_worst_return": round(min(rolling_returns), 6) if rolling_returns else None,
+                "parameter_status": parameter.get("status", "unknown"),
+                "parameter_variant_count": len(variant_returns),
+                "parameter_return_range": [round(min(variant_returns), 6), round(max(variant_returns), 6)]
+                if variant_returns
+                else [],
+                "out_of_sample_return": oos,
+                "stress_total_return": stress_return,
+                "cost_degradation": round(float(row.get("total_return") or 0) - float(stress_return), 6)
+                if stress_return is not None
+                else None,
+                "annualized_return_ci_95": diagnostics.get("confidence", {}).get("annualized_return_ci_95") or [],
+            }
+        )
+    return sorted(output, key=lambda item: (item.get("rank") or 10_000, str(item["strategy_name"])))
+
+
+def _strategy_context(strategy_name: str) -> tuple[str, str]:
+    contexts = {
+        "buy_hold": (
+            "持续上行或大级别趋势行情，用于观察标的本身的收益与完整回撤",
+            "下跌和长时间震荡阶段会持续暴露，无法主动控制回撤",
+        ),
+        "ma_5_20": (
+            "中短期方向明确、趋势延续性较强的行情",
+            "横盘震荡时均线频繁交叉，容易反复买卖并累积成本",
+        ),
+        "ma_20_60": (
+            "持续时间较长的中期趋势行情",
+            "信号确认较慢，快速反转或 V 形修复时可能晚进晚出",
+        ),
+        "momentum_20": (
+            "短中期动量持续、涨跌方向较清晰的行情",
+            "动量在零轴附近反复切换时容易产生来回交易",
+        ),
+        "momentum_252": (
+            "长周期趋势稳定、愿意降低交易频率的行情",
+            "对新趋势和快速反转反应较慢，可能错过行情早段",
+        ),
+        "rsi_reversal": (
+            "震荡或超跌后容易均值修复的行情",
+            "单边下跌中超卖可以持续，抄底信号可能过早",
+        ),
+        "bollinger_reversal": (
+            "价格围绕中枢震荡、极端偏离后容易回归的行情",
+            "趋势突破阶段价格可能持续偏离中轨，反转假设会失效",
+        ),
+        "breakout_20": (
+            "趋势启动或加速、突破后有延续性的行情",
+            "假突破和震荡区间会导致追高后快速止损",
+        ),
+        "trend_pullback": (
+            "中期上升趋势中的有序回踩行情",
+            "趋势已反转却被误判为回踩时，入场后可能继续下跌",
+        ),
+        "volatility_target_15": (
+            "波动水平变化明显、希望主动约束仓位风险的行情",
+            "急跌后快速反弹时仓位恢复偏慢，可能损失上涨弹性",
+        ),
+        "trend_volatility_target": (
+            "趋势向上且需要随波动动态控制仓位的行情",
+            "V 形反转或均线附近震荡时，趋势过滤会造成空仓或反复切换",
+        ),
+    }
+    return contexts.get(
+        strategy_name,
+        ("满足该策略入场条件且信号具有延续性的行情", "信号快速反转或市场结构变化时可能失效"),
+    )
+
+
+def _metric_ranks(
+    rows: list[dict[str, Any]],
+    value_getter,
+    *,
+    reverse: bool,
+) -> dict[str, int]:
+    available = [(row, value_getter(row)) for row in rows]
+    available = [(row, float(value)) for row, value in available if value is not None]
+    ordered = sorted(available, key=lambda item: item[1], reverse=reverse)
+    return {str(row.get("strategy_name")): index for index, (row, _) in enumerate(ordered, 1)}
+
+
+def build_strategy_assessments(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Explain each strategy from frozen definitions and relative backtest evidence."""
+    rows = [row for row in payload.get("comparisons", []) if isinstance(row, dict) and not row.get("error")]
+    if not rows:
+        return []
+    stress_by_name = {
+        str(row.get("strategy_name")): row
+        for row in (payload.get("cost_scenarios", {}).get("stress") or [])
+        if isinstance(row, dict)
+    }
+    sensitivity = payload.get("parameter_sensitivity") or {}
+    regime_by_name = {
+        str(item.get("strategy_name")): item
+        for item in (payload.get("market_regime_attribution", {}).get("strategies") or [])
+        if isinstance(item, dict)
+    }
+    trade_by_name = {
+        str(item.get("strategy_name")): item
+        for item in (payload.get("trade_attribution", {}).get("strategies") or [])
+        if isinstance(item, dict)
+    }
+    robustness_by_name = {
+        str(item.get("strategy_name")): item
+        for item in (payload.get("robustness_assessments") or [])
+        if isinstance(item, dict)
+    }
+    ranking = {str(name): index for index, name in enumerate(payload.get("ranking") or [], 1)}
+    count = len(rows)
+    top_count = min(3, count)
+    return_ranks = _metric_ranks(rows, lambda row: row.get("total_return"), reverse=True)
+    sharpe_ranks = _metric_ranks(rows, lambda row: row.get("sharpe_ratio"), reverse=True)
+    drawdown_ranks = _metric_ranks(rows, lambda row: row.get("max_drawdown"), reverse=False)
+    oos_ranks = _metric_ranks(
+        rows,
+        lambda row: row.get("diagnostics", {}).get("out_of_sample", {}).get("out_of_sample_return"),
+        reverse=True,
+    )
+    stress_ranks = _metric_ranks(
+        rows,
+        lambda row: stress_by_name.get(str(row.get("strategy_name")), {}).get("total_return"),
+        reverse=True,
+    )
+    turnovers = [float(row["turnover"]) for row in rows if row.get("turnover") is not None]
+    median_turnover = float(np.median(turnovers)) if turnovers else 0.0
+    assessments = []
+    for row in rows:
+        name = str(row.get("strategy_name"))
+        display_name = str(row.get("display_name") or name)
+        total_return = float(row.get("total_return") or 0)
+        max_drawdown = float(row.get("max_drawdown") or 0)
+        sharpe = row.get("sharpe_ratio")
+        sharpe_value = float(sharpe) if sharpe is not None else None
+        oos = row.get("diagnostics", {}).get("out_of_sample", {}).get("out_of_sample_return")
+        oos_value = float(oos) if oos is not None else None
+        stress_return = stress_by_name.get(name, {}).get("total_return")
+        stress_value = float(stress_return) if stress_return is not None else None
+        strengths = []
+        if return_ranks.get(name, count + 1) <= top_count:
+            strengths.append(f"总收益 {total_return:+.2%}，排名 {return_ranks[name]}/{count}")
+        if sharpe_value is not None and sharpe_ranks.get(name, count + 1) <= top_count:
+            strengths.append(f"夏普 {sharpe_value:.3f}，排名 {sharpe_ranks[name]}/{count}")
+        if drawdown_ranks.get(name, count + 1) <= top_count:
+            strengths.append(f"最大回撤 {max_drawdown:.2%}，控制排名 {drawdown_ranks[name]}/{count}")
+        if oos_value is not None and oos_ranks.get(name, count + 1) <= top_count:
+            strengths.append(f"样本外收益 {oos_value:+.2%}，排名 {oos_ranks[name]}/{count}")
+        if stress_value is not None and stress_ranks.get(name, count + 1) <= top_count:
+            strengths.append(f"压力成本收益 {stress_value:+.2%}，排名 {stress_ranks[name]}/{count}")
+        if not strengths and total_return > 0:
+            strengths.append(f"评价期仍取得 {total_return:+.2%} 正收益")
+
+        regime_rows = [
+            item
+            for item in (regime_by_name.get(name, {}).get("regimes") or [])
+            if isinstance(item, dict) and item.get("regime") in {"uptrend", "downtrend", "range"}
+        ]
+        strongest_regime = max(regime_rows, key=lambda item: float(item.get("strategy_return") or 0), default=None)
+        weakest_regime = min(regime_rows, key=lambda item: float(item.get("strategy_return") or 0), default=None)
+        if strongest_regime and float(strongest_regime.get("strategy_return") or 0) > 0:
+            strengths.append(
+                f"{strongest_regime.get('label')}阶段收益 {float(strongest_regime['strategy_return']):+.2%}"
+            )
+
+        weaknesses = []
+        if total_return < 0:
+            weaknesses.append(f"评价期亏损 {total_return:.2%}")
+        elif return_ranks.get(name, 0) > max(top_count, int(np.ceil(count * 0.67))):
+            weaknesses.append(f"总收益仅排名 {return_ranks[name]}/{count}")
+        if sharpe_value is not None and sharpe_value <= 0:
+            weaknesses.append(f"夏普为 {sharpe_value:.3f}，风险补偿不足")
+        if oos_value is not None and oos_value < 0:
+            weaknesses.append(f"样本外收益为 {oos_value:.2%}")
+        if stress_value is not None and stress_value < 0:
+            weaknesses.append(f"压力成本下收益降至 {stress_value:.2%}")
+        turnover = float(row.get("turnover") or 0)
+        if median_turnover > 0 and turnover > median_turnover * 1.5:
+            weaknesses.append(f"换手率 {turnover:.2f}，高于策略中位数，成本敏感")
+        sensitivity_status = str((sensitivity.get(name) or {}).get("status") or "unknown")
+        if sensitivity_status not in {"stable", "unknown"}:
+            weaknesses.append(f"参数敏感性状态为 {sensitivity_status}")
+        if weakest_regime and float(weakest_regime.get("strategy_return") or 0) < 0:
+            weaknesses.append(
+                f"{weakest_regime.get('label')}阶段收益 {float(weakest_regime['strategy_return']):.2%}"
+            )
+        trade_attribution = trade_by_name.get(name) or {}
+        concentration = trade_attribution.get("top3_profit_concentration")
+        if concentration is not None and float(concentration) > 0.6:
+            weaknesses.append(f"前三笔盈利贡献 {float(concentration):.1%}，收益集中度偏高")
+        payoff_ratio = trade_attribution.get("payoff_ratio")
+        if payoff_ratio is not None and float(payoff_ratio) >= 1.5:
+            strengths.append(f"平均盈亏比 {float(payoff_ratio):.2f}")
+        max_consecutive_losses = int(trade_attribution.get("max_consecutive_losses") or 0)
+        if max_consecutive_losses >= 3:
+            weaknesses.append(f"最长连续亏损 {max_consecutive_losses} 笔")
+        if not weaknesses:
+            weaknesses.append("当前样本未暴露突出短板，仍需关注策略固有失效场景")
+
+        leading_dimensions = sum(
+            rank_map.get(name, count + 1) <= top_count
+            for rank_map in (sharpe_ranks, drawdown_ranks, oos_ranks, stress_ranks)
+        )
+        robustness = robustness_by_name.get(name) or {}
+        robustness_grade = str(robustness.get("grade") or "unknown")
+        if total_return < 0 and (sharpe_value is None or sharpe_value <= 0):
+            verdict = "当前不建议作为主策略"
+        elif leading_dimensions >= 2 and total_return >= 0 and robustness_grade != "weak":
+            verdict = "优先候选"
+        elif return_ranks.get(name, count + 1) <= top_count or leading_dimensions >= 1:
+            verdict = "有条件候选"
+        else:
+            verdict = "对照或备选"
+        suitable_market, failure_mode = _strategy_context(name)
+        assessments.append(
+            {
+                "strategy_name": name,
+                "display_name": display_name,
+                "rank": ranking.get(name, return_ranks.get(name, count)),
+                "mechanism": row.get("description") or display_name,
+                "suitable_market": suitable_market,
+                "failure_mode": failure_mode,
+                "strengths": strengths,
+                "weaknesses": weaknesses,
+                "verdict": verdict,
+                "why_good": "；".join(strengths),
+                "why_bad": "；".join(weaknesses),
+                "strongest_regime": strongest_regime,
+                "weakest_regime": weakest_regime,
+                "trade_attribution": trade_attribution,
+                "robustness_grade": robustness_grade,
+            }
+        )
+    return sorted(assessments, key=lambda item: (int(item.get("rank") or count), str(item["strategy_name"])))
+
+
+def build_research_decision(payload: dict[str, Any]) -> dict[str, Any]:
+    """Turn frozen diagnostics into falsification tests and a deterministic review gate."""
+    conclusion = payload.get("conclusion") or {}
+    preferred = conclusion.get("risk_adjusted_winner") or conclusion.get("robustness_winner") or {}
+    preferred_name = str(preferred.get("strategy_name") or (payload.get("ranking") or [""])[0])
+    assessments = {
+        str(item.get("strategy_name")): item
+        for item in payload.get("strategy_assessments", [])
+        if isinstance(item, dict)
+    }
+    robustness = {
+        str(item.get("strategy_name")): item
+        for item in payload.get("robustness_assessments", [])
+        if isinstance(item, dict)
+    }
+    trades = {
+        str(item.get("strategy_name")): item
+        for item in payload.get("trade_attribution", {}).get("strategies", [])
+        if isinstance(item, dict)
+    }
+    assessment = assessments.get(preferred_name) or {}
+    robust = robustness.get(preferred_name) or {}
+    trade = trades.get(preferred_name) or {}
+    weakest_regime = assessment.get("weakest_regime") or {}
+    falsification_risks = [
+        f"如果后续处于{assessment.get('failure_mode')}，当前推荐依据可能失效。"
+        if assessment.get("failure_mode")
+        else "如果市场结构发生变化，当前推荐依据可能失效。"
+    ]
+    if weakest_regime and float(weakest_regime.get("strategy_return") or 0) < 0:
+        falsification_risks.append(
+            f"该策略在{weakest_regime.get('label')}阶段收益为 "
+            f"{float(weakest_regime.get('strategy_return') or 0):.2%}；若未来该阶段占比上升，整体优势可能消失。"
+        )
+    concentration = trade.get("top3_profit_concentration")
+    if concentration is not None and float(concentration) > 0.5:
+        falsification_risks.append(
+            f"前三笔盈利贡献 {float(concentration):.1%}；移除少数大盈利后，结论可能反转。"
+        )
+    if robust.get("grade") == "weak":
+        falsification_risks.append("滚动、样本外、参数或压力成本检查多数未通过，当前优势可能依赖特定样本。")
+    validation = payload.get("data_validation") or {}
+    if validation.get("status") != "verified":
+        falsification_risks.append("行情交叉核验未达到 verified，换用独立数据源可能改变排名。")
+
+    next_experiments = []
+    if weakest_regime:
+        next_experiments.append(
+            {
+                "id": "weak-regime-walk-forward",
+                "question": f"策略在{weakest_regime.get('label')}阶段是否仍有可接受表现？",
+                "method": "按时间顺序滚动切分，并单独报告该市场阶段的收益、回撤、仓位和相对标的超额。",
+                "success_criteria": "多个滚动窗口中结论方向一致，且最弱阶段不再持续侵蚀全部趋势期收益。",
+            }
+        )
+    if int(trade.get("closed_trade_segments") or 0) > 0:
+        next_experiments.append(
+            {
+                "id": "leave-top-trades-out",
+                "question": "策略收益是否依赖少数大盈利交易？",
+                "method": "依次移除盈利最大的 1 笔和 3 笔闭合交易，重新计算收益、夏普和最大回撤。",
+                "success_criteria": "移除前三笔盈利后仍保持正收益，且策略相对排名不发生根本反转。",
+            }
+        )
+    if robust.get("parameter_status") not in {"stable", "not_applicable"}:
+        next_experiments.append(
+            {
+                "id": "walk-forward-parameters",
+                "question": "当前参数是否只是样本内偶然最优？",
+                "method": "只在训练窗口选择参数，在后续窗口冻结执行，并与相邻参数同步比较。",
+                "success_criteria": "相邻参数多数保持正收益，且样本外排名与当前结论一致。",
+            }
+        )
+    if validation.get("status") != "verified":
+        next_experiments.append(
+            {
+                "id": "independent-source-replay",
+                "question": "更换独立行情源后结论是否可复现？",
+                "method": "使用相同策略版本、区间和成交假设，在独立行情源上完整重放。",
+                "success_criteria": "核心指标差异可解释，首选策略与主要风险结论不变。",
+            }
+        )
+    next_experiments.append(
+        {
+            "id": "forward-paper-observation",
+            "question": "冻结策略在未来未见数据上是否保持行为一致？",
+            "method": "冻结策略版本进入模拟盘，记录每次信号、成交、滑点偏差和失效原因，不在观察期调参。",
+            "success_criteria": "完成至少一个完整入场—退出周期，实际执行偏差未突破既定成本压力假设。",
+        }
+    )
+
+    robust_checks = robust.get("checks") or {}
+    closed_segments = int(trade.get("closed_trade_segments") or 0)
+    gate_checks = {
+        "task_acceptance": payload.get("acceptance", {}).get("satisfied") is True,
+        "official_sample": conclusion.get("official") is True,
+        "data_cross_validation": validation.get("status") == "verified",
+        "out_of_sample_positive": robust_checks.get("out_of_sample_positive") is True,
+        "rolling_positive_majority": robust_checks.get("rolling_positive_majority") is True,
+        "parameters_stable": robust_checks.get("parameters_stable") is True,
+        "stress_cost_positive": robust_checks.get("stress_cost_positive") is True,
+        "trade_sample_sufficient": preferred_name == "buy_hold" or closed_segments >= 20,
+        "profit_not_over_concentrated": concentration is None or float(concentration) <= 0.5,
+    }
+    missing = [name for name, passed in gate_checks.items() if not passed]
+    gate_status = "eligible_for_manual_review" if not missing else "research_only"
+    return {
+        "rule_version": "strategy-research-decision-v1",
+        "preferred_strategy": preferred_name,
+        "preferred_display_name": preferred.get("display_name") or assessment.get("display_name") or preferred_name,
+        "current_verdict": assessment.get("verdict") or "待判断",
+        "robustness_grade": robust.get("grade") or "unknown",
+        "falsification_risks": falsification_risks,
+        "next_experiments": next_experiments,
+        "deployment_gate": {
+            "status": gate_status,
+            "checks": gate_checks,
+            "missing": missing,
+            "message": (
+                "可提交人工审核；仍不得自动部署。"
+                if gate_status == "eligible_for_manual_review"
+                else "仅限研究与模拟验证，补齐缺失检查后再考虑人工审核。"
+            ),
+        },
     }
 
 
@@ -930,6 +1561,50 @@ def _winner(row: dict[str, Any] | None, metric: str, value: Any) -> dict[str, An
     }
 
 
+def _display_name(row: dict[str, Any] | None) -> str:
+    if not row:
+        return "该策略"
+    return str(row.get("display_name") or row.get("strategy_name") or "该策略")
+
+
+def _comparison_recommendations(
+    *,
+    total: dict[str, Any],
+    sharpe: dict[str, Any] | None,
+    drawdown: dict[str, Any],
+    out_of_sample: dict[str, Any] | None,
+    robustness: dict[str, Any],
+    official: bool,
+) -> list[str]:
+    """Create a deterministic fallback recommendation from frozen winners."""
+    primary = sharpe or drawdown or robustness or out_of_sample or total
+    primary_key = primary.get("strategy_name")
+    dimensions = [
+        label
+        for label, row in (
+            ("风险调整表现", sharpe),
+            ("回撤控制", drawdown),
+            ("压力成本稳健性", robustness),
+            ("样本外表现", out_of_sample),
+        )
+        if row and row.get("strategy_name") == primary_key
+    ]
+    basis = "、".join(dimensions) or "当前样本的综合风险收益表现"
+    recommendations = [
+        f"我的首选是{_display_name(primary)}：它在{basis}上领先，建议将其作为下一轮模拟验证的主策略。"
+    ]
+    if total.get("strategy_name") != primary_key:
+        total_return = float(total.get("total_return") or 0)
+        total_drawdown = float(total.get("max_drawdown") or 0)
+        recommendations.append(
+            f"进攻型备选是{_display_name(total)}：本期总收益为 {total_return:+.2%}、最大回撤为 "
+            f"{total_drawdown:.2%}；是否接受这组收益回撤交换由你决定。"
+        )
+    if not official:
+        recommendations.append("当前证据未达到正式验证门槛；我的建议是先保留为模拟候选，暂不进入部署准入。")
+    return recommendations
+
+
 def build_comparison_conclusion(
     payload: dict[str, Any],
     *,
@@ -1047,11 +1722,17 @@ def build_comparison_conclusion(
                     "已使用当前可用数据完成分维度比较；数据风险会降低结论置信度，但不会替代或抹去当前样本给出的结果。"
                 ]
             ),
-            "绝对收益、风险调整收益、回撤控制和样本外表现使用不同评价维度，因此不存在唯一最好策略。",
-            "低仓位策略通常能降低回撤，但也可能牺牲趋势行情中的绝对收益。",
         ],
         data_warnings=warnings,
         limitations=limitations,
+        recommendations=_comparison_recommendations(
+            total=total,
+            sharpe=sharpe,
+            drawdown=drawdown,
+            out_of_sample=oos,
+            robustness=robustness,
+            official=official,
+        ),
     )
 
 
@@ -1059,21 +1740,59 @@ async def enrich_comparison_conclusion(
     conclusion: ComparisonConclusion,
     payload: dict[str, Any],
 ) -> ComparisonConclusion:
-    """Let the LLM explain frozen facts without changing winners or metrics."""
+    """Let the Agent recommend from frozen facts without changing winners or metrics."""
+    stress_by_name = {
+        row.get("strategy_name"): row for row in payload.get("cost_scenarios", {}).get("stress", [])
+    }
     prompt = {
         "ticker": payload.get("ticker"),
         "evaluation_period": [payload.get("evaluation_start_date"), payload.get("evaluation_end_date")],
-        "winners": conclusion.model_dump(mode="json", exclude={"interpretations"}),
-        "instruction": "只补充 2 至 4 条简洁权衡解释，不得修改优胜策略、指标或数值。",
+        "frozen_conclusion": conclusion.model_dump(mode="json", exclude={"recommendations", "interpretations"}),
+        "strategy_metrics": [
+            {
+                "strategy_name": row.get("strategy_name"),
+                "display_name": row.get("display_name"),
+                "total_return": row.get("total_return"),
+                "max_drawdown": row.get("max_drawdown"),
+                "sharpe_ratio": row.get("sharpe_ratio"),
+                "calmar_ratio": row.get("calmar_ratio"),
+                "out_of_sample_return": row.get("diagnostics", {})
+                .get("out_of_sample", {})
+                .get("out_of_sample_return"),
+                "stress_total_return": stress_by_name.get(row.get("strategy_name"), {}).get("total_return"),
+            }
+            for row in payload.get("comparisons", [])
+            if not row.get("error")
+        ],
+        "strategy_assessments": payload.get("strategy_assessments") or [],
+        "market_regime_attribution": payload.get("market_regime_attribution") or {},
+        "trade_attribution": payload.get("trade_attribution") or {},
+        "robustness_assessments": payload.get("robustness_assessments") or [],
+        "research_decision": payload.get("research_decision") or {},
+        "instruction": (
+            "给出 1 至 3 条直接、可执行的策略建议。明确首选策略、依据和适用条件；可以给一个备选。"
+            "不要向用户解释‘没有唯一最好策略’、‘不同指标代表不同取舍’等常识，也不要重复通用风险免责声明。"
+            "建议只供用户判断，不得修改冻结的排名、指标或数值。"
+        ),
     }
     try:
         raw = await get_llm_service().chat_json(
             json.dumps(prompt, ensure_ascii=False, default=str),
-            system='只返回 JSON：{"interpretations":["..."]}。不得返回策略排名或新数值。',
+            system=(
+                '只返回 JSON：{"recommendations":["..."]}。直接提出建议，不要教育用户或解释显而易见的道理；'
+                "不得创造或修改策略排名、指标和数值。"
+            ),
         )
-        items = raw.get("interpretations") if isinstance(raw, dict) else None
-        if isinstance(items, list) and 1 <= len(items) <= 4 and all(isinstance(item, str) for item in items):
-            return conclusion.model_copy(update={"interpretations": [item[:300] for item in items]})
+        items = raw.get("recommendations") if isinstance(raw, dict) else None
+        forbidden = ("不存在唯一", "不同评价维度", "不同指标代表", "历史表现不代表未来")
+        if isinstance(items, list):
+            recommendations = [
+                item[:300]
+                for item in items[:3]
+                if isinstance(item, str) and item.strip() and not any(phrase in item for phrase in forbidden)
+            ]
+            if recommendations:
+                return conclusion.model_copy(update={"recommendations": recommendations})
     except Exception:
         pass
     return conclusion

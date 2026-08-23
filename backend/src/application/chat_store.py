@@ -167,6 +167,7 @@ class ChatStore:
             "id": row["message_id"],
             "role": row["role"],
             "parts": json.loads(row["parts_json"]),
+            "created_at": row.get("created_at"),
             "status": status,
             "task_id": row["task_id"],
             "loading": status in {"pending", "running"},
@@ -652,7 +653,7 @@ class ChatStore:
         if conversation is None:
             return None
         rows = await ChatMessage.filter(conversation_id=conversation_id).order_by("position").values(
-            "message_id", "role", "parts_json", "status", "task_id"
+            "message_id", "role", "parts_json", "status", "task_id", "created_at"
         )
         refs = await self._references_by_message([row["message_id"] for row in rows])
         return {
@@ -662,6 +663,117 @@ class ChatStore:
             "updated_at": conversation.updated_at,
             "messages": [self._message_payload(row, refs.get(row["message_id"], [])) for row in rows],
         }
+
+    async def branch_conversation(
+        self,
+        source_conversation_id: str,
+        through_message_id: str,
+    ) -> dict[str, Any]:
+        """Create an independent conversation snapshot through one completed assistant reply."""
+        await self._ensure_ready()
+        timestamp = _now()
+        branch_conversation_id = f"conversation-{uuid4().hex}"
+
+        async with in_transaction() as connection:
+            source = (
+                await ChatConversation.filter(conversation_id=source_conversation_id)
+                .using_db(connection)
+                .first()
+            )
+            if source is None:
+                raise ValueError("源会话不存在")
+
+            target = (
+                await ChatMessage.filter(
+                    message_id=through_message_id,
+                    conversation_id=source_conversation_id,
+                )
+                .using_db(connection)
+                .first()
+            )
+            if target is None:
+                raise ValueError("分支消息不属于当前会话")
+            if target.role != "assistant":
+                raise ValueError("只能从助手回复创建分支")
+            if target.status != "completed":
+                raise ValueError("只能从已完成的助手回复创建分支")
+
+            source_messages = await (
+                ChatMessage.filter(
+                    conversation_id=source_conversation_id,
+                    position__lte=target.position,
+                )
+                .using_db(connection)
+                .order_by("position")
+                .values(
+                    "message_id",
+                    "role",
+                    "parts_json",
+                    "status",
+                    "position",
+                    "created_at",
+                    "updated_at",
+                )
+            )
+            source_message_ids = [str(message["message_id"]) for message in source_messages]
+            source_references = await (
+                ChatMessageReference.filter(message_id__in=source_message_ids)
+                .using_db(connection)
+                .order_by("message_id", "position")
+                .values("message_id", "position", "reference_json", "created_at")
+            )
+            references_by_message: dict[str, list[dict[str, Any]]] = {}
+            for reference in source_references:
+                references_by_message.setdefault(str(reference["message_id"]), []).append(reference)
+
+            source_title = source.title.strip() or "新对话"
+            branch_title = f"{source_title}（分支）"
+            await ChatConversation.create(
+                conversation_id=branch_conversation_id,
+                title=branch_title[:100],
+                created_at=timestamp,
+                updated_at=timestamp,
+                using_db=connection,
+            )
+
+            for position, source_message in enumerate(source_messages):
+                source_message_id = str(source_message["message_id"])
+                branch_message_id = f"msg-{uuid4().hex}"
+                parts = json.loads(source_message["parts_json"])
+                await ChatMessage.create(
+                    message_id=branch_message_id,
+                    conversation_id=branch_conversation_id,
+                    role=source_message["role"],
+                    parts_json=source_message["parts_json"],
+                    status=source_message["status"],
+                    task_id=None,
+                    position=position,
+                    created_at=source_message["created_at"],
+                    updated_at=source_message["updated_at"],
+                    using_db=connection,
+                )
+                await self._sync_search(branch_message_id, branch_conversation_id, parts, connection)
+
+                references = references_by_message.get(source_message_id, [])
+                if references:
+                    await ChatMessageReference.bulk_create(
+                        [
+                            ChatMessageReference(
+                                id=f"{branch_message_id}:{reference_position}",
+                                message_id=branch_message_id,
+                                position=reference_position,
+                                reference_json=reference["reference_json"],
+                                created_at=reference["created_at"],
+                            )
+                            for reference_position, reference in enumerate(references)
+                        ],
+                        using_db=connection,
+                    )
+
+        conversation = await self.get_conversation(branch_conversation_id)
+        if conversation is None:
+            raise RuntimeError("分支会话创建后无法读取")
+        return conversation
 
     async def list_conversations(self, query: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         await self._ensure_ready()
@@ -696,7 +808,7 @@ class ChatStore:
         result = []
         for row in rows:
             messages = await ChatMessage.filter(conversation_id=row["conversation_id"]).order_by("position").values(
-                "message_id", "role", "parts_json", "status", "task_id"
+                "message_id", "role", "parts_json", "status", "task_id", "created_at"
             )
             refs = await self._references_by_message([message["message_id"] for message in messages])
             result.append(

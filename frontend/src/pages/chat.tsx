@@ -89,12 +89,15 @@ export function ChatPage() {
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
   const [sending, setSending] = useState(false);
+  const [branchingMessageId, setBranchingMessageId] = useState<string | null>(
+    null,
+  );
   const [llmConfig, setLlmConfig] = useState<LLMConfig | null>(null);
   const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(
     null,
   );
-  const [sidebarOpen, setSidebarOpen] = useState(() =>
-    window.matchMedia("(min-width: 768px)").matches,
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => window.matchMedia("(min-width: 768px)").matches,
   );
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [referencesByConversation, setReferencesByConversation] = useState<
@@ -251,6 +254,51 @@ export function ChatPage() {
     setInput("");
     setEditingMessageIndex(null);
     setSidebarOpen(true);
+  };
+
+  const branchConversation = async (messageId: string) => {
+    if (sending || branchingMessageId || !activeConversation) return;
+    const sourceConversationId = activeConversation.conversationId;
+    setBranchingMessageId(messageId);
+    try {
+      const response = await fetch(
+        `/api/chat/conversations/${encodeURIComponent(sourceConversationId)}/branches`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ through_message_id: messageId }),
+        },
+      );
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as {
+          detail?: string;
+        } | null;
+        throw new Error(
+          payload?.detail || `创建分支失败（${response.status}）`,
+        );
+      }
+      const conversation = hydrateServerConversation(
+        (await response.json()) as Record<string, unknown>,
+      );
+      setStore((current) => ({
+        activeId: conversation.conversationId,
+        conversations: [
+          conversation,
+          ...current.conversations.filter(
+            (item) => item.conversationId !== conversation.conversationId,
+          ),
+        ],
+      }));
+      setInput("");
+      setEditingMessageIndex(null);
+      setSidebarOpen(false);
+    } catch (error) {
+      window.alert(
+        error instanceof Error ? error.message : "创建分支失败，请稍后重试。",
+      );
+    } finally {
+      setBranchingMessageId(null);
+    }
   };
 
   const openConversation = (conversationId: string) => {
@@ -1334,6 +1382,17 @@ export function ChatPage() {
                       ? () => regenerateMessage(index)
                       : undefined
                   }
+                  onBranch={
+                    !sending &&
+                    message.role === "assistant" &&
+                    !message.loading &&
+                    (!message.status || message.status === "completed") &&
+                    message.parts.length > 0 &&
+                    message.id
+                      ? () => void branchConversation(message.id!)
+                      : undefined
+                  }
+                  branching={branchingMessageId === message.id}
                   onOpenReferences={openReferences}
                   onAction={handleA2UIAction}
                   onInteraction={handleInteraction}

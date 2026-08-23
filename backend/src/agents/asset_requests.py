@@ -23,12 +23,21 @@ class AssetIntent(str, Enum):
     HELP = "help"
 
 
+class RequestMode(str, Enum):
+    """Coarse safety gate; financial semantics are planned after this gate."""
+
+    FINANCIAL_RESEARCH = "financial_research"
+    SIMULATION_MUTATION = "simulation_mutation"
+    HELP = "help"
+
+
 @dataclass(frozen=True)
 class AssetAgentRequest:
     message: str
     history: list[dict[str, str]]
     intent: AssetIntent
     tickers: tuple[str, ...]
+    mode: RequestMode = RequestMode.FINANCIAL_RESEARCH
     asset_type: AssetType = AssetType.STOCK
     start_date: str | None = None
     end_date: str | None = None
@@ -47,6 +56,9 @@ class AssetAgentRequest:
 
     def with_intent(self, intent: AssetIntent) -> "AssetAgentRequest":
         return replace(self, intent=intent, intent_confirmed=True)
+
+    def with_mode(self, mode: RequestMode) -> "AssetAgentRequest":
+        return replace(self, mode=mode)
 
 
 class AssetRequestResolver:
@@ -195,44 +207,25 @@ class AssetRequestResolver:
         )
 
     def resolve_intent(self, request: AssetAgentRequest) -> tuple[AssetAgentRequest, dict[str, Any] | None]:
-        """Resolve unambiguous intent or return a choice request before tools run."""
+        """Apply only safety-level routing; the research planner owns task semantics."""
+        text = request.message.strip().lower()
+        if request.allow_mutating_tools or self._explicitly_requests_mutation(request.message):
+            return request.with_mode(RequestMode.SIMULATION_MUTATION), None
+        if not text or text in {"帮助", "help", "你能做什么", "有什么功能", "使用说明"}:
+            return replace(request, intent=AssetIntent.HELP, mode=RequestMode.HELP, intent_confirmed=True), None
         if request.intent_confirmed:
-            return request, None
-        matches = self._matched_intents(request.message)
-        if request.allow_mutating_tools and not matches:
-            return request.with_intent(AssetIntent.ANALYZE), None
-        if len(matches) == 1:
-            return request.with_intent(matches[0]), None
-        if len(matches) == 0 and not request.tickers:
-            return request.with_intent(AssetIntent.HELP), None
-        if len(matches) == 0 and request.tickers:
-            matches = [AssetIntent.QUOTE, AssetIntent.HISTORY, AssetIntent.ANALYZE, AssetIntent.BACKTEST]
-        elif AssetIntent.BACKTEST in matches:
-            return request.with_intent(AssetIntent.BACKTEST), None
-        elif AssetIntent.COMPARE in matches and len(matches) > 1:
-            return request.with_intent(AssetIntent.COMPARE), None
-        options = [
-            {
-                "id": intent.value,
-                "label": {
-                    AssetIntent.QUOTE: "查询实时行情",
-                    AssetIntent.HISTORY: "查看历史走势",
-                    AssetIntent.ANALYZE: "进行交易分析",
-                    AssetIntent.BACKTEST: "进行历史回测",
-                    AssetIntent.NEWS: "查看最新资讯",
-                    AssetIntent.COMPARE: "进行标的对比",
-                    AssetIntent.STRATEGIES: "查看交易策略",
-                    AssetIntent.PORTFOLIO: "查看模拟账户",
-                }.get(intent, intent.value),
-            }
-            for intent in matches
-        ]
-        ticker_label = "、".join(request.tickers) if request.tickers else "当前请求"
-        return request, {
-            "kind": "intent_clarification",
-            "question": f"你希望对 {ticker_label} 做哪类处理？",
-            "options": options,
-        }
+            return request.with_mode(RequestMode.FINANCIAL_RESEARCH), None
+        # Preserve legacy intent metadata where it is unambiguous, but never use
+        # it to decide whether a financial question may enter the research graph.
+        inferred = self._infer_intent(request.message, len(request.tickers))
+        if inferred == AssetIntent.HELP:
+            inferred = AssetIntent.ANALYZE
+        return replace(
+            request,
+            intent=inferred,
+            mode=RequestMode.FINANCIAL_RESEARCH,
+            intent_confirmed=True,
+        ), None
 
     @staticmethod
     def _infer_asset_type(message: str, history: Sequence[dict[str, str]]) -> AssetType:
@@ -291,6 +284,7 @@ class AssetRequestResolver:
             "message": request.message,
             "history": request.history,
             "intent": request.intent.value,
+            "mode": request.mode.value,
             "tickers": list(request.tickers),
             "asset_type": request.asset_type.value,
             "start_date": request.start_date,
@@ -319,6 +313,7 @@ class AssetRequestResolver:
             history=list(payload.get("history") or []),
             intent=AssetIntent(str(payload.get("intent", AssetIntent.ANALYZE.value))),
             tickers=tuple(str(item) for item in payload.get("tickers", []) if item),
+            mode=RequestMode(str(payload.get("mode", RequestMode.FINANCIAL_RESEARCH.value))),
             asset_type=AssetType(str(payload.get("asset_type", AssetType.STOCK.value))),
             start_date=payload.get("start_date"),
             end_date=payload.get("end_date"),

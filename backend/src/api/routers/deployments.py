@@ -5,30 +5,8 @@ from pydantic import BaseModel, Field
 
 from application.deployments import deployment_service
 from application.strategy_candidates import strategy_candidates
-from models.schemas import AssetType
 
 router = APIRouter()
-
-
-class DeployExperimentRequest(BaseModel):
-    account_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
-    create_account: bool = True
-    account_name: str | None = Field(default=None, max_length=120)
-    initial_cash: float | None = Field(default=None, gt=0)
-    enabled: bool = True
-    mode: str = Field(default="confirm", pattern="^(observe|confirm|auto)$")
-    schedule_time: str = Field(default="15:10", pattern=r"^\d{2}:\d{2}$")
-    weekdays: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
-    execution_key: str | None = Field(default=None, max_length=255)
-
-
-class GenerateCandidateRequest(BaseModel):
-    objective: str = Field(..., min_length=3, max_length=4000)
-    ticker: str = Field(..., min_length=6, max_length=16)
-    asset_type: AssetType = AssetType.ETF
-    start_date: str
-    end_date: str
-    initial_capital: float = Field(default=1_000_000, gt=0)
 
 
 class ReviewCandidateRequest(BaseModel):
@@ -59,15 +37,6 @@ async def list_deployments(
 @router.get("/candidates")
 async def list_strategy_candidates(status: str | None = None):
     return {"candidates": [item.model_dump(mode="json") for item in await strategy_candidates.list(status=status)]}
-
-
-@router.post("/candidates/generate")
-async def generate_strategy_candidate(req: GenerateCandidateRequest):
-    try:
-        candidate = await strategy_candidates.generate(**req.model_dump())
-        return candidate.model_dump(mode="json")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/candidates/{candidate_id}")
@@ -106,20 +75,6 @@ async def get_deployment(deployment_id: str):
         return (await deployment_service.get(deployment_id)).model_dump(mode="json")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.post("/experiments/{experiment_id}")
-async def deploy_experiment(experiment_id: str, req: DeployExperimentRequest):
-    try:
-        deployment = await deployment_service.create_from_experiment(
-            experiment_id,
-            **req.model_dump(),
-        )
-        return deployment.model_dump(mode="json")
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/{deployment_id}/activate")

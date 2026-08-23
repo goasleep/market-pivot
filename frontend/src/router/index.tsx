@@ -20,11 +20,6 @@ const SettingsPage = lazy(() =>
     default: module.SettingsPage,
   })),
 );
-const AutomationPage = lazy(() =>
-  import("@/pages/automation").then((module) => ({
-    default: module.AutomationPage,
-  })),
-);
 const RecordsPage = lazy(() =>
   import("@/pages/records").then((module) => ({ default: module.RecordsPage })),
 );
@@ -76,14 +71,6 @@ export const router = createBrowserRouter([
         element: (
           <RouteElement>
             <PortfolioPage />
-          </RouteElement>
-        ),
-      },
-      {
-        path: "/automation/:accountId?",
-        element: (
-          <RouteElement>
-            <AutomationPage />
           </RouteElement>
         ),
       },
