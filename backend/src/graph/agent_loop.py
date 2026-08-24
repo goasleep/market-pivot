@@ -55,6 +55,7 @@ def tool_attempts(name: str) -> int:
         "design_and_run_backtest",
         "compare_strategy_backtests",
         "design_and_run_sandbox_strategy",
+        "query_market_data",
     }:
         return 1
     return 1 if name.startswith(("submit_", "cancel_", "create_", "fill_")) else 2

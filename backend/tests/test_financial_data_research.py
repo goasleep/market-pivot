@@ -10,12 +10,14 @@ from agents.stock_agent import StockAgent
 from application.chat_service import ChatStore, ChatTaskInput, ChatTaskManager
 from application.data_analysis_sandbox import run_data_analysis, validate_analysis_source
 from application.financial_task_planner import compile_financial_task_spec
-from application.market_data_query import MarketDataQueryService
+from application.market_data_query import MarketDataQueryError, MarketDataQueryService
 from application.research_sandbox import SandboxError
 from data import dividend_provider
 from graph.checkpointing import checkpoint_manager
 from graph.research_plan import configure_research_plan_graph
+from models.financial_task import ResearchAssetType
 from models.market_data import DatasetCoverage, MarketDataResult, TaskAcceptanceResult
+from tools.market_data import build_market_data_tools
 
 PROMPT = "根据A股市场近6年分红数据，筛选每年均有分红的股票，按每股分红从大到小排序，输出排序结果表格。"
 
@@ -85,6 +87,55 @@ def test_dividend_task_compiles_to_a_machine_checkable_six_year_contract():
     assert spec.periods == [2020, 2021, 2022, 2023, 2024, 2025]
     assert spec.output.preview_limit == 30
     assert {item.criterion for item in spec.acceptance} >= {"period_coverage", "sorted", "non_empty"}
+
+
+def test_query_market_data_exposes_the_complete_financial_task_schema():
+    tool = next(item for item in build_market_data_tools() if item.name == "query_market_data")
+    schema = tool.args_schema.model_json_schema()
+
+    task_schema = schema["$defs"]["FinancialTaskSpec"]
+    assert {"objective", "operation", "asset_type", "dataset_requirements"} <= set(task_schema["required"])
+    assert set(schema["$defs"]["FinancialOperation"]["enum"]) == {
+        "screen",
+        "rank",
+        "aggregate",
+        "time_series",
+        "compare",
+        "analyze",
+        "backtest",
+    }
+    assert "dataset_id" in schema["$defs"]["DatasetRequirement"]["required"]
+
+
+@pytest.mark.asyncio
+async def test_query_market_data_returns_safe_structured_validation_error():
+    tool = next(item for item in build_market_data_tools() if item.name == "query_market_data")
+
+    payload = json.loads(await tool.ainvoke({"task_spec": {"asset_type": "etf"}}))
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_task_spec"
+    assert "validation errors" not in payload["error"]["message"]
+    assert "pydantic.dev" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_market_data_query_rejects_an_incompatible_asset_before_provider_access(monkeypatch):
+    spec = compile_financial_task_spec(
+        {"message": PROMPT, "asset_type": "stock"},
+        as_of=date(2026, 8, 23),
+    )
+    assert spec is not None
+    incompatible = spec.model_copy(update={"asset_type": ResearchAssetType.ETF})
+
+    async def forbidden_fetch(_periods):
+        raise AssertionError("an incompatible dataset must not reach the provider")
+
+    monkeypatch.setattr("application.market_data_query.fetch_cash_dividends", forbidden_fetch)
+    with pytest.raises(MarketDataQueryError) as error:
+        await MarketDataQueryService().execute(incompatible)
+
+    assert error.value.code == "dataset_asset_mismatch"
 
 
 @pytest.mark.asyncio

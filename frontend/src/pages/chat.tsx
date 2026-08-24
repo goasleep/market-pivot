@@ -136,15 +136,18 @@ export function ChatPage() {
     return () => desktop.removeEventListener("change", syncSidebar);
   }, []);
 
-  // `sending` represents the single task running on this chat page. Navigation
-  // stays locked until the task reaches a terminal state so the reconnect
-  // effect remains attached to the conversation that owns the stream.
-  const activeConversationSending = Boolean(
-    activeConversation?.messages.some(
+  // `sending` protects the page's single live stream from concurrent sends.
+  // Navigation remains available because stream events are written back by
+  // conversationId/taskId rather than by whichever conversation is visible.
+  const activeConversationTaskId = [
+    ...(activeConversation?.messages || []),
+  ]
+    .reverse()
+    .find(
       (message) =>
         message.role === "assistant" && message.loading && message.taskId,
-    ),
-  );
+    )?.taskId;
+  const activeConversationSending = Boolean(activeConversationTaskId);
 
   const selectedReferences = activeConversation
     ? referencesByConversation[activeConversation.conversationId] ||
@@ -245,7 +248,6 @@ export function ChatPage() {
   );
 
   const startNewConversation = () => {
-    if (sending) return;
     const conversation = newConversation();
     setStore((current) => ({
       activeId: conversation.conversationId,
@@ -302,7 +304,6 @@ export function ChatPage() {
   };
 
   const openConversation = (conversationId: string) => {
-    if (sending) return;
     setStore((current) => ({ ...current, activeId: conversationId }));
     setInput("");
     setEditingMessageIndex(null);
@@ -873,16 +874,18 @@ export function ChatPage() {
   );
 
   const stopGeneration = useCallback(() => {
-    const taskId = activeTaskIdRef.current;
+    const taskId = activeConversationTaskId;
     if (taskId) {
       void fetch(`/api/chat/tasks/${encodeURIComponent(taskId)}/cancel`, {
         method: "POST",
       }).catch(() => {
-        // The local abort still closes the stream if the cancel request fails.
+        // Keep the local stream available to report a backend cancellation failure.
       });
     }
-    abortControllerRef.current?.abort();
-  }, []);
+    if (taskId && activeTaskIdRef.current === taskId) {
+      abortControllerRef.current?.abort();
+    }
+  }, [activeConversationTaskId]);
 
   const resumedTaskId = useMemo(() => {
     const pendingMessage = [...(activeConversation?.messages || [])]
@@ -897,7 +900,7 @@ export function ChatPage() {
   useEffect(() => {
     if (!resumedTaskId || abortControllerRef.current) return;
     activeTaskIdRef.current = resumedTaskId;
-    if (!sending) setSending(true);
+    setSending(true);
 
     const conversationId = activeConversation?.conversationId;
     if (!conversationId) return;
@@ -1018,6 +1021,13 @@ export function ChatPage() {
           await waitBeforeReconnect();
         }
       }
+      if (
+        !disposed &&
+        reconnectController.signal.aborted &&
+        !terminalStatus
+      ) {
+        terminalStatus = "cancelled";
+      }
       if (!disposed) {
         if (terminalStatus) {
           updateConversation(conversationId, (item) => ({
@@ -1043,6 +1053,10 @@ export function ChatPage() {
       reconnectController.abort();
       if (abortControllerRef.current === reconnectController) {
         abortControllerRef.current = null;
+        if (activeTaskIdRef.current === resumedTaskId) {
+          activeTaskIdRef.current = null;
+        }
+        setSending(false);
       }
     };
   }, [
@@ -1214,7 +1228,6 @@ export function ChatPage() {
           <Button
             className="w-full justify-start gap-2"
             onClick={startNewConversation}
-            disabled={sending}
           >
             <Plus className="h-4 w-4" />
             新对话
@@ -1264,13 +1277,14 @@ export function ChatPage() {
                     onClick={() =>
                       openConversation(conversation.conversationId)
                     }
-                    disabled={sending}
                   >
                     <span className="block truncate text-sm">
                       {conversation.title}
                     </span>
                     <span className="block text-[11px] text-muted-foreground">
-                      {formatRelativeTime(conversation.updatedAt)}
+                      {hasRunningTask(conversation)
+                        ? "Agent 正在后台执行"
+                        : formatRelativeTime(conversation.updatedAt)}
                     </span>
                   </button>
                 )}
@@ -1335,7 +1349,6 @@ export function ChatPage() {
             variant="outline"
             size="sm"
             onClick={startNewConversation}
-            disabled={sending}
             className="hidden gap-1.5 sm:flex"
           >
             <Plus className="h-4 w-4" />

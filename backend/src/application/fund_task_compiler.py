@@ -136,9 +136,12 @@ def compile_fund_task(
     safety = evaluate_fund_safety(message, mutation_requested=mutation_requested)
     instruments = resolve_fund_instruments(message, tickers, asset_type=asset_type)
     verified = [item for item in instruments if item.status == InstrumentResolutionStatus.VERIFIED]
+    product_type = _product_type(text)
+    if product_type == "unknown" and asset_type in {"etf", "lof"}:
+        product_type = asset_type
     subject = FundSubject(
         scope="fund_instrument" if instruments else "fund_concept",
-        product_type=_product_type(text),
+        product_type=product_type,
     )
 
     if safety.action in {RiskPolicyAction.REFUSE_GUARANTEE, RiskPolicyAction.BLOCK}:

@@ -181,6 +181,19 @@ def test_task_tool_surface_is_allowlisted():
     assert "get_realtime_quote" not in mutation_names
 
 
+def test_etf_universe_task_does_not_expose_an_unavailable_structured_dataset_query():
+    spec = compile_fund_task("筛选近6年每年都分红的ETF", asset_type="etf")
+    assert spec is not None
+    assert spec.task_kind == FundTaskKind.UNIVERSE_RESEARCH
+    assert spec.subject.product_type == "etf"
+
+    names = {tool.name for tool in build_task_tools(spec, assets.get_realtime_quote, allow_mutating_tools=False)}
+
+    assert "search_market_data_catalog" in names
+    assert "screen_assets" in names
+    assert "query_market_data" not in names
+
+
 @pytest.mark.asyncio
 async def test_safety_response_is_deterministic_and_does_not_call_llm(monkeypatch):
     _, spec = _compile(101)

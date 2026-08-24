@@ -28,8 +28,8 @@ class ResearchAssetType(str, Enum):
 
 
 class DatasetRequirement(BaseModel):
-    concept: str
-    dataset_id: str | None = None
+    concept: str = Field(min_length=1)
+    dataset_id: str = Field(min_length=1)
     required_fields: list[str] = Field(default_factory=list)
     semantics: dict[str, str] = Field(default_factory=dict)
 
@@ -69,10 +69,10 @@ class OutputContract(BaseModel):
 class FinancialTaskSpec(BaseModel):
     """Machine-checkable task description produced before data access."""
 
-    objective: str
+    objective: str = Field(min_length=1)
     operation: FinancialOperation
     asset_type: ResearchAssetType
-    dataset_requirements: list[DatasetRequirement]
+    dataset_requirements: list[DatasetRequirement] = Field(min_length=1)
     periods: list[int] = Field(default_factory=list)
     filters: list[dict[str, Any]] = Field(default_factory=list)
     transforms: list[TransformInstruction] = Field(default_factory=list)

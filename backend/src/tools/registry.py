@@ -2,6 +2,7 @@
 
 from langchain_core.tools import StructuredTool
 
+from data.market_data_catalog import market_data_catalog
 from models.fund_task import FundTaskKind, FundTaskSpec
 from tools import artifacts, assets, data, methodology, research, simulation
 from tools.market_data import build_market_data_tools
@@ -139,4 +140,16 @@ def build_task_tools(
         task_id=task_id,
     )
     allowed = _FUND_TASK_TOOL_ALLOWLISTS.get(task_spec.task_kind, set())
-    return [tool for tool in candidates if tool.name in allowed]
+    market_data_asset_type = (
+        task_spec.subject.product_type if task_spec.subject.product_type in {"etf", "lof"} else "fund"
+    )
+    return [
+        tool
+        for tool in candidates
+        if tool.name in allowed
+        and not (
+            tool.name == "query_market_data"
+            and task_spec.task_kind == FundTaskKind.UNIVERSE_RESEARCH
+            and not market_data_catalog.supports_asset_type(market_data_asset_type)
+        )
+    ]

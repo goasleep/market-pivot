@@ -63,6 +63,16 @@ class MarketDataCatalog:
         except KeyError as exc:
             raise ValueError(f"未知市场数据集: {dataset_id}") from exc
 
+    def supports_asset_type(self, asset_type: str) -> bool:
+        """Return whether the catalog contains a dataset for this research asset type."""
+        return any(self.supports_dataset_asset_type(dataset, asset_type) for dataset in self._datasets.values())
+
+    @staticmethod
+    def supports_dataset_asset_type(dataset: DatasetDefinition, asset_type: str) -> bool:
+        return asset_type in dataset.asset_types or (
+            asset_type == "fund" and any(item in dataset.asset_types for item in ("etf", "lof"))
+        )
+
     def search(self, query: str, *, asset_type: str | None = None, limit: int = 5) -> list[DatasetDefinition]:
         """Rank datasets by catalog vocabulary; this selects data, not conversation routes."""
         normalized = re.sub(r"\s+", " ", query.lower()).strip()
@@ -73,9 +83,7 @@ class MarketDataCatalog:
         }
         scored: list[tuple[int, DatasetDefinition]] = []
         for dataset in self._datasets.values():
-            if asset_type and asset_type not in dataset.asset_types and not (
-                asset_type == "fund" and any(item in dataset.asset_types for item in ("etf", "lof"))
-            ):
+            if asset_type and not self.supports_dataset_asset_type(dataset, asset_type):
                 continue
             if dataset.required_query_terms and not any(
                 term.lower() in normalized for term in dataset.required_query_terms

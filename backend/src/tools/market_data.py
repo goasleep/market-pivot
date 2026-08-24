@@ -8,7 +8,7 @@ from typing import Any
 from langchain_core.tools import StructuredTool, tool
 from loguru import logger
 
-from application.market_data_query import market_data_query_service
+from application.market_data_query import MarketDataQueryError, market_data_query_service
 from artifacts.service import artifact_service
 from data.market_data_catalog import market_data_catalog
 from models.financial_task import FinancialTaskSpec
@@ -16,6 +16,25 @@ from models.financial_task import FinancialTaskSpec
 
 def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _format_task_validation_error(exc: Exception) -> str:
+    details = []
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        for error in errors():
+            location = ".".join(str(item) for item in error.get("loc", ()))
+            details.append({"field": location, "message": str(error.get("msg") or "格式不正确")})
+    return _dump(
+        {
+            "ok": False,
+            "error": {
+                "code": "invalid_task_spec",
+                "message": "市场数据查询参数不符合 FinancialTaskSpec 契约",
+                "details": details,
+            },
+        }
+    )
 
 
 @tool
@@ -35,10 +54,13 @@ async def search_market_data_catalog(query: str, asset_type: str | None = None, 
 def build_market_data_tools(
     *, conversation_id: str | None = None, task_id: str | None = None
 ) -> list[StructuredTool]:
-    async def query_market_data(task_spec: dict[str, Any]) -> str:
+    async def query_market_data(task_spec: FinancialTaskSpec) -> str:
         """查询一个已解析的数据集，并执行受限变换与验收。"""
-        spec = FinancialTaskSpec.model_validate(task_spec)
-        result, csv_content = await market_data_query_service.execute(spec)
+        spec = task_spec
+        try:
+            result, csv_content = await market_data_query_service.execute(spec)
+        except MarketDataQueryError as exc:
+            return _dump({"ok": False, "error": {"code": exc.code, "message": exc.message}})
         payload = result.model_dump(mode="json")
         if csv_content:
             years = spec.periods
@@ -81,10 +103,13 @@ def build_market_data_tools(
         coroutine=query_market_data,
         name="query_market_data",
         description=(
-            "按 FinancialTaskSpec 查询结构化股票/基金数据集。工具内部执行固定 Polars 变换、覆盖率检查、"
+            "按 FinancialTaskSpec 查询已解析的结构化市场数据集。必须先调用 "
+            "search_market_data_catalog，且仅可使用其返回的 dataset_id；当 available=false 时禁止调用本工具。"
+            "工具内部执行固定 Polars 变换、覆盖率检查、"
             "任务验收并在需要时生成完整 CSV。默认不要传 Python；只有声明式 DSL 无法表达时，"
             "才可使用隔离、无网络、无文件权限的数据分析沙盒回退。"
         ),
+        handle_validation_error=_format_task_validation_error,
     )
     return [search_market_data_catalog, query_tool]
 

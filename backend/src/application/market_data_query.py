@@ -20,6 +20,15 @@ from models.financial_task import FinancialTaskSpec
 from models.market_data import DatasetCoverage, MarketDataResult
 
 
+class MarketDataQueryError(ValueError):
+    """A stable, user-safe market-data capability or contract error."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 def rows_to_csv(rows: list[dict[str, Any]], columns: list[str]) -> str:
     output = io.StringIO()
     output.write("\ufeff")
@@ -33,10 +42,25 @@ class MarketDataQueryService:
     async def execute(self, spec: FinancialTaskSpec) -> tuple[MarketDataResult, str | None]:
         dataset_id = spec.primary_dataset_id
         if not dataset_id:
-            raise ValueError("金融任务缺少 dataset_id")
-        market_data_catalog.get(dataset_id)
+            raise MarketDataQueryError("invalid_task_spec", "市场数据查询缺少已解析的 dataset_id")
+        try:
+            dataset = market_data_catalog.get(dataset_id)
+        except ValueError as exc:
+            raise MarketDataQueryError(
+                "dataset_unavailable",
+                f"当前市场数据目录未登记数据集 {dataset_id}",
+            ) from exc
+        if not market_data_catalog.supports_dataset_asset_type(dataset, spec.asset_type.value):
+            supported = "、".join(dataset.asset_types)
+            raise MarketDataQueryError(
+                "dataset_asset_mismatch",
+                f"数据集 {dataset_id} 仅支持 {supported}，不支持 {spec.asset_type.value}",
+            )
         if dataset_id != "cn_a_share_cash_dividends":
-            raise ValueError(f"数据集尚未配置查询适配器: {dataset_id}")
+            raise MarketDataQueryError(
+                "dataset_adapter_unavailable",
+                f"数据集 {dataset_id} 尚未配置查询适配器",
+            )
 
         source_rows, counts = await fetch_cash_dividends(spec.periods)
         returned_periods = sorted(year for year, count in counts.items() if count > 0)

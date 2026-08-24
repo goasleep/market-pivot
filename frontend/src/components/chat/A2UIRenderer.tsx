@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { EChartsOption } from "echarts";
 import type { ECharts } from "echarts/core";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -1454,6 +1456,18 @@ function MarkdownContent({ text }: { text: string }) {
       index += 1;
       continue;
     }
+    const displayMath = readDisplayMath(lines, index);
+    if (displayMath) {
+      blocks.push(
+        <MathExpression
+          key={`math-${index}`}
+          expression={displayMath.expression}
+          displayMode
+        />,
+      );
+      index = displayMath.nextIndex;
+      continue;
+    }
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       const level = heading[1].length;
@@ -1518,7 +1532,8 @@ function MarkdownContent({ text }: { text: string }) {
     while (
       index < lines.length &&
       lines[index].trim() &&
-      !/^(#{1,6})\s|^\s*[-*]\s+|^\s*\d+\.\s+|^\s*\|/.test(lines[index])
+      !/^(#{1,6})\s|^\s*[-*]\s+|^\s*\d+\.\s+|^\s*\|/.test(lines[index]) &&
+      !isDisplayMathStart(lines[index])
     ) {
       paragraph.push(lines[index]);
       index += 1;
@@ -1533,6 +1548,80 @@ function MarkdownContent({ text }: { text: string }) {
     );
   }
   return <div className="space-y-3">{blocks}</div>;
+}
+
+function isDisplayMathStart(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    trimmed === "\\[" ||
+    trimmed === "$$" ||
+    trimmed.startsWith("\\[") ||
+    trimmed.startsWith("$$")
+  );
+}
+
+function readDisplayMath(
+  lines: string[],
+  startIndex: number,
+): { expression: string; nextIndex: number } | null {
+  const firstLine = lines[startIndex].trim();
+  const delimiters = [
+    { open: "\\[", close: "\\]" },
+    { open: "$$", close: "$$" },
+  ];
+
+  for (const { open, close } of delimiters) {
+    if (!firstLine.startsWith(open)) continue;
+    if (
+      firstLine.length > open.length + close.length &&
+      firstLine.endsWith(close)
+    ) {
+      return {
+        expression: firstLine.slice(open.length, -close.length).trim(),
+        nextIndex: startIndex + 1,
+      };
+    }
+    if (firstLine !== open) continue;
+
+    const expressionLines: string[] = [];
+    for (let index = startIndex + 1; index < lines.length; index += 1) {
+      if (lines[index].trim() === close) {
+        const expression = expressionLines.join("\n").trim();
+        return expression
+          ? { expression, nextIndex: index + 1 }
+          : null;
+      }
+      expressionLines.push(lines[index]);
+    }
+  }
+  return null;
+}
+
+function MathExpression({
+  expression,
+  displayMode = false,
+}: {
+  expression: string;
+  displayMode?: boolean;
+}) {
+  const html = katex.renderToString(expression, {
+    displayMode,
+    throwOnError: false,
+    strict: "ignore",
+    trust: false,
+    output: "htmlAndMathml",
+  });
+  return displayMode ? (
+    <div
+      className="max-w-full overflow-x-auto py-1 text-base"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  ) : (
+    <span
+      className="inline-block max-w-full align-middle"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
 
 function MarkdownTable({ lines }: { lines: string[] }) {
@@ -1617,18 +1706,54 @@ function inlineMarkdown(text: string): ReactNode {
 }
 
 function inlineMarkdownTokens(text: string, keyOffset: number): ReactNode[] {
-  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, index) => {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).flatMap((part, index) => {
     const key = keyOffset + index;
     if (part.startsWith("**") && part.endsWith("**"))
-      return <strong key={key}>{part.slice(2, -2)}</strong>;
+      return (
+        <strong key={key}>
+          {inlineMathTokens(part.slice(2, -2), `strong-${key}`)}
+        </strong>
+      );
     if (part.startsWith("`") && part.endsWith("`"))
       return (
         <code key={key} className="rounded bg-muted px-1">
           {part.slice(1, -1)}
         </code>
       );
-    return <span key={key}>{part}</span>;
+    return inlineMathTokens(part, `text-${key}`);
   });
+}
+
+function inlineMathTokens(text: string, keyPrefix: string): ReactNode[] {
+  const pattern = /\\\((.+?)\\\)|(?<!\\)\$([^$\n]+?)(?<!\\)\$/g;
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  let index = 0;
+  while ((match = pattern.exec(text))) {
+    if (match.index > cursor) {
+      nodes.push(
+        <span key={`${keyPrefix}-plain-${index}`}>
+          {text.slice(cursor, match.index)}
+        </span>,
+      );
+      index += 1;
+    }
+    nodes.push(
+      <MathExpression
+        key={`${keyPrefix}-math-${index}`}
+        expression={match[1] || match[2]}
+      />,
+    );
+    index += 1;
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) {
+    nodes.push(
+      <span key={`${keyPrefix}-plain-${index}`}>{text.slice(cursor)}</span>,
+    );
+  }
+  return nodes.length ? nodes : [<span key={`${keyPrefix}-plain`}>{text}</span>];
 }
 
 function trimUrlSuffix(rawUrl: string): { url: string; suffix: string } {

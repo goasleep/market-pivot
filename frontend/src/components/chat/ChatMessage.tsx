@@ -103,6 +103,41 @@ function messageText(message: ChatMessageData): string {
     .join("\n");
 }
 
+async function copyPlainText(content: string): Promise<void> {
+  let clipboardError: unknown;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(content);
+      return;
+    } catch (error) {
+      clipboardError = error;
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  const previouslyFocused = document.activeElement;
+  textarea.value = content;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.inset = "0";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  try {
+    if (!document.execCommand("copy")) {
+      throw clipboardError instanceof Error
+        ? clipboardError
+        : new Error("浏览器未允许访问剪贴板");
+    }
+  } finally {
+    textarea.remove();
+    if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
+  }
+}
+
 function formatMessageTime(value?: string) {
   if (!value) return "";
   const date = new Date(value);
@@ -127,23 +162,34 @@ export function ChatMessage({
   onInteraction,
 }: ChatMessageProps) {
   const isUser = message.role === "user";
-  const [copied, setCopied] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<
+    "idle" | "copied" | "failed"
+  >("idle");
   const references = (message.references || []).filter(
     (reference) => reference.url,
   );
   const timestamp = formatMessageTime(message.createdAt);
+  const copyContent = messageText(message);
 
   const copyMessage = async () => {
-    const content = messageText(message);
-    if (!content) return;
+    if (!copyContent) return;
     try {
-      await navigator.clipboard.writeText(content);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
+      await copyPlainText(copyContent);
+      setCopyStatus("copied");
     } catch {
-      // Clipboard permissions can be unavailable in embedded browsers.
+      setCopyStatus("failed");
     }
+    window.setTimeout(() => setCopyStatus("idle"), 1600);
   };
+
+  const copyLabel =
+    copyStatus === "copied"
+      ? "已复制"
+      : copyStatus === "failed"
+        ? "复制失败"
+        : isUser
+          ? "复制消息"
+          : "复制回复";
 
   return (
     <div
@@ -339,37 +385,49 @@ export function ChatMessage({
           {timestamp && (!message.loading || isUser) && (
             <span className="mr-1 tabular-nums">{timestamp}</span>
           )}
-          {isUser && (
+          {isUser && copyContent && (
             <button
               type="button"
               onClick={() => void copyMessage()}
-              aria-label="复制消息"
-              title="复制消息"
+              aria-label={copyLabel}
+              title={copyLabel}
               className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground"
             >
-              {copied ? (
+              {copyStatus === "copied" ? (
                 <Check className="h-3.5 w-3.5 text-emerald-600" />
               ) : (
-                <Copy className="h-3.5 w-3.5" />
+                <Copy
+                  className={cn(
+                    "h-3.5 w-3.5",
+                    copyStatus === "failed" && "text-destructive",
+                  )}
+                />
               )}
             </button>
           )}
         </div>
         {!isUser && !message.loading && message.parts.length > 0 && (
           <div className="flex items-center gap-1 text-muted-foreground">
-            <button
-              type="button"
-              onClick={() => void copyMessage()}
-              aria-label="复制回复"
-              title="复制回复"
-              className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground"
-            >
-              {copied ? (
-                <Check className="h-4 w-4 text-emerald-600" />
-              ) : (
-                <Copy className="h-4 w-4" />
-              )}
-            </button>
+            {copyContent && (
+              <button
+                type="button"
+                onClick={() => void copyMessage()}
+                aria-label={copyLabel}
+                title={copyLabel}
+                className="rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground"
+              >
+                {copyStatus === "copied" ? (
+                  <Check className="h-4 w-4 text-emerald-600" />
+                ) : (
+                  <Copy
+                    className={cn(
+                      "h-4 w-4",
+                      copyStatus === "failed" && "text-destructive",
+                    )}
+                  />
+                )}
+              </button>
+            )}
             <button
               type="button"
               onClick={onRegenerate}
