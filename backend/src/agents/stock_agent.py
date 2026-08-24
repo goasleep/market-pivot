@@ -6,17 +6,17 @@ delegating analysis to the existing multi-agent LangGraph workflow.
 
 import json
 import re
+from dataclasses import replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal
 
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
 from loguru import logger
 
-from agents.asset_requests import AssetAgentRequest, AssetIntent, AssetRequestResolver, RequestMode
-from application.fund_response import execute_direct_fund_task
-from application.fund_task_compiler import compile_fund_task, uses_direct_fund_executor
+from agents.asset_requests import AssetAgentRequest, AssetIntent, AssetRequestResolver
 from application.research import research_service
 from application.research_plan import research_plan_service
+from application.task_contract import compile_task_contract
 from graph.agent_loop import (
     get_agent_loop,
     resume_agent_loop,
@@ -26,10 +26,9 @@ from graph.agent_loop import (
 )
 from graph.checkpointing import checkpoint_manager
 from llm.context import select_conversation_history
-from models.fund_task import FundTaskKind
 from models.schemas import AssetType
 from observability import build_trace_config
-from tools.registry import build_artifact_tools, build_chat_tools, build_task_tools
+from tools.registry import build_artifact_tools, build_chat_tools
 
 _HTML_SOURCE_BLOCK = re.compile(
     r"```(?:html|xhtml)?\s*(?:<!doctype\s+html|<html\b).*?```",
@@ -121,6 +120,60 @@ class AssetAgent(AssetRequestResolver):
             ),
         )
 
+    def _research_plan_tool(
+        self,
+        request: AssetAgentRequest,
+        tools: list[StructuredTool],
+    ) -> StructuredTool:
+        async def run_research_plan(
+            objective: str,
+            config: RunnableConfig,
+            ticker: str | None = None,
+            asset_type: Literal["stock", "etf", "lof"] | None = None,
+        ) -> str:
+            """把需要多步骤取证、校验和综合的复杂研究交给 ResearchPlan 子能力。"""
+            child_request = replace(
+                request,
+                message=objective.strip() or request.message,
+                tickers=(ticker,) if ticker else request.tickers,
+                asset_type=AssetType(asset_type) if asset_type else request.asset_type,
+                task_id=f"{request.task_id}:research" if request.task_id else "supervisor-research",
+                allow_mutating_tools=False,
+            )
+            final_text = ""
+            plan: dict[str, Any] = {}
+            observations: list[dict[str, Any]] = []
+            async for event in research_plan_service.stream(
+                self.research_request_payload(child_request),
+                tools,
+                config=config,
+            ):
+                if event.get("type") == "text":
+                    final_text = str(event.get("text") or "")
+                elif event.get("type") == "plan_update" and isinstance(event.get("plan"), dict):
+                    plan = event["plan"]
+                elif event.get("type") == "tool":
+                    observations.append(
+                        {
+                            "name": event.get("name"),
+                            "status": event.get("status"),
+                            "result": str(event.get("result") or "")[:4000],
+                        }
+                    )
+            return json.dumps(
+                {"final_response": final_text, "plan": plan, "observations": observations[-20:]},
+                ensure_ascii=False,
+            )
+
+        return StructuredTool.from_function(
+            coroutine=run_research_plan,
+            name="run_research_plan",
+            description=(
+                "执行需要多步骤数据获取、依赖排序、验证和综合的研究子任务。"
+                "简单查询优先直接调用原子工具；复杂比较或多来源研究可调用本工具。结果必须返回 Supervisor 再判断。"
+            ),
+        )
+
     async def chat(
         self,
         request: AssetAgentRequest,
@@ -136,32 +189,18 @@ class AssetAgent(AssetRequestResolver):
                 "resume": {"request": self.request_payload(request)},
             }
             return
-        task_spec = compile_fund_task(
+        task_contract = compile_task_contract(
             request.message,
             tickers=request.tickers,
             asset_type=request.asset_type.value,
             mutation_requested=request.allow_mutating_tools,
         )
-        if task_spec is not None and uses_direct_fund_executor(task_spec):
-            yield {
-                "type": "execution_metadata",
-                "execution_version": 3,
-                "graph_name": "fund-task-orchestrator",
-                "thread_id": request.task_id,
-                "task_spec": task_spec.model_dump(mode="json"),
-            }
-            yield {
-                "type": "reasoning",
-                "text": f"已识别为基金任务：{task_spec.task_kind.value}；本题不需要调用市场数据工具。",
-            }
-            answer, acceptance = await execute_direct_fund_task(request.message, task_spec)
-            yield {
-                "type": "task_outcome",
-                "task_spec": task_spec.model_dump(mode="json"),
-                "acceptance": acceptance.model_dump(mode="json"),
-            }
-            yield {"type": "text", "text": answer}
-            return
+        yield {
+            "type": "execution_metadata",
+            "graph_name": "supervisor-agent",
+            "thread_id": request.task_id,
+            "task_contract": task_contract.model_dump(mode="json"),
+        }
         analysis_tool = self._analysis_tool(
             progress_callback,
             conversation_id=request.conversation_id,
@@ -171,53 +210,21 @@ class AssetAgent(AssetRequestResolver):
             conversation_id=request.conversation_id,
             task_id=request.task_id,
         )
-        tools = (
-            build_task_tools(
-                task_spec,
-                analysis_tool,
-                artifact_tools=artifact_tools,
-                allow_mutating_tools=request.allow_mutating_tools,
-                conversation_id=request.conversation_id,
-                task_id=request.task_id,
-            )
-            if task_spec is not None
-            else build_chat_tools(
-                analysis_tool,
-                artifact_tools=artifact_tools,
-                allow_mutating_tools=request.allow_mutating_tools,
-                conversation_id=request.conversation_id,
-                task_id=request.task_id,
-            )
+        tools = build_chat_tools(
+            analysis_tool,
+            artifact_tools=artifact_tools,
+            allow_mutating_tools=request.allow_mutating_tools,
+            conversation_id=request.conversation_id,
+            task_id=request.task_id,
         )
-        if (
-            request.mode == RequestMode.FINANCIAL_RESEARCH
-            and request.intent != AssetIntent.PORTFOLIO
-            and (task_spec is None or task_spec.task_kind != FundTaskKind.UNIVERSE_RESEARCH)
-            and not request.allow_mutating_tools
-            and request.task_id
-            and checkpoint_manager.saver is not None
-        ):
-            yield {
-                "type": "execution_metadata",
-                "execution_version": 2,
-                "graph_name": "market-research-plan",
-                "thread_id": request.task_id,
-            }
-            research_config = build_trace_config(
-                "market-research-plan",
-                tags=["asset-agent", "research-plan", request.intent.value],
-                metadata={"intent": request.intent.value, "task_id": request.task_id},
-                session_id=request.conversation_id,
-            )
-            async for event in research_plan_service.stream(
-                self.research_request_payload(request),
-                tools,
-                config=research_config,
-            ):
-                yield event
-            return
+        tools.append(self._research_plan_tool(request, tools))
         system = (
-            "你是 Fund Agent 的对话入口。用户意图已经通过系统闸门确认，你只执行该意图范围内的任务；"
+            "你是系统中唯一的 Supervisor Agent。你负责理解任务、选择行动、执行原子工具、必要时委派研究子能力、"
+            "整合证据并完成回答。不要把‘下一步需要查询/核对’当作答案；只要公开数据仍可通过现有工具获得，就继续执行。"
+            "简单任务由你直接完成；复杂、多步骤研究可调用 run_research_plan，综合趋势与风险分析可调用 "
+            "run_fund_or_stock_analysis；所有子能力结果都必须回到你这里再综合。"
+            "用户只给出宽泛产品类别时，主动选择可验证且有代表性的样本，明确披露样本及选择依据；"
+            "只有无法可靠找到候选时才向用户追问。用户意图已经通过系统闸门确认，你只执行该意图范围内的任务；"
             "禁止根据记忆编造行情、历史价格或新闻。行情、历史、新闻、对比和策略都必须通过工具获取。"
             "用户明确指定历史区间时，调用 get_historical_prices 必须传入对应的 start_date 和 end_date。"
             "当前价格、历史价格、成交量、净值、折溢价、技术指标和候选筛选属于结构化市场数据，"
@@ -265,9 +272,10 @@ class AssetAgent(AssetRequestResolver):
         )
         messages: list[Any] = [system_message, *history_selection.messages, current_message]
         final_response = ""
+        completion_result: dict[str, Any] = {}
         artifacts_generated = False
         chat_config = build_trace_config(
-            "asset-agent-chat",
+            "supervisor-agent",
             tags=["asset-agent", "chat", request.intent.value],
             metadata={"intent": request.intent.value},
             session_id=request.conversation_id,
@@ -279,13 +287,20 @@ class AssetAgent(AssetRequestResolver):
             stream_agent_loop(
                 messages,
                 tools,
-                max_steps=12 if task_spec is not None else 100,
+                max_steps=16,
                 config=chat_config,
                 native_interrupts=True,
                 task_id=request.task_id,
+                task_contract=task_contract.model_dump(mode="json"),
             )
             if native_checkpoints
-            else stream_agent_loop(messages, tools, max_steps=12 if task_spec is not None else 100, config=chat_config)
+            else stream_agent_loop(
+                messages,
+                tools,
+                max_steps=16,
+                config=chat_config,
+                task_contract=task_contract.model_dump(mode="json"),
+            )
         )
         async for update in stream:
             native_interrupt = update.get("__interrupt__")
@@ -303,7 +318,7 @@ class AssetAgent(AssetRequestResolver):
                     ],
                     "resume": {
                         "native_checkpoint": True,
-                        "graph_name": "asset-agent-chat",
+                        "graph_name": "supervisor-agent",
                         "thread_id": request.task_id,
                         "interrupt_id": getattr(native_interrupt[0], "id", ""),
                     },
@@ -346,14 +361,22 @@ class AssetAgent(AssetRequestResolver):
                 for event in node_update.get("reasoning_events", []):
                     if isinstance(event, dict) and event.get("text"):
                         yield {"type": "reasoning", "text": str(event["text"])}
+                if isinstance(node_update.get("completion_result"), dict):
+                    completion_result = node_update["completion_result"]
                 if node_update.get("final_response"):
                     final_response = node_update["final_response"]
+        if completion_result:
+            yield {
+                "type": "task_outcome",
+                "task_contract": task_contract.model_dump(mode="json"),
+                "acceptance": completion_result,
+            }
         if final_response:
             text = _compact_generated_report(final_response) if artifacts_generated else final_response
             yield {"type": "text", "text": text}
 
     async def resume_checkpoint(self, request: AssetAgentRequest) -> AsyncIterator[dict[str, Any]]:
-        """Continue a v2 task reclaimed after its worker lease expired."""
+        """Continue a Supervisor task reclaimed after its worker lease expired."""
         if not request.task_id or checkpoint_manager.saver is None:
             async for event in self.chat(request):
                 yield event
@@ -368,10 +391,11 @@ class AssetAgent(AssetRequestResolver):
             conversation_id=request.conversation_id,
             task_id=request.task_id,
         )
+        tools.append(self._research_plan_tool(request, tools))
         config = checkpoint_manager.graph_config(
             request.task_id,
             build_trace_config(
-                "asset-agent-chat-recover",
+                "supervisor-agent-recover",
                 tags=["asset-agent", "chat", request.intent.value],
                 metadata={"intent": request.intent.value, "task_id": request.task_id},
                 session_id=request.conversation_id,
@@ -384,9 +408,17 @@ class AssetAgent(AssetRequestResolver):
             return
         if not snapshot.next:
             final_response = str(snapshot.values.get("final_response") or "")
+            completion_result = snapshot.values.get("completion_result")
+            if isinstance(completion_result, dict):
+                yield {
+                    "type": "task_outcome",
+                    "task_contract": snapshot.values.get("task_contract") or {},
+                    "acceptance": completion_result,
+                }
             if final_response:
                 yield {"type": "text", "text": final_response}
             return
+        completion_result: dict[str, Any] = {}
         async for update in resume_checkpoint_agent_loop(tools, config=config, task_id=request.task_id):
             native_interrupt = update.get("__interrupt__")
             if native_interrupt:
@@ -403,7 +435,7 @@ class AssetAgent(AssetRequestResolver):
                     ],
                     "resume": {
                         "native_checkpoint": True,
-                        "graph_name": "asset-agent-chat",
+                        "graph_name": "supervisor-agent",
                         "thread_id": request.task_id,
                         "interrupt_id": getattr(native_interrupt[0], "id", ""),
                     },
@@ -423,37 +455,21 @@ class AssetAgent(AssetRequestResolver):
                 for event in node_update.get("reasoning_events", []):
                     if isinstance(event, dict) and event.get("text"):
                         yield {"type": "reasoning", "text": str(event["text"])}
+                if isinstance(node_update.get("completion_result"), dict):
+                    completion_result = node_update["completion_result"]
                 if node_update.get("final_response"):
                     yield {"type": "text", "text": str(node_update["final_response"])}
-
-    async def resume_research_checkpoint(self, request: AssetAgentRequest) -> AsyncIterator[dict[str, Any]]:
-        """Continue a reclaimed v2 Research Plan from its latest native checkpoint."""
-        if not request.task_id or checkpoint_manager.saver is None:
-            async for event in self.chat(request):
-                yield event
-            return
-        tools = build_chat_tools(
-            self._analysis_tool(conversation_id=request.conversation_id, task_id=request.task_id),
-            artifact_tools=build_artifact_tools(
-                conversation_id=request.conversation_id,
-                task_id=request.task_id,
-            ),
-            allow_mutating_tools=False,
-            conversation_id=request.conversation_id,
-            task_id=request.task_id,
-        )
-        config = build_trace_config(
-            "market-research-plan-recover",
-            tags=["asset-agent", "research-plan", "recover"],
-            metadata={"task_id": request.task_id},
-            session_id=request.conversation_id,
-        )
-        async for event in research_plan_service.resume(
-            self.research_request_payload(request),
-            tools,
-            config=config,
-        ):
-            yield event
+        if completion_result:
+            yield {
+                "type": "task_outcome",
+                "task_contract": compile_task_contract(
+                    request.message,
+                    tickers=request.tickers,
+                    asset_type=request.asset_type.value,
+                    mutation_requested=request.allow_mutating_tools,
+                ).model_dump(mode="json"),
+                "acceptance": completion_result,
+            }
 
     async def resume_chat(
         self,
@@ -485,6 +501,7 @@ class AssetAgent(AssetRequestResolver):
             conversation_id=request.conversation_id,
             task_id=request.task_id,
         )
+        tools.append(self._research_plan_tool(request, tools))
         approved = option_id == "approve"
         if payload.get("native_checkpoint"):
             thread_id = str(payload.get("thread_id") or request.task_id or "")
@@ -493,12 +510,13 @@ class AssetAgent(AssetRequestResolver):
             resume_config = checkpoint_manager.graph_config(
                 thread_id,
                 build_trace_config(
-                    "asset-agent-chat-resume",
+                    "supervisor-agent-resume",
                     tags=["asset-agent", "chat", request.intent.value],
                     metadata={"intent": request.intent.value, "task_id": request.task_id or ""},
                     session_id=request.conversation_id,
                 ),
             )
+            completion_result: dict[str, Any] = {}
             async for update in resume_native_agent_loop(
                 tools,
                 approved=approved,
@@ -522,7 +540,7 @@ class AssetAgent(AssetRequestResolver):
                         ],
                         "resume": {
                             "native_checkpoint": True,
-                            "graph_name": "asset-agent-chat",
+                            "graph_name": "supervisor-agent",
                             "thread_id": thread_id,
                             "interrupt_id": getattr(native_interrupt[0], "id", ""),
                         },
@@ -542,8 +560,21 @@ class AssetAgent(AssetRequestResolver):
                     for event in node_update.get("reasoning_events", []):
                         if isinstance(event, dict) and event.get("text"):
                             yield {"type": "reasoning", "text": str(event["text"])}
+                    if isinstance(node_update.get("completion_result"), dict):
+                        completion_result = node_update["completion_result"]
                     if node_update.get("final_response"):
                         yield {"type": "text", "text": str(node_update["final_response"])}
+            if completion_result:
+                yield {
+                    "type": "task_outcome",
+                    "task_contract": compile_task_contract(
+                        request.message,
+                        tickers=request.tickers,
+                        asset_type=request.asset_type.value,
+                        mutation_requested=request.allow_mutating_tools,
+                    ).model_dump(mode="json"),
+                    "acceptance": completion_result,
+                }
             return
         if not approved:
             yield {
@@ -556,7 +587,24 @@ class AssetAgent(AssetRequestResolver):
                 ),
             }
             yield {"type": "text", "text": "已取消该工具操作，未执行任何订单或外部副作用。"}
+            yield {
+                "type": "task_outcome",
+                "task_contract": compile_task_contract(
+                    request.message,
+                    tickers=request.tickers,
+                    asset_type=request.asset_type.value,
+                    mutation_requested=request.allow_mutating_tools,
+                ).model_dump(mode="json"),
+                "acceptance": {
+                    "outcome": "partial",
+                    "satisfied": False,
+                    "terminal": True,
+                    "missing": ["用户拒绝的工具操作"],
+                    "reason": "尊重用户拒绝，未执行有副作用的操作",
+                },
+            }
             return
+        completion_result = {}
         async for update in resume_agent_loop(
             payload.get("checkpoint_messages") or [],
             tools,
@@ -564,7 +612,7 @@ class AssetAgent(AssetRequestResolver):
             approved=approved,
             max_steps=100,
             config=build_trace_config(
-                "asset-agent-chat-resume",
+                "supervisor-agent-resume",
                 tags=["asset-agent", "chat", request.intent.value],
                 metadata={"intent": request.intent.value, "task_id": request.task_id or ""},
                 session_id=request.conversation_id,
@@ -601,8 +649,21 @@ class AssetAgent(AssetRequestResolver):
                 for event in node_update.get("reasoning_events", []):
                     if isinstance(event, dict) and event.get("text"):
                         yield {"type": "reasoning", "text": str(event["text"])}
+                if isinstance(node_update.get("completion_result"), dict):
+                    completion_result = node_update["completion_result"]
                 if node_update.get("final_response"):
                     yield {"type": "text", "text": str(node_update["final_response"])}
+        if completion_result:
+            yield {
+                "type": "task_outcome",
+                "task_contract": compile_task_contract(
+                    request.message,
+                    tickers=request.tickers,
+                    asset_type=request.asset_type.value,
+                    mutation_requested=request.allow_mutating_tools,
+                ).model_dump(mode="json"),
+                "acceptance": completion_result,
+            }
 
     async def analyze(
         self,

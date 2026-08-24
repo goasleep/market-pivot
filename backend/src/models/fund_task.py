@@ -99,7 +99,6 @@ class FundTaskSpec(BaseModel):
     allowed_capabilities: list[str] = Field(default_factory=list)
     forbidden_capabilities: list[str] = Field(default_factory=list)
     confidence: float = Field(default=1.0, ge=0, le=1)
-    compiler_version: str = "fund-task-v1"
 
 
 class FundTaskAcceptance(BaseModel):
