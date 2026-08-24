@@ -6,6 +6,7 @@ import {
   type ChatMessageData,
   type ChatInteraction,
   type ChatReference,
+  type TaskOutcomeData,
 } from "@/components/chat/ChatMessage";
 import type { A2UIAction, A2UIMessage } from "@/components/chat/A2UIRenderer";
 import { getLLMConfig, type LLMConfig } from "@/api";
@@ -467,6 +468,19 @@ export function ChatPage() {
     [updateConversation],
   );
 
+  const setAssistantOutcome = useCallback(
+    (conversationId: string, messageIndex: number, outcome: TaskOutcomeData) => {
+      updateConversation(conversationId, (item) => {
+        const messages = [...item.messages];
+        const message = messages[messageIndex];
+        if (!message || message.role !== "assistant") return item;
+        messages[messageIndex] = { ...message, outcome };
+        return { ...item, messages, updatedAt: new Date().toISOString() };
+      });
+    },
+    [updateConversation],
+  );
+
   const appendToTask = useCallback(
     (
       conversationId: string,
@@ -567,6 +581,21 @@ export function ChatPage() {
         }
         return { ...item, messages, updatedAt: new Date().toISOString() };
       });
+    },
+    [updateConversation],
+  );
+
+  const setTaskOutcome = useCallback(
+    (conversationId: string, taskId: string, outcome: TaskOutcomeData) => {
+      updateConversation(conversationId, (item) => ({
+        ...item,
+        messages: item.messages.map((message) =>
+          message.role === "assistant" && message.taskId === taskId
+            ? { ...message, outcome }
+            : message,
+        ),
+        updatedAt: new Date().toISOString(),
+      }));
     },
     [updateConversation],
   );
@@ -699,6 +728,12 @@ export function ChatPage() {
               conversationId,
               assistantIndex,
               data.references as ChatReference[],
+            );
+          if (data.acceptance && typeof data.acceptance === "object")
+            setAssistantOutcome(
+              conversationId,
+              assistantIndex,
+              data.acceptance as TaskOutcomeData,
             );
         };
 
@@ -869,6 +904,7 @@ export function ChatPage() {
       editingMessageIndex,
       sending,
       setAssistantReferences,
+      setAssistantOutcome,
       updateConversation,
     ],
   );
@@ -990,6 +1026,13 @@ export function ChatPage() {
                     conversationId,
                     resumedTaskId,
                     data.references as ChatReference[],
+                  );
+                }
+                if (data.acceptance && typeof data.acceptance === "object") {
+                  setTaskOutcome(
+                    conversationId,
+                    resumedTaskId,
+                    data.acceptance as TaskOutcomeData,
                   );
                 }
                 if (pendingEventId !== null) {

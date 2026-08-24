@@ -11,7 +11,6 @@ from loguru import logger
 
 from agents.fund_agent import fund_agent
 from application.chat_store import ChatStore
-from application.research_plan import RESEARCH_GRAPH_NAME
 from config import resolve_llm_profile
 from llm_runtime import use_llm_profile
 from widgets.a2ui import render_activity, render_markdown, render_research_plan, render_tool_result
@@ -42,8 +41,7 @@ class ChatTaskInput:
     llm_profile_id: str | None = None
     llm_model: str | None = None
     llm_auto: bool = False
-    execution_version: int = 2
-    graph_name: str = "asset-agent-chat"
+    graph_name: str = "supervisor-agent"
     thread_id: str | None = None
     resume_from_checkpoint: bool = False
 
@@ -108,7 +106,6 @@ class ChatTaskManager:
                     state["resume_from_checkpoint"] = bool(
                         record
                         and record["status"] == "interrupted"
-                        and int(state.get("execution_version", 1)) >= 2
                     )
                     resume_interaction = state.get("resume_interaction")
                     await self.start(
@@ -374,22 +371,33 @@ class ChatTaskManager:
             if event.get("type") == "execution_metadata":
                 state = await self.store.get_task_state(task_input.task_id)
                 if state is not None:
-                    state["execution_version"] = int(event.get("execution_version", 2))
                     state["graph_name"] = str(event.get("graph_name") or state.get("graph_name"))
                     state["thread_id"] = str(event.get("thread_id") or task_input.task_id)
-                    if isinstance(event.get("task_spec"), dict):
-                        state["fund_task_spec"] = event["task_spec"]
+                    if isinstance(event.get("task_contract"), dict):
+                        state["task_contract"] = event["task_contract"]
                     await self.store.set_task_state(task_input.task_id, state)
                 continue
             if event.get("type") == "task_outcome":
                 state = await self.store.get_task_state(task_input.task_id)
                 if state is not None:
-                    if isinstance(event.get("task_spec"), dict):
-                        state["fund_task_spec"] = event["task_spec"]
+                    if isinstance(event.get("task_contract"), dict):
+                        state["task_contract"] = event["task_contract"]
                     if isinstance(event.get("acceptance"), dict):
                         state["task_acceptance"] = event["acceptance"]
                         state["outcome_status"] = str(event["acceptance"].get("outcome") or "")
                     await self.store.set_task_state(task_input.task_id, state)
+                await self._broadcast(
+                    task_input.task_id,
+                    {
+                        "event": "task_outcome",
+                        "data": _json(
+                            {
+                                "task_contract": event.get("task_contract") or {},
+                                "acceptance": event.get("acceptance") or {},
+                            }
+                        ),
+                    },
+                )
                 continue
             if event.get("type") == "interaction_required":
                 for artifact in pending_artifacts:
@@ -407,10 +415,6 @@ class ChatTaskManager:
                 if not isinstance(plan, dict):
                     continue
                 state = await self.store.get_task_state(task_input.task_id)
-                if state is not None and state.get("graph_name") != RESEARCH_GRAPH_NAME:
-                    state["execution_version"] = 2
-                    state["graph_name"] = RESEARCH_GRAPH_NAME
-                    state["thread_id"] = task_input.thread_id or task_input.task_id
                 if state is not None:
                     if plan.get("outcome_status"):
                         state["outcome_status"] = str(plan["outcome_status"])
@@ -481,9 +485,7 @@ class ChatTaskManager:
                 auto=task_input.llm_auto,
             )
             with use_llm_profile(profile):
-                if task_input.resume_from_checkpoint and task_input.graph_name == RESEARCH_GRAPH_NAME:
-                    events = asset_agent.resume_research_checkpoint(request)
-                elif task_input.resume_from_checkpoint and hasattr(asset_agent, "resume_checkpoint"):
+                if task_input.resume_from_checkpoint and hasattr(asset_agent, "resume_checkpoint"):
                     events = asset_agent.resume_checkpoint(request)
                 else:
                     events = asset_agent.chat(request)
@@ -502,6 +504,9 @@ class ChatTaskManager:
             record = await self.store.get_task(task_id)
             if record is None or record["status"] == "cancel_requested":
                 raise asyncio.CancelledError
+            state = await self.store.get_task_state(task_id)
+            if not state or not state.get("outcome_status"):
+                raise RuntimeError("Supervisor 在没有完成判定结果的情况下结束")
             if not await self.store.complete_task(task_id):
                 raise asyncio.CancelledError
             await self._broadcast(task_id, {"event": "done", "data": "{}"})
@@ -556,8 +561,7 @@ class ChatTaskManager:
             llm_profile_id=state.get("llm_profile_id"),
             llm_model=state.get("llm_model"),
             llm_auto=bool(state.get("llm_auto", False)),
-            execution_version=int(state.get("execution_version", 1)),
-            graph_name=str(state.get("graph_name") or "asset-agent-chat"),
+            graph_name=str(state.get("graph_name") or "supervisor-agent"),
             thread_id=str(state.get("thread_id") or state["task_id"]),
             resume_from_checkpoint=bool(state.get("resume_from_checkpoint", False)),
         )
@@ -582,8 +586,7 @@ class ChatTaskManager:
             llm_profile_id=state.get("llm_profile_id"),
             llm_model=state.get("llm_model"),
             llm_auto=bool(state.get("llm_auto", False)),
-            execution_version=int(state.get("execution_version", 1)),
-            graph_name=str(state.get("graph_name") or "asset-agent-chat"),
+            graph_name=str(state.get("graph_name") or "supervisor-agent"),
             thread_id=str(state.get("thread_id") or state["task_id"]),
             resume_from_checkpoint=bool(state.get("resume_from_checkpoint", False)),
         )
@@ -632,6 +635,9 @@ class ChatTaskManager:
             record = await self.store.get_task(task_id)
             if record is None or record["status"] == "cancel_requested":
                 raise asyncio.CancelledError
+            state = await self.store.get_task_state(task_id)
+            if not state or not state.get("outcome_status"):
+                raise RuntimeError("Supervisor 在没有完成判定结果的情况下结束恢复任务")
             if not await self.store.complete_task(task_id):
                 raise asyncio.CancelledError
             await self._broadcast(task_id, {"event": "done", "data": "{}"})

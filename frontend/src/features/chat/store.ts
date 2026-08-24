@@ -3,6 +3,7 @@ import type {
   ChatMessageData,
   ChatMessagePart,
   ChatReference,
+  TaskOutcomeData,
 } from "@/components/chat/ChatMessage";
 
 const STORAGE_KEY = "a-share-agent:chat:conversations";
@@ -297,6 +298,10 @@ export function hydrateServerConversation(
         status,
         taskId:
           typeof message.task_id === "string" ? message.task_id : undefined,
+        outcome:
+          message.outcome && typeof message.outcome === "object"
+            ? (message.outcome as TaskOutcomeData)
+            : undefined,
       };
     }),
   };

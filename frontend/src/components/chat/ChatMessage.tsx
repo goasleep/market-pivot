@@ -53,6 +53,14 @@ export interface ChatReference {
   date?: string;
 }
 
+export interface TaskOutcomeData {
+  outcome: "satisfied" | "partial" | "needs_input" | "data_unavailable" | "failed";
+  satisfied: boolean;
+  terminal: boolean;
+  missing?: string[];
+  reason?: string;
+}
+
 export interface ChatMessageData {
   id?: string;
   role: "user" | "assistant";
@@ -70,6 +78,7 @@ export interface ChatMessageData {
     | "waiting_user"
     | "superseded";
   taskId?: string;
+  outcome?: TaskOutcomeData;
 }
 
 interface ChatMessageProps {
@@ -384,6 +393,19 @@ export function ChatMessage({
         >
           {timestamp && (!message.loading || isUser) && (
             <span className="mr-1 tabular-nums">{timestamp}</span>
+          )}
+          {!isUser && !message.loading && message.outcome && (
+            <span className="mr-1 rounded bg-muted px-1.5 py-0.5">
+              {message.outcome.outcome === "satisfied"
+                ? "任务已满足"
+                : message.outcome.outcome === "partial"
+                  ? "部分完成"
+                  : message.outcome.outcome === "needs_input"
+                    ? "等待补充信息"
+                    : message.outcome.outcome === "data_unavailable"
+                      ? "公开数据不可得"
+                      : "任务未完成"}
+            </span>
           )}
           {isUser && copyContent && (
             <button

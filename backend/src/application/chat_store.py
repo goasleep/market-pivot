@@ -161,7 +161,11 @@ class ChatStore:
         return [_text_part(str(item.get("content", "")))]
 
     @staticmethod
-    def _message_payload(row: dict[str, Any], references: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def _message_payload(
+        row: dict[str, Any],
+        references: list[dict[str, Any]] | None = None,
+        outcome: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         status = row["status"]
         return {
             "id": row["message_id"],
@@ -172,6 +176,7 @@ class ChatStore:
             "task_id": row["task_id"],
             "loading": status in {"pending", "running"},
             "references": references or [],
+            "outcome": outcome,
         }
 
     async def _sync_search(
@@ -359,8 +364,7 @@ class ChatStore:
                         "llm_model": llm_model,
                         "llm_auto": llm_auto,
                         "assistant_message_id": assistant_message_id,
-                        "execution_version": 2,
-                        "graph_name": "asset-agent-chat",
+                        "graph_name": "supervisor-agent",
                         "thread_id": task_id,
                     }
                 ),
@@ -617,7 +621,15 @@ class ChatStore:
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
         await self._ensure_ready()
         row = await ChatTask.filter(task_id=task_id).first()
-        return row.__dict__.copy() if row else None
+        if row is None:
+            return None
+        payload = row.__dict__.copy()
+        state = await self.get_task_state(task_id)
+        if state is not None:
+            payload["outcome_status"] = state.get("outcome_status")
+            payload["task_acceptance"] = state.get("task_acceptance")
+            payload["task_contract"] = state.get("task_contract")
+        return payload
 
     async def set_references(self, message_id: str, references: list[dict[str, Any]]) -> None:
         await self._ensure_ready()
@@ -656,12 +668,28 @@ class ChatStore:
             "message_id", "role", "parts_json", "status", "task_id", "created_at"
         )
         refs = await self._references_by_message([row["message_id"] for row in rows])
+        task_ids = [str(row["task_id"]) for row in rows if row.get("task_id")]
+        state_rows = (
+            await ChatTaskState.filter(task_id__in=task_ids).values("task_id", "state_json") if task_ids else []
+        )
+        outcomes: dict[str, dict[str, Any]] = {}
+        for state_row in state_rows:
+            state = json.loads(state_row["state_json"])
+            if isinstance(state.get("task_acceptance"), dict):
+                outcomes[str(state_row["task_id"])] = state["task_acceptance"]
         return {
             "conversation_id": conversation.conversation_id,
             "title": conversation.title,
             "created_at": conversation.created_at,
             "updated_at": conversation.updated_at,
-            "messages": [self._message_payload(row, refs.get(row["message_id"], [])) for row in rows],
+            "messages": [
+                self._message_payload(
+                    row,
+                    refs.get(row["message_id"], []),
+                    outcomes.get(str(row.get("task_id") or "")),
+                )
+                for row in rows
+            ],
         }
 
     async def branch_conversation(
