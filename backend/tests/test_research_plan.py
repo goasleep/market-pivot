@@ -892,16 +892,23 @@ def test_plan_rejects_uncontrolled_step_kind():
         AssetIntent.BACKTEST,
     ],
 )
-async def test_all_readonly_research_intents_use_plan_graph(monkeypatch, intent):
+async def test_all_readonly_research_intents_expose_plan_as_supervisor_tool(monkeypatch, intent):
     calls = []
 
-    class FakePlanService:
-        async def stream(self, request, tools, *, config):
-            calls.append((request["intent"], {item.name for item in tools}, config))
-            yield {"type": "text", "text": "planned"}
+    async def fake_supervisor(messages, tools, **kwargs):
+        calls.append(({item.name for item in tools}, kwargs["task_contract"]))
+        yield {
+            "judge": {
+                "final_response": "supervised",
+                "completion_result": {
+                    "outcome": "satisfied",
+                    "satisfied": True,
+                    "terminal": True,
+                },
+            }
+        }
 
-    monkeypatch.setattr(stock_agent_module, "research_plan_service", FakePlanService())
-    monkeypatch.setattr(stock_agent_module.checkpoint_manager, "saver", object())
+    monkeypatch.setattr(stock_agent_module, "stream_agent_loop", fake_supervisor)
     request = AssetAgentRequest(
         message=f"执行 {intent.value} 研究",
         history=[],
@@ -915,8 +922,9 @@ async def test_all_readonly_research_intents_use_plan_graph(monkeypatch, intent)
     events = [event async for event in StockAgent().chat(request)]
 
     assert events[0]["type"] == "execution_metadata"
-    assert events[-1] == {"type": "text", "text": "planned"}
-    assert calls[0][0] == intent.value
+    assert events[-1] == {"type": "text", "text": "supervised"}
+    assert "run_research_plan" in calls[0][0]
+    assert calls[0][1]["objective"] == request.message
 
 
 @pytest.mark.asyncio

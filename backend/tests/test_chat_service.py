@@ -118,6 +118,11 @@ async def test_chat_task_pauses_and_resumes_after_interaction(store, monkeypatch
             assert interaction["selected_option"] == "quote"
             assert option_id == "quote"
             yield {"type": "text", "text": "已完成行情查询。"}
+            yield {
+                "type": "task_outcome",
+                "task_contract": {"objective": "510300"},
+                "acceptance": {"outcome": "satisfied", "satisfied": True, "terminal": True},
+            }
 
     monkeypatch.setattr(chat_service, "asset_agent", FakeAssetAgent())
     manager = ChatTaskManager(store)
@@ -196,6 +201,11 @@ async def test_chat_task_projects_plan_updates_to_stable_a2ui_surface(store, mon
                 },
             }
             yield {"type": "text", "text": "研究完成。"}
+            yield {
+                "type": "task_outcome",
+                "task_contract": {"objective": "分析 600519"},
+                "acceptance": {"outcome": "satisfied", "satisfied": True, "terminal": True},
+            }
 
     monkeypatch.setattr(chat_service, "asset_agent", FakeAssetAgent())
     manager = ChatTaskManager(store)
@@ -220,7 +230,7 @@ async def test_chat_task_projects_plan_updates_to_stable_a2ui_surface(store, mon
     assert "research-plan-task-plan" in surfaces
     state = await store.get_task_state("task-plan")
     assert state is not None
-    assert state["graph_name"] == "market-research-plan"
+    assert state["graph_name"] == "supervisor-agent"
 
 
 @pytest.mark.asyncio
@@ -259,6 +269,11 @@ async def test_chat_worker_resumes_persisted_interaction_instead_of_restarting(s
             assert resumed_interaction["interaction_id"] == interaction["interaction_id"]
             assert option_id == "quote"
             yield {"type": "text", "text": "已按选择恢复。"}
+            yield {
+                "type": "task_outcome",
+                "task_contract": {"objective": "510300"},
+                "acceptance": {"outcome": "satisfied", "satisfied": True, "terminal": True},
+            }
 
         @staticmethod
         def request_from_payload(payload):

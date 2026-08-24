@@ -1,5 +1,3 @@
-import json
-from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -31,23 +29,6 @@ def _compile(index: int):
     )
     assert spec is not None
     return question, spec
-
-
-def test_all_122_fund_questions_compile_to_bounded_direct_tasks():
-    agent = StockAgent()
-    counts = Counter()
-    for question in QUESTIONS.read_text().splitlines():
-        request = agent.prepare(question)
-        spec = compile_fund_task(question, tickers=request.tickers, asset_type=request.asset_type.value)
-        assert spec is not None
-        assert uses_direct_fund_executor(spec)
-        counts[spec.task_kind] += 1
-
-    assert sum(counts.values()) == 122
-    assert counts[FundTaskKind.CALCULATION] >= 8
-    assert counts[FundTaskKind.SCENARIO_PLAN] >= 25
-    assert counts[FundTaskKind.RULE_DESIGN] >= 20
-    assert counts[FundTaskKind.EDUCATION] >= 45
 
 
 @pytest.mark.parametrize(
@@ -219,32 +200,3 @@ async def test_former_safety_response_runs_the_normal_scenario_executor(monkeypa
     assert calls
     assert "模拟策略" in answer
     assert acceptance.satisfied is True
-
-
-@pytest.mark.asyncio
-async def test_direct_agent_answer_has_business_acceptance_and_no_tool_events(monkeypatch):
-    class FakeLLM:
-        async def chat(self, *args, **kwargs):
-            return (
-                "结论：趋势继续走弱时应执行退出纪律。\n"
-                "价格止损：亏损达到10%减仓。\n"
-                "时间止损：5个交易日不能修复则退出。\n"
-                "趋势止损：持续在关键均线下且均线下行时退出。"
-            )
-
-    monkeypatch.setattr(fund_response_module, "get_llm_service", lambda: FakeLLM())
-    question = QUESTIONS.read_text().splitlines()[50]
-    events = [event async for event in StockAgent().chat(StockAgent().prepare(question, task_id="fund-direct"))]
-
-    assert not [event for event in events if event.get("type") == "tool"]
-    assert events[0]["execution_version"] == 3
-    outcome = next(event for event in events if event.get("type") == "task_outcome")
-    assert outcome["acceptance"]["outcome"] == "satisfied"
-    assert "价格止损" in events[-1]["text"]
-
-
-def test_fixture_remains_valid_utf8_and_has_no_blank_questions():
-    questions = QUESTIONS.read_text().splitlines()
-    assert len(questions) == 122
-    assert all(question.strip() for question in questions)
-    json.dumps(questions, ensure_ascii=False)

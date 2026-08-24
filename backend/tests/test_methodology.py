@@ -64,12 +64,22 @@ def test_chat_tools_register_methodology_search():
 def test_stock_agent_prompt_and_tool_surface_include_methodology(monkeypatch):
     captured: dict[str, object] = {}
 
-    async def fake_stream(messages, tools, *, max_steps, config):
+    async def fake_stream(messages, tools, *, max_steps, config, **kwargs):
         captured["messages"] = messages
         captured["tool_names"] = {tool.name for tool in tools}
         captured["max_steps"] = max_steps
         captured["config"] = config
-        yield {"agent": {"final_response": "已完成方法论检索。"}}
+        captured["task_contract"] = kwargs["task_contract"]
+        yield {
+            "judge": {
+                "final_response": "已完成方法论检索。",
+                "completion_result": {
+                    "outcome": "satisfied",
+                    "satisfied": True,
+                    "terminal": True,
+                },
+            }
+        }
 
     monkeypatch.setattr(stock_agent_module, "stream_agent_loop", fake_stream)
     request = AssetAgentRequest(

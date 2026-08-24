@@ -186,6 +186,7 @@ async def test_data_analysis_sandbox_runs_deterministic_dataframe_transform():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="fixed-root ResearchPlan E2E replaced by the single Supervisor complex-flow acceptance test")
 async def test_chat_end_to_end_returns_accepted_table_without_web_search(store, monkeypatch):
     years = [2020, 2021, 2022, 2023, 2024, 2025]
     row = {
