@@ -28,6 +28,9 @@ class ArtifactStorage(Protocol):
     def get(self, object_key: str) -> bytes:
         """Read one object or raise a storage-specific error."""
 
+    def delete(self, object_key: str) -> None:
+        """Delete exactly one object; missing objects are treated as already deleted."""
+
     def presign_get_url(self, object_key: str, expires_in: int = 900) -> str:
         """Return a temporary HTTP(S) URL suitable for external model input."""
 
@@ -57,6 +60,12 @@ class LocalArtifactStorage:
             return self._path(object_key).read_bytes()
         except FileNotFoundError as exc:
             raise ArtifactNotFoundError(object_key) from exc
+
+    def delete(self, object_key: str) -> None:
+        try:
+            self._path(object_key).unlink()
+        except FileNotFoundError:
+            return
 
     def presign_get_url(self, object_key: str, expires_in: int = 900) -> str:
         del object_key, expires_in
@@ -144,6 +153,9 @@ class S3ArtifactStorage:
                 raise ArtifactNotFoundError(object_key) from exc
             raise
         return response["Body"].read()
+
+    def delete(self, object_key: str) -> None:
+        self._get_client().delete_object(Bucket=self.bucket, Key=object_key)
 
     def presign_get_url(self, object_key: str, expires_in: int = 900) -> str:
         return self._get_presign_client().generate_presigned_url(

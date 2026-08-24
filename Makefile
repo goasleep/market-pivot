@@ -1,4 +1,4 @@
-.PHONY: help init install-hooks install setup dev build up start down restart logs docker-build clean
+.PHONY: help init install-hooks install setup dev build up start down restart logs docker-build clean reset-agent-data
 
 help:
 	@echo "Available commands:"
@@ -13,6 +13,7 @@ help:
 	@echo "  make down         Stop and remove Compose services"
 	@echo "  make restart      Restart Compose services"
 	@echo "  make logs         Follow Compose service logs"
+	@echo "  make reset-agent-data Preview or execute the destructive Agent data reset"
 
 init: setup
 
@@ -57,3 +58,6 @@ logs:
 
 clean:
 	docker compose down --rmi local --volumes --remove-orphans
+
+reset-agent-data:
+	cd backend && PYTHONPATH=src uv run python scripts/reset_agent_data.py $(RESET_ARGS)
