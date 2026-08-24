@@ -28,6 +28,9 @@ class ArtifactStorage(Protocol):
     def get(self, object_key: str) -> bytes:
         """Read one object or raise a storage-specific error."""
 
+    def presign_get_url(self, object_key: str, expires_in: int = 900) -> str:
+        """Return a temporary HTTP(S) URL suitable for external model input."""
+
 
 class LocalArtifactStorage:
     """Explicit local adapter for tests and development-only fixtures."""
@@ -55,6 +58,10 @@ class LocalArtifactStorage:
         except FileNotFoundError as exc:
             raise ArtifactNotFoundError(object_key) from exc
 
+    def presign_get_url(self, object_key: str, expires_in: int = 900) -> str:
+        del object_key, expires_in
+        raise RuntimeError("本地产物存储无法生成供外部模型访问的 HTTP(S) URL")
+
 
 class S3ArtifactStorage:
     """S3 and S3-compatible object storage adapter.
@@ -68,6 +75,7 @@ class S3ArtifactStorage:
         self,
         *,
         endpoint_url: str,
+        public_endpoint_url: str = "",
         bucket: str,
         region: str,
         access_key_id: str,
@@ -76,6 +84,7 @@ class S3ArtifactStorage:
         addressing_style: str = "path",
     ):
         self.endpoint_url = endpoint_url.strip()
+        self.public_endpoint_url = public_endpoint_url.strip() or self.endpoint_url
         self.bucket = bucket.strip()
         self.region = region.strip() or "us-east-1"
         self.access_key_id = access_key_id.strip()
@@ -83,6 +92,23 @@ class S3ArtifactStorage:
         self.session_token = session_token.strip()
         self.addressing_style = addressing_style.strip() or "path"
         self._client = None
+        self._presign_client = None
+
+    def _client_options(self, endpoint_url: str) -> dict:
+        options = {
+            "endpoint_url": endpoint_url or None,
+            "region_name": self.region,
+            "config": Config(s3={"addressing_style": self.addressing_style}),
+        }
+        if self.access_key_id:
+            options.update(
+                {
+                    "aws_access_key_id": self.access_key_id,
+                    "aws_secret_access_key": self.secret_access_key,
+                    "aws_session_token": self.session_token or None,
+                }
+            )
+        return options
 
     def _get_client(self):
         if not self.bucket:
@@ -90,21 +116,16 @@ class S3ArtifactStorage:
         if bool(self.access_key_id) != bool(self.secret_access_key):
             raise RuntimeError("S3_ACCESS_KEY_ID 和 S3_SECRET_ACCESS_KEY 必须同时设置")
         if self._client is None:
-            client_options = {
-                "endpoint_url": self.endpoint_url or None,
-                "region_name": self.region,
-                "config": Config(s3={"addressing_style": self.addressing_style}),
-            }
-            if self.access_key_id:
-                client_options.update(
-                    {
-                        "aws_access_key_id": self.access_key_id,
-                        "aws_secret_access_key": self.secret_access_key,
-                        "aws_session_token": self.session_token or None,
-                    }
-                )
-            self._client = boto3.client("s3", **client_options)
+            self._client = boto3.client("s3", **self._client_options(self.endpoint_url))
         return self._client
+
+    def _get_presign_client(self):
+        self._get_client()
+        if self.public_endpoint_url == self.endpoint_url:
+            return self._client
+        if self._presign_client is None:
+            self._presign_client = boto3.client("s3", **self._client_options(self.public_endpoint_url))
+        return self._presign_client
 
     def put(self, object_key: str, content: bytes, content_type: str) -> None:
         self._get_client().put_object(
@@ -123,3 +144,10 @@ class S3ArtifactStorage:
                 raise ArtifactNotFoundError(object_key) from exc
             raise
         return response["Body"].read()
+
+    def presign_get_url(self, object_key: str, expires_in: int = 900) -> str:
+        return self._get_presign_client().generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": self.bucket, "Key": object_key},
+            ExpiresIn=expires_in,
+        )

@@ -31,6 +31,8 @@ class ResearchService:
         current_price: float | None = None,
         as_of_date: str | None = None,
         is_backtest: bool = False,
+        conversation_id: str | None = None,
+        task_id: str | None = None,
     ) -> dict[str, Any]:
         """Create the canonical state accepted by ``graph.workflow``."""
         normalized_asset_type = AssetType(asset_type)
@@ -58,6 +60,10 @@ class ResearchService:
             state["as_of_date"] = as_of_date
         if is_backtest:
             state["is_backtest"] = True
+        if conversation_id:
+            state["conversation_id"] = conversation_id
+        if task_id:
+            state["task_id"] = task_id
         return state
 
     @staticmethod
@@ -126,12 +132,20 @@ class ResearchService:
         options, checkpointed = self._invoke_options(trace_config)
         runner = workflow_override or get_workflow(checkpointed=checkpointed)
         accumulated = dict(state)
+
+        def merge_update(update: dict[str, Any]) -> None:
+            for key, value in update.items():
+                if key in {"progress", "visual_artifacts"} and isinstance(value, list):
+                    accumulated[key] = [*(accumulated.get(key) or []), *value]
+                else:
+                    accumulated[key] = value
+
         try:
             updates = runner.astream(state, stream_mode="updates", **options)
             async for update in updates:
                 node, node_update = next(iter(update.items()))
                 if isinstance(node_update, dict):
-                    accumulated.update(node_update)
+                    merge_update(node_update)
                 yield {"node": node, "update": node_update, "state": accumulated}
         except TypeError as exc:
             if not options or "unexpected keyword argument 'config'" not in str(exc):
@@ -140,7 +154,7 @@ class ResearchService:
             async for update in runner.astream(state, stream_mode="updates"):
                 node, node_update = next(iter(update.items()))
                 if isinstance(node_update, dict):
-                    accumulated.update(node_update)
+                    merge_update(node_update)
                 yield {"node": node, "update": node_update, "state": accumulated}
 
     async def run(
@@ -154,6 +168,8 @@ class ResearchService:
         current_price: float | None = None,
         as_of_date: str | None = None,
         is_backtest: bool = False,
+        conversation_id: str | None = None,
+        task_id: str | None = None,
         trace_config: dict[str, Any] | None = None,
         workflow_override: Any | None = None,
     ) -> dict[str, Any]:
@@ -167,6 +183,8 @@ class ResearchService:
             current_price=current_price,
             as_of_date=as_of_date,
             is_backtest=is_backtest,
+            conversation_id=conversation_id,
+            task_id=task_id,
         )
         return await self.run_state(
             state,
@@ -185,6 +203,8 @@ class ResearchService:
         current_price: float | None = None,
         as_of_date: str | None = None,
         is_backtest: bool = False,
+        conversation_id: str | None = None,
+        task_id: str | None = None,
         trace_config: dict[str, Any] | None = None,
         workflow_override: Any | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -198,6 +218,8 @@ class ResearchService:
             current_price=current_price,
             as_of_date=as_of_date,
             is_backtest=is_backtest,
+            conversation_id=conversation_id,
+            task_id=task_id,
         )
         async for update in self.stream_state(
             state,

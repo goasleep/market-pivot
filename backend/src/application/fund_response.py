@@ -5,15 +5,14 @@ from __future__ import annotations
 import json
 
 from application.fund_completion import validate_fund_response
-from application.fund_safety import render_safe_alternative
 from domain.fund_calculations import calculate_from_question
 from llm.service import get_llm_service
 from models.fund_task import FundTaskAcceptance, FundTaskKind, FundTaskSpec, TaskOutcome
 
 _SYSTEM = (
-    "你是面向小额个人投资者的基金研究与模拟交易助手，只讨论基金，不执行实盘交易。"
+    "你是面向小额个人投资者的基金研究与模拟交易助手。"
     "回答必须直接完成任务，重点覆盖短中期趋势、入场退出、仓位、回撤、流动性、费用和持有期风险。"
-    "不得保证收益，不得无条件建议满仓，不得把股票研究冒充基金结论。"
+    "区分已知事实、用户假设和模拟结果，不得把股票研究冒充基金结论。"
     "本任务不允许调用实时行情或网页数据；只能使用用户题设、稳定的基金常识和给出的确定性计算。"
     "不要写无来源的当前日期、最新数据、具体净值、基金排名或目标价。"
     "需要参数时可以给明确的示例规则，但必须说明它需要结合具体产品波动和用户风险预算校准。"
@@ -52,13 +51,6 @@ def _prompt(message: str, spec: FundTaskSpec, previous_answer: str = "", missing
 
 
 async def execute_direct_fund_task(message: str, spec: FundTaskSpec) -> tuple[str, FundTaskAcceptance]:
-    if spec.task_kind == FundTaskKind.SAFETY_RESPONSE:
-        answer = render_safe_alternative(spec.safety_decision)
-        return answer, FundTaskAcceptance(
-            outcome=TaskOutcome.REFUSED_WITH_ALTERNATIVE,
-            satisfied=True,
-            checks={"refusal": True, "safe_alternative": True},
-        )
     if spec.task_kind == FundTaskKind.CLARIFICATION:
         answer = _clarification_answer(spec)
         return answer, FundTaskAcceptance(
@@ -70,10 +62,7 @@ async def execute_direct_fund_task(message: str, spec: FundTaskSpec) -> tuple[st
     if spec.task_kind == FundTaskKind.CALCULATION:
         calculation = calculate_from_question(message)
         if calculation is not None:
-            answer = (
-                f"{calculation.render()}\n\n实际费用以基金合同、销售渠道和券商收费规则为准；"
-                "以上只按题设计算，不构成收益承诺。"
-            )
+            answer = f"{calculation.render()}\n\n实际费用以基金合同、销售渠道和券商收费规则为准。"
             return answer, validate_fund_response(spec, answer)
 
     answer = await get_llm_service().chat(

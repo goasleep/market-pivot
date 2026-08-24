@@ -586,6 +586,66 @@ async def test_chat_does_not_repeat_artifacts_already_rendered_in_a2ui_bundle(st
 
 
 @pytest.mark.asyncio
+async def test_chat_keeps_analysis_images_as_previewable_artifact_cards(store, monkeypatch):
+    _, assistant_id = await store.prepare_task(
+        conversation_id="conversation-visual-artifacts",
+        task_id="task-visual-artifacts",
+        message="分析 ETF 510300 并生成图表",
+    )
+    image = {
+        "artifact_id": "artifact-technical-chart",
+        "name": "510300-technical.png",
+        "mime_type": "image/png",
+        "size_bytes": 1024,
+        "preview_url": "/api/artifacts/artifact-technical-chart/preview",
+        "download_url": "/api/artifacts/artifact-technical-chart/download",
+    }
+    report = {
+        "artifact_id": "artifact-report",
+        "name": "510300-report.html",
+        "mime_type": "text/html",
+        "size_bytes": 2048,
+        "preview_url": "/api/artifacts/artifact-report/preview",
+        "download_url": "/api/artifacts/artifact-report/download",
+    }
+
+    class FakeAssetAgent:
+        def prepare(self, **kwargs):
+            return kwargs
+
+        async def chat(self, request):
+            del request
+            yield {
+                "type": "tool",
+                "name": "run_fund_or_stock_analysis",
+                "status": "completed",
+                "result": json.dumps({"ticker": "510300", "artifacts": [image, report]}, ensure_ascii=False),
+            }
+            yield {"type": "text", "text": "分析与图表已完成。"}
+
+    monkeypatch.setattr(chat_service, "asset_agent", FakeAssetAgent())
+    manager = ChatTaskManager(store)
+    await manager.start(
+        ChatTaskInput(
+            task_id="task-visual-artifacts",
+            conversation_id="conversation-visual-artifacts",
+            message="分析 ETF 510300 并生成图表",
+            strategy=None,
+            asset_type="etf",
+            assistant_message_id=assistant_id,
+        )
+    )
+
+    events = [event async for event in manager.subscribe("task-visual-artifacts")]
+    artifact_events = [json.loads(event["data"])["artifact"] for event in events if event["event"] == "artifact"]
+    assert any(item["artifact_id"] == "artifact-technical-chart" for item in artifact_events)
+    conversation = await store.get_conversation("conversation-visual-artifacts")
+    assert conversation is not None
+    artifact_parts = [part for part in conversation["messages"][-1]["parts"] if part["type"] == "artifact"]
+    assert any(part["content"]["mime_type"] == "image/png" for part in artifact_parts)
+
+
+@pytest.mark.asyncio
 async def test_cancelled_task_rejects_late_parts(store):
     _, assistant_id = await store.prepare_task(
         conversation_id="conversation-1",

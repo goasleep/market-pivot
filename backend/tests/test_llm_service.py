@@ -39,6 +39,62 @@ async def test_chat_json_normalizes_generated_strings(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chat_json_with_images_sends_absolute_urls_as_content_blocks(monkeypatch):
+    captured = []
+
+    class FakeModel:
+        async def ainvoke(self, messages):
+            captured.extend(messages)
+            return AIMessage(content='{"signal":"hold"}')
+
+    service = LLMService()
+    monkeypatch.setattr(service, "get_model", lambda **_kwargs: FakeModel())
+
+    result = await service.chat_json_with_images(
+        "分析图表",
+        ["https://objects.example.test/charts/technical.png?signature=test"],
+        system="研究助手",
+    )
+
+    assert result == {"signal": "hold"}
+    user_content = captured[-1].content
+    assert user_content[0] == {"type": "text", "text": "分析图表"}
+    assert user_content[1]["type"] == "image_url"
+    assert user_content[1]["image_url"]["url"].startswith("https://")
+
+
+@pytest.mark.asyncio
+async def test_chat_json_with_images_rejects_non_http_input():
+    with pytest.raises(ValueError, match="absolute HTTP"):
+        await LLMService().chat_json_with_images("分析", ["data:image/png;base64,AAAA"])
+
+
+@pytest.mark.asyncio
+async def test_chat_json_with_images_times_out_to_text_path(monkeypatch):
+    class SlowVisionModel:
+        async def ainvoke(self, _messages):
+            import asyncio
+
+            await asyncio.sleep(1)
+
+    class TextModel:
+        async def ainvoke(self, _messages):
+            return AIMessage(content='{"signal":"hold","fallback":true}')
+
+    models = iter((SlowVisionModel(), TextModel()))
+    service = LLMService()
+    monkeypatch.setattr(service, "get_model", lambda **_kwargs: next(models))
+    monkeypatch.setattr(service_module, "VISION_CALL_TIMEOUT_SECONDS", 0.01)
+
+    result = await service.chat_json_with_images(
+        "分析图表",
+        ["https://objects.example.test/chart.png"],
+    )
+
+    assert result == {"signal": "hold", "fallback": True}
+
+
+@pytest.mark.asyncio
 async def test_chat_with_tools_normalizes_generated_content(monkeypatch):
     class FakeModel:
         def bind_tools(self, _tools):

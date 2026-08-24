@@ -3,7 +3,7 @@ import pytest
 from api.routers.config import _response, router
 from config import get_llm_config, get_llm_state, resolve_llm_profile
 from llm import factory, openai_compatible
-from llm_catalog import OPENAI_COMPATIBLE_MODELS, default_profiles, models_for_profile
+from llm_catalog import OPENAI_COMPATIBLE_MODELS, default_profiles, models_for_profile, supports_vision
 
 
 def test_openai_compatible_profile_builds_chat_model(monkeypatch):
@@ -94,6 +94,13 @@ def test_openai_profile_keeps_gpt_5_6_catalog_without_connection_settings():
         assert OPENAI_COMPATIBLE_MODELS[model_id]["max_tokens"] == 128000
         assert OPENAI_COMPATIBLE_MODELS[model_id]["supports_tools"] is True
         assert OPENAI_COMPATIBLE_MODELS[model_id]["supports_reasoning"] is True
+
+
+def test_vision_support_uses_explicit_gpt_5_6_allowlist():
+    for model_id in ("gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        assert supports_vision(model_id) is True
+    for model_id in ("gpt-4o", "gpt-4o-mini", "deepseek-chat", "custom-vision-model"):
+        assert supports_vision(model_id) is False
 
 
 def test_environment_profile_resolves_openai_api_key(monkeypatch):

@@ -14,13 +14,13 @@ from langgraph.graph import END, StateGraph
 from loguru import logger
 
 from agents.debate_room import debate
-from agents.fundamentals_analyst import analyze as fund_analyze
+from agents.fundamentals_analyst import analyze_stage as fund_analyze
 from agents.portfolio_manager import decide as pm_decide
-from agents.risk_manager import assess as risk_assess
+from agents.risk_manager import assess_stage as risk_assess
 from agents.sentiment_analyst import analyze as sent_analyze
-from agents.technical_analyst import analyze as tech_analyze
+from agents.technical_analyst import analyze_stage as tech_analyze
 from data.market_context import build_market_context
-from models.schemas import AgentReport, AssetType, MarketContext, TradeDecision
+from models.schemas import AgentReport, AgentStageResult, AssetType, MarketContext, TradeDecision
 
 
 class WorkflowState(TypedDict, total=False):
@@ -32,6 +32,8 @@ class WorkflowState(TypedDict, total=False):
     as_of_date: str | None
     market_context: MarketContext
     is_backtest: bool
+    conversation_id: str
+    task_id: str
     asset_data: dict[str, Any]
     strategy_name: str  # optional strategy override
     technical_report: AgentReport
@@ -42,6 +44,7 @@ class WorkflowState(TypedDict, total=False):
     risk_report: AgentReport
     final_decision: TradeDecision
     progress: Annotated[list[dict[str, str]], operator.add]
+    visual_artifacts: Annotated[list[dict[str, Any]], operator.add]
 
 
 # --- Node functions ---
@@ -72,23 +75,34 @@ async def fetch_market_data(state: WorkflowState) -> dict:
 
 async def run_technical(state: WorkflowState) -> dict:
     """Node 2a: Technical analysis."""
-    report = await tech_analyze(
+    result = await tech_analyze(
         state["ticker"],
         strategy_name=state.get("strategy_name"),
         context=state.get("market_context"),
+        conversation_id=state.get("conversation_id"),
+        task_id=state.get("task_id"),
     )
+    stage = result if isinstance(result, AgentStageResult) else AgentStageResult(report=result)
     return {
-        "technical_report": report,
-        "progress": [{"stage": "technical", "message": report.reasoning[:80]}],
+        "technical_report": stage.report,
+        "visual_artifacts": stage.artifacts,
+        "progress": [{"stage": "technical", "message": stage.report.reasoning[:80]}],
     }
 
 
 async def run_fundamentals(state: WorkflowState) -> dict:
     """Node 2b: Fundamentals analysis."""
-    report = await fund_analyze(state["ticker"], context=state.get("market_context"))
+    result = await fund_analyze(
+        state["ticker"],
+        context=state.get("market_context"),
+        conversation_id=state.get("conversation_id"),
+        task_id=state.get("task_id"),
+    )
+    stage = result if isinstance(result, AgentStageResult) else AgentStageResult(report=result)
     return {
-        "fundamentals_report": report,
-        "progress": [{"stage": "fundamentals", "message": report.reasoning[:80]}],
+        "fundamentals_report": stage.report,
+        "visual_artifacts": stage.artifacts,
+        "progress": [{"stage": "fundamentals", "message": stage.report.reasoning[:80]}],
     }
 
 
@@ -124,15 +138,20 @@ async def merge_analysts(state: WorkflowState) -> dict:
 
 async def run_risk(state: WorkflowState) -> dict:
     """Node 4: Risk assessment."""
-    report = await risk_assess(
+    result = await risk_assess(
         state["ticker"],
         state.get("analyst_reports", {}),
         state.get("debate_report"),
         asset_type=state.get("asset_type", AssetType.STOCK.value),
+        context=state.get("market_context"),
+        conversation_id=state.get("conversation_id"),
+        task_id=state.get("task_id"),
     )
+    stage = result if isinstance(result, AgentStageResult) else AgentStageResult(report=result)
     return {
-        "risk_report": report,
-        "progress": [{"stage": "risk", "message": report.reasoning[:80]}],
+        "risk_report": stage.report,
+        "visual_artifacts": stage.artifacts,
+        "progress": [{"stage": "risk", "message": stage.report.reasoning[:80]}],
     }
 
 

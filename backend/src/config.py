@@ -224,6 +224,7 @@ class Settings(BaseSettings):
     # S3-compatible artifact storage.  The backend proxies preview/download
     # requests, so objects do not need to be public.
     s3_endpoint_url: str = ""
+    s3_public_endpoint_url: str = ""
     s3_bucket: str = ""
     s3_region: str = "us-east-1"
     s3_access_key_id: str = ""

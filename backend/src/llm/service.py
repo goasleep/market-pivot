@@ -1,13 +1,16 @@
 """Application-level LLM service built on LangChain chat-model abstractions."""
 
+import asyncio
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.output_parsers import JsonOutputParser
 from loguru import logger
 
+from config import get_llm_config
 from llm.context import (
     ContextBudget,
     ContextWindowExceededError,
@@ -18,11 +21,13 @@ from llm.context import (
     select_messages_for_model,
 )
 from llm.factory import get_chat_model
+from llm_catalog import supports_vision
 
 _GENERATED_TEXT_REPLACEMENTS = (
     ("性交易", "性的交易"),
     ("性交", "相关行为"),
 )
+VISION_CALL_TIMEOUT_SECONDS = 60.0
 
 
 def _normalize_generated_financial_text(text: str) -> str:
@@ -77,6 +82,21 @@ def _message_text(message: AIMessage) -> str:
                 parts.append(str(block))
         return "".join(parts)
     return str(content or "")
+
+
+def _parse_json_object(raw: str) -> dict[str, Any]:
+    """Parse one model response while preserving the existing tolerant behavior."""
+    normalized = _normalize_generated_financial_text(raw).strip()
+    if normalized.startswith("```"):
+        normalized = "\n".join(line for line in normalized.splitlines() if not line.startswith("```"))
+    try:
+        parsed = JsonOutputParser().parse(normalized)
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM JSON response is not an object")
+        return parsed
+    except (ValueError, json.JSONDecodeError) as exc:
+        logger.error("JSON parse failed: {}\nRaw: {}", exc, normalized[:500])
+        return {"error": "json_parse_failed", "raw": normalized[:500]}
 
 
 def _to_messages(messages: list[Any]) -> list[Any]:
@@ -165,6 +185,16 @@ class LLMService:
             profile_id=profile_id,
             route=route,
         )
+
+    def supports_vision(
+        self,
+        model: str | None = None,
+        profile_id: str | None = None,
+        route: str | None = None,
+    ) -> bool:
+        """Use the explicit model allowlist instead of probing provider capabilities."""
+        config = get_llm_config(profile_id=profile_id, model=model, route=route)
+        return supports_vision(model or str(config.get("model") or ""))
 
     async def chat(
         self,
@@ -261,29 +291,78 @@ class LLMService:
         """Invoke the model and parse a JSON object using LangChain's parser."""
         json_instruction = "You must respond with valid JSON only, no markdown, no explanation."
         system = f"{system}\n\n{json_instruction}" if system else json_instruction
-        raw = _normalize_generated_financial_text(
-            await self.chat(
+        raw = await self.chat(
+            prompt,
+            system=system,
+            model=model,
+            temperature=0.0,
+            profile_id=profile_id,
+            route=route,
+        )
+        return _parse_json_object(raw)
+
+    async def chat_json_with_images(
+        self,
+        prompt: str,
+        image_urls: list[str],
+        system: str = "",
+        model: str | None = None,
+        profile_id: str | None = None,
+        route: str | None = None,
+        detail: str = "high",
+    ) -> dict[str, Any]:
+        """Invoke a vision-capable model with HTTP(S) image artifacts and parse JSON."""
+        if not image_urls:
+            return await self.chat_json(
                 prompt,
                 system=system,
                 model=model,
-                temperature=0.0,
                 profile_id=profile_id,
                 route=route,
             )
-        ).strip()
+        if detail not in {"low", "high", "original", "auto"}:
+            raise ValueError("image detail must be low, high, original, or auto")
+        for image_url in image_urls:
+            parsed = urlparse(image_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("model image inputs must use absolute HTTP(S) URLs")
 
-        # Keep compatibility with models that still wrap JSON in a markdown fence.
-        if raw.startswith("```"):
-            raw = "\n".join(line for line in raw.splitlines() if not line.startswith("```"))
-
+        json_instruction = "You must respond with valid JSON only, no markdown, no explanation."
+        effective_system = f"{system}\n\n{json_instruction}" if system else json_instruction
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        content.extend(
+            {
+                "type": "image_url",
+                "image_url": {"url": image_url, "detail": detail},
+            }
+            for image_url in image_urls
+        )
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": effective_system},
+            {"role": "user", "content": content},
+        ]
+        chat_model = self.get_model(
+            model=model,
+            temperature=0.0,
+            profile_id=profile_id,
+            route=route,
+        )
+        context = select_messages_for_model(messages, model=model)
         try:
-            parsed = JsonOutputParser().parse(raw)
-            if not isinstance(parsed, dict):
-                raise ValueError("LLM JSON response is not an object")
-            return parsed
-        except (ValueError, json.JSONDecodeError) as exc:
-            logger.error("JSON parse failed: {}\nRaw: {}", exc, raw[:500])
-            return {"error": "json_parse_failed", "raw": raw[:500]}
+            response = await asyncio.wait_for(
+                chat_model.ainvoke(_to_messages(context.messages)),
+                timeout=VISION_CALL_TIMEOUT_SECONDS,
+            )
+            return _parse_json_object(_message_text(response))
+        except Exception as exc:
+            logger.warning("Vision model call failed or timed out; falling back to text input: {}", exc)
+            return await self.chat_json(
+                prompt,
+                system=system,
+                model=model,
+                profile_id=profile_id,
+                route=route,
+            )
 
     async def chat_langchain(
         self,
@@ -329,7 +408,6 @@ class LLMService:
         bound_model = self.get_model(
             model=model,
             temperature=temperature,
-            thinking=False,
             profile_id=profile_id,
             route=route,
         ).bind_tools(tools)

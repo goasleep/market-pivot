@@ -331,8 +331,13 @@ class ChatTaskManager:
                         if isinstance(component, dict)
                     ):
                         # The surface already exposes these files as one compact bundle.
-                        # Do not persist and stream a second set of standalone cards.
-                        artifacts = []
+                        # Keep image artifacts as standalone cards so the chat can
+                        # render the actual chart instead of only a download link.
+                        artifacts = [
+                            artifact
+                            for artifact in artifacts
+                            if str(artifact.get("mime_type") or "").startswith("image/")
+                        ]
                 references = self._tool_references(name, tool_payload)
         return artifacts, references
 

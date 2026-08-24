@@ -97,7 +97,7 @@ class AssetAgent(AssetRequestResolver):
                 return "{}"
             market_context = result.get("market_context")
             try:
-                artifacts = await research_service.create_artifacts(
+                report_artifacts = await research_service.create_artifacts(
                     decision,
                     market_context,
                     source="chat-tool-analysis",
@@ -107,7 +107,8 @@ class AssetAgent(AssetRequestResolver):
                 )
             except Exception as exc:
                 logger.warning("Analysis report artifact generation failed; returning decision only: {}", exc)
-                artifacts = []
+                report_artifacts = []
+            artifacts = [*(result.get("visual_artifacts") or []), *report_artifacts]
             payload = research_service.decision_payload(decision, market_context, artifacts=artifacts)
             return json.dumps(payload, ensure_ascii=False)
 
@@ -620,6 +621,8 @@ class AssetAgent(AssetRequestResolver):
             strategy=request.strategy,
             asset_type=request.asset_type,
             conversation_history=request.history,
+            conversation_id=request.conversation_id,
+            task_id=request.task_id,
             trace_config=run_config,
         )
         context = result.get("market_context")
@@ -643,6 +646,8 @@ class AssetAgent(AssetRequestResolver):
             strategy=request.strategy,
             asset_type=request.asset_type,
             conversation_history=request.history,
+            conversation_id=request.conversation_id,
+            task_id=request.task_id,
             trace_config=run_config,
         ):
             context = update.get("state", {}).get("market_context")

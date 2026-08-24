@@ -102,6 +102,13 @@ class AgentReport(BaseModel):
     key_data: dict = Field(default_factory=dict)
 
 
+class AgentStageResult(BaseModel):
+    """An analyst report plus any user-facing artifacts produced by the stage."""
+
+    report: AgentReport
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class SignalType(str, Enum):
     """Detailed signal types beyond simple buy/sell/hold."""
 

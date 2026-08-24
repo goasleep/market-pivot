@@ -5,6 +5,21 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+VISION_MODEL_IDS = frozenset(
+    {
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    }
+)
+
+
+def supports_vision(model: str) -> bool:
+    """Return whether the configured model is in the explicit vision allowlist."""
+    return model.strip().lower() in VISION_MODEL_IDS
+
+
 DEEPSEEK_MODELS: dict[str, dict[str, Any]] = {
     "deepseek-v4-flash": {
         "context_window": 1000000,
@@ -14,6 +29,7 @@ DEEPSEEK_MODELS: dict[str, dict[str, Any]] = {
         "description": "DeepSeek V4 Flash for fast general-purpose analysis",
         "supports_tools": True,
         "supports_reasoning": True,
+        "supports_vision": False,
     },
     "deepseek-chat": {
         "context_window": 65536,
@@ -23,6 +39,7 @@ DEEPSEEK_MODELS: dict[str, dict[str, Any]] = {
         "description": "General purpose chat model (V3)",
         "supports_tools": True,
         "supports_reasoning": False,
+        "supports_vision": False,
     },
     "deepseek-reasoner": {
         "context_window": 65536,
@@ -32,6 +49,7 @@ DEEPSEEK_MODELS: dict[str, dict[str, Any]] = {
         "description": "Reasoning model (R1) for complex analysis",
         "supports_tools": True,
         "supports_reasoning": True,
+        "supports_vision": False,
     },
 }
 
@@ -44,6 +62,7 @@ OPENAI_COMPATIBLE_MODELS: dict[str, dict[str, Any]] = {
         "description": "OpenAI GPT-5.6 Sol for frontier reasoning and coding",
         "supports_tools": True,
         "supports_reasoning": True,
+        "supports_vision": True,
     },
     "gpt-5.6-terra": {
         "context_window": 128000,
@@ -53,6 +72,7 @@ OPENAI_COMPATIBLE_MODELS: dict[str, dict[str, Any]] = {
         "description": "OpenAI GPT-5.6 Terra for balanced intelligence and cost",
         "supports_tools": True,
         "supports_reasoning": True,
+        "supports_vision": True,
     },
     "gpt-5.6-luna": {
         "context_window": 128000,
@@ -62,6 +82,7 @@ OPENAI_COMPATIBLE_MODELS: dict[str, dict[str, Any]] = {
         "description": "OpenAI GPT-5.6 Luna for cost-sensitive, high-volume workloads",
         "supports_tools": True,
         "supports_reasoning": True,
+        "supports_vision": True,
     },
 }
 
@@ -105,6 +126,7 @@ def models_for_profile(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "description": "Custom model",
             "supports_tools": True,
             "supports_reasoning": False,
+            "supports_vision": supports_vision(selected),
         }
     return models
 
@@ -113,7 +135,7 @@ def model_info(profile: dict[str, Any], model: str | None = None) -> dict[str, A
     selected = model or str(profile.get("model", ""))
     info = models_for_profile(profile).get(selected)
     if isinstance(info, dict):
-        return dict(info)
+        return {**info, "supports_vision": supports_vision(selected)}
     return {
         "context_window": int(profile.get("context_window") or max(16384, int(profile.get("max_tokens", 8192)) * 2)),
         "max_output_tokens": int(profile.get("max_tokens", 8192)),
@@ -122,6 +144,7 @@ def model_info(profile: dict[str, Any], model: str | None = None) -> dict[str, A
         "description": "Custom model",
         "supports_tools": True,
         "supports_reasoning": False,
+        "supports_vision": supports_vision(selected),
     }
 
 

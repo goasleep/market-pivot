@@ -13,7 +13,7 @@ from application.fund_task_compiler import compile_fund_task, uses_direct_fund_e
 from data.market_data_catalog import market_data_catalog
 from domain.fund_calculations import calculate_from_question
 from graph.research_planning import normalize_steps
-from models.fund_task import FundTaskKind, InstrumentResolutionStatus, RiskPolicyAction, TaskOutcome
+from models.fund_task import FundTaskKind, InstrumentResolutionStatus
 from tools import assets
 from tools.registry import build_task_tools
 
@@ -44,10 +44,10 @@ def test_all_122_fund_questions_compile_to_bounded_direct_tasks():
         counts[spec.task_kind] += 1
 
     assert sum(counts.values()) == 122
-    assert counts[FundTaskKind.SAFETY_RESPONSE] == 10
     assert counts[FundTaskKind.CALCULATION] >= 8
     assert counts[FundTaskKind.SCENARIO_PLAN] >= 25
     assert counts[FundTaskKind.RULE_DESIGN] >= 20
+    assert counts[FundTaskKind.EDUCATION] >= 45
 
 
 @pytest.mark.parametrize(
@@ -63,7 +63,7 @@ def test_all_122_fund_questions_compile_to_bounded_direct_tasks():
         (71, FundTaskKind.CALCULATION),
         (81, FundTaskKind.RULE_DESIGN),
         (91, FundTaskKind.EDUCATION),
-        (101, FundTaskKind.SAFETY_RESPONSE),
+        (101, FundTaskKind.EDUCATION),
         (111, FundTaskKind.SCENARIO_PLAN),
     ],
 )
@@ -74,19 +74,22 @@ def test_representative_questions_use_expected_task_semantics(index, expected):
         assert spec.requires_live_data is False
 
 
-def test_safety_boundary_questions_are_stopped_before_data_access():
+def test_former_safety_questions_keep_normal_task_semantics_without_preemptive_refusal():
+    kinds = set()
     for index in range(101, 111):
         _, spec = _compile(index)
-        assert spec.task_kind == FundTaskKind.SAFETY_RESPONSE
-        assert spec.safety_decision.action in {RiskPolicyAction.REFUSE_GUARANTEE, RiskPolicyAction.BLOCK}
+        kinds.add(spec.task_kind)
         assert spec.allowed_capabilities == []
-        assert spec.requires_live_data is False
+        assert uses_direct_fund_executor(spec)
+        assert build_task_tools(spec, assets.get_realtime_quote, allow_mutating_tools=False) == []
+    assert FundTaskKind.EDUCATION in kinds
+    assert FundTaskKind.SCENARIO_PLAN in kinds
 
 
-def test_negated_guarantee_is_not_treated_as_an_unsafe_request():
-    _, spec = _compile(89)
-    assert spec.task_kind != FundTaskKind.SAFETY_RESPONSE
-    assert spec.safety_decision.action == RiskPolicyAction.ALLOW
+def test_risk_language_does_not_add_a_safety_decision_to_the_task_contract():
+    _, spec = _compile(108)
+    assert spec.task_kind == FundTaskKind.SCENARIO_PLAN
+    assert "safety_decision" not in spec.model_dump()
 
 
 def test_arbitrary_six_digit_amount_is_not_verified_as_a_fund():
@@ -195,19 +198,27 @@ def test_etf_universe_task_does_not_expose_an_unavailable_structured_dataset_que
 
 
 @pytest.mark.asyncio
-async def test_safety_response_is_deterministic_and_does_not_call_llm(monkeypatch):
-    _, spec = _compile(101)
+async def test_former_safety_response_runs_the_normal_scenario_executor(monkeypatch):
+    question, spec = _compile(108)
+    calls = []
 
-    class ForbiddenLLM:
-        async def chat(self, *args, **kwargs):
-            raise AssertionError("safety response must not call LLM")
+    class FakeLLM:
+        async def chat(self, prompt, **kwargs):
+            calls.append((prompt, kwargs))
+            return (
+                "结论：按用户设想建立模拟策略。\n"
+                "条件：仅在既定信号成立时补仓。\n"
+                "执行：分批记录模拟买入。\n"
+                "风险上限：达到组合预算后停止新增。\n"
+                "失效：趋势或基金机制发生变化时退出。"
+            )
 
-    monkeypatch.setattr(fund_response_module, "get_llm_service", lambda: ForbiddenLLM())
-    answer, acceptance = await execute_direct_fund_task(QUESTIONS.read_text().splitlines()[100], spec)
+    monkeypatch.setattr(fund_response_module, "get_llm_service", lambda: FakeLLM())
+    answer, acceptance = await execute_direct_fund_task(question, spec)
 
-    assert "不能保证" in answer
-    assert "满仓" in answer
-    assert acceptance.outcome == TaskOutcome.REFUSED_WITH_ALTERNATIVE
+    assert calls
+    assert "模拟策略" in answer
+    assert acceptance.satisfied is True
 
 
 @pytest.mark.asyncio

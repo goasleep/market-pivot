@@ -19,7 +19,6 @@ class FundTaskKind(str, Enum):
     SIMULATION_QUERY = "simulation_query"
     SIMULATION_MUTATION = "simulation_mutation"
     CLARIFICATION = "clarification"
-    SAFETY_RESPONSE = "safety_response"
 
 
 class EvidenceMode(str, Enum):
@@ -33,15 +32,6 @@ class EvidenceMode(str, Enum):
     SIMULATION_STATE = "simulation_state"
 
 
-class RiskPolicyAction(str, Enum):
-    ALLOW = "allow"
-    ALLOW_WITH_WARNING = "allow_with_warning"
-    REFUSE_GUARANTEE = "refuse_guarantee"
-    REQUIRE_CLARIFICATION = "require_clarification"
-    REQUIRE_CONFIRMATION = "require_confirmation"
-    BLOCK = "block"
-
-
 class InstrumentResolutionStatus(str, Enum):
     VERIFIED = "verified"
     AMBIGUOUS = "ambiguous"
@@ -53,17 +43,8 @@ class TaskOutcome(str, Enum):
     SATISFIED = "satisfied"
     PARTIAL = "partial"
     NEEDS_INPUT = "needs_input"
-    REFUSED_WITH_ALTERNATIVE = "refused_with_alternative"
     DATA_UNAVAILABLE = "data_unavailable"
     FAILED = "failed"
-
-
-class RiskPolicyDecision(BaseModel):
-    action: RiskPolicyAction = RiskPolicyAction.ALLOW
-    reasons: list[str] = Field(default_factory=list)
-    prohibited_outputs: list[str] = Field(default_factory=list)
-    required_disclosures: list[str] = Field(default_factory=list)
-    safe_alternatives: list[str] = Field(default_factory=list)
 
 
 class FundSubject(BaseModel):
@@ -117,7 +98,6 @@ class FundTaskSpec(BaseModel):
     required_outputs: list[str] = Field(default_factory=list)
     allowed_capabilities: list[str] = Field(default_factory=list)
     forbidden_capabilities: list[str] = Field(default_factory=list)
-    safety_decision: RiskPolicyDecision = Field(default_factory=RiskPolicyDecision)
     confidence: float = Field(default=1.0, ge=0, le=1)
     compiler_version: str = "fund-task-v1"
 

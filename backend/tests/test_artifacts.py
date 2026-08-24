@@ -20,6 +20,9 @@ class MemoryArtifactStorage:
     def get(self, object_key: str) -> bytes:
         return self.objects[object_key]
 
+    def presign_get_url(self, object_key: str, expires_in: int = 900) -> str:
+        return f"https://objects.example.test/{object_key}?expires={expires_in}"
+
 
 class FakeReportAgent:
     def generate(self, decision, market_context=None, *, generated_at=None):
@@ -149,6 +152,30 @@ async def test_user_artifacts_support_multiple_text_and_binary_files(tmp_path):
     )
     assert retried[0]["artifact_id"] == artifacts[0]["artifact_id"]
     assert len(await service.list()) == 3
+
+
+@pytest.mark.asyncio
+async def test_binary_artifact_has_ui_preview_and_separate_model_url(tmp_path):
+    storage = MemoryArtifactStorage()
+    service = ArtifactService(db_path=tmp_path / "artifacts.db", storage=storage)
+
+    artifact = await service.create_binary_artifact(
+        name="510300-technical.png",
+        content=b"\x89PNG\r\n\x1a\nchart",
+        mime_type="image/png",
+        ticker="510300",
+        asset_type="etf",
+        conversation_id="conversation-test",
+        task_id="task-test",
+        execution_key="task-test:technical:510300:2026-08-24",
+    )
+
+    assert artifact["mime_type"] == "image/png"
+    assert artifact["preview_url"].startswith("/api/artifacts/")
+    assert service.model_input_url(artifact) == (
+        f"https://objects.example.test/{artifact['object_key']}?expires=900"
+    )
+    assert "objects.example.test" not in str((await service.get(artifact["artifact_id"]))["metadata"])
 
 
 def test_report_renders_source_urls_as_hidden_links():

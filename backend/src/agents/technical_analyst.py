@@ -7,9 +7,10 @@ import pandas as pd
 from loguru import logger
 
 from agents.prompt_context import INVESTOR_CONTEXT
+from application.visual_evidence import visual_evidence_service
 from data.stock_provider import async_get_stock_history
 from llm import LLMService, get_llm_service
-from models.schemas import AgentReport, AssetType, Decision, MarketContext
+from models.schemas import AgentReport, AgentStageResult, AssetType, Decision, MarketContext
 from strategies.skill_manager import get_strategy_instructions
 
 _BASE_PROMPT = """You are a professional A-share technical analyst.
@@ -38,6 +39,26 @@ async def analyze(
     context: MarketContext | None = None,
     llm: LLMService | None = None,
 ) -> AgentReport:
+    """Run technical analysis and return only the report for legacy callers."""
+    stage = await analyze_stage(
+        ticker,
+        days=days,
+        strategy_name=strategy_name,
+        context=context,
+        llm=llm,
+    )
+    return stage.report
+
+
+async def analyze_stage(
+    ticker: str,
+    days: int = 120,
+    strategy_name: str | None = None,
+    context: MarketContext | None = None,
+    llm: LLMService | None = None,
+    conversation_id: str | None = None,
+    task_id: str | None = None,
+) -> AgentStageResult:
     """Run technical analysis on a stock.
 
     Args:
@@ -52,7 +73,7 @@ async def analyze(
     else:
         df = pd.DataFrame(context.history)
     if df.empty:
-        return AgentReport(agent_name="technical", reasoning="No data available")
+        return AgentStageResult(report=AgentReport(agent_name="technical", reasoning="No data available"))
 
     # Calculate technical indicators
     indicators = calculate_technical_indicators(df.tail(days))
@@ -68,7 +89,7 @@ async def analyze(
         if not context or context.asset_type == AssetType.STOCK
         else f"{context.asset_type.value.upper()} fund"
     )
-    prompt = f"""Analyze the {asset_label} {ticker} using technical analysis.
+    text_prompt = f"""Analyze the {asset_label} {ticker} using technical analysis.
 
 Recent price data (last 20 days):
 {recent_data}
@@ -86,23 +107,54 @@ Provide your analysis as JSON. Focus on:
 Signal: buy if technicals suggest upward momentum, sell if downward, hold if mixed.
 """
 
+    artifacts: list[dict] = []
     try:
         system_prompt = _build_system_prompt(strategy_name, context.market_regime if context else None)
         llm_service = llm or get_llm_service()
-        result = await llm_service.chat_json(prompt, system=system_prompt)
-        return AgentReport(
+        result: dict
+        supports_images = bool(getattr(llm_service, "supports_vision", lambda: False)())
+        evidence = await visual_evidence_service.prepare_technical(
+            ticker=ticker,
+            asset_type=(context.asset_type.value if context else AssetType.STOCK.value),
+            history=df.tail(days).to_dict(orient="records"),
+            conversation_id=conversation_id,
+            task_id=task_id,
+        )
+        if evidence:
+            artifacts.append(evidence.artifact)
+        if supports_images and evidence and evidence.model_url:
+            visual_prompt = f"""Analyze the {asset_label} {ticker} using the attached deterministic chart.
+
+The chart contains daily candles, MA lines, volume and MACD. Red candles are up and green candles are down.
+Exact latest indicators (use these values for numeric claims):
+{indicators}
+
+Return the required JSON. Evaluate trend, momentum, volatility, volume, support/resistance and signal.
+"""
+            result = await llm_service.chat_json_with_images(
+                visual_prompt,
+                [evidence.model_url],
+                system=system_prompt,
+            )
+        else:
+            result = await llm_service.chat_json(text_prompt, system=system_prompt)
+        report = AgentReport(
             agent_name="technical",
             signal=Decision(result.get("signal", "hold")),
             confidence=float(result.get("confidence", 0.5)),
             reasoning=result.get("reasoning", ""),
             key_data=result.get("key_indicators", {}),
         )
+        return AgentStageResult(report=report, artifacts=artifacts)
     except Exception as e:
         logger.error(f"[TechnicalAgent] LLM error: {e}")
-        return AgentReport(
-            agent_name="technical",
-            reasoning="技术分析模型暂时不可用，已按中性信号降级；请以结构化行情和确定性指标为准。",
-            key_data={"degraded": True, "reason": "llm_unavailable"},
+        return AgentStageResult(
+            report=AgentReport(
+                agent_name="technical",
+                reasoning="技术分析模型暂时不可用，已按中性信号降级；请以结构化行情和确定性指标为准。",
+                key_data={"degraded": True, "reason": "llm_unavailable"},
+            ),
+            artifacts=artifacts,
         )
 
 

@@ -6,14 +6,12 @@ import re
 from typing import Any
 
 from application.fund_instruments import resolve_fund_instruments
-from application.fund_safety import evaluate_fund_safety
 from models.fund_task import (
     EvidenceMode,
     FundSubject,
     FundTaskKind,
     FundTaskSpec,
     InstrumentResolutionStatus,
-    RiskPolicyAction,
 )
 
 _FUND_TERMS = (
@@ -133,7 +131,6 @@ def compile_fund_task(
     if not is_fund_request(message, asset_type=asset_type):
         return None
     text = message.lower().strip()
-    safety = evaluate_fund_safety(message, mutation_requested=mutation_requested)
     instruments = resolve_fund_instruments(message, tickers, asset_type=asset_type)
     verified = [item for item in instruments if item.status == InstrumentResolutionStatus.VERIFIED]
     product_type = _product_type(text)
@@ -144,11 +141,7 @@ def compile_fund_task(
         product_type=product_type,
     )
 
-    if safety.action in {RiskPolicyAction.REFUSE_GUARANTEE, RiskPolicyAction.BLOCK}:
-        kind = FundTaskKind.SAFETY_RESPONSE
-        operation = "refuse_return_guarantee"
-        evidence = EvidenceMode.NONE
-    elif mutation_requested:
+    if mutation_requested:
         kind = FundTaskKind.SIMULATION_MUTATION
         operation = "mutate_paper_trading"
         evidence = EvidenceMode.SIMULATION_STATE
@@ -248,7 +241,6 @@ def compile_fund_task(
             if not live_data
             else []
         ),
-        safety_decision=safety,
         confidence=0.98 if kind != FundTaskKind.EDUCATION else 0.9,
     )
 
@@ -260,5 +252,4 @@ def uses_direct_fund_executor(spec: FundTaskSpec) -> bool:
         FundTaskKind.RULE_DESIGN,
         FundTaskKind.SCENARIO_PLAN,
         FundTaskKind.CLARIFICATION,
-        FundTaskKind.SAFETY_RESPONSE,
     }
