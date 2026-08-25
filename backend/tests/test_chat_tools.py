@@ -1117,3 +1117,32 @@ def test_generic_artifact_notice_is_replaced_with_description():
     assert "覆盖数据、策略、成本" in response
     assert "Markdown" in response
     assert "HTML 报告" not in response
+
+
+def test_internal_artifact_markdown_links_are_removed_from_generated_report():
+    response = _compact_generated_report(
+        """结论仍然值得保留。
+
+完整文件：
+
+- [预览完整回测报告](/api/artifacts/artifact-report/preview)
+- [下载审计工作簿](/api/artifacts/artifact-workbook/download)
+""",
+        [{"name": "回测报告.html", "mime_type": "text/html"}],
+    )
+
+    assert "结论仍然值得保留" in response
+    assert "/api/artifacts/" not in response
+    assert "[预览完整回测报告]" not in response
+    assert "完整文件：" not in response
+    assert "完整内容见下方附件" in response
+
+
+def test_inline_internal_artifact_markdown_link_keeps_only_its_label():
+    response = _compact_generated_report(
+        "请[下载完整数据](/api/artifacts/artifact-data/download)后复核。",
+        [{"name": "数据.csv", "mime_type": "text/csv"}],
+    )
+
+    assert "请下载完整数据后复核" in response
+    assert "/api/artifacts/" not in response

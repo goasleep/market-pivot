@@ -1664,7 +1664,7 @@ function MarkdownTable({ lines }: { lines: string[] }) {
 
 function inlineMarkdown(text: string): ReactNode {
   const linkPattern =
-    /(\[[^\]\n]+\]\((https?:\/\/[^)\s]+)\)|https?:\/\/[^\s<]+)/g;
+    /(\[[^\]\n]+\]\((https?:\/\/[^)\s]+|\/api\/artifacts\/[A-Za-z0-9_-]+\/(?:preview|download))\)|https?:\/\/[^\s<]+)/g;
   const nodes: ReactNode[] = [];
   let cursor = 0;
   let match: RegExpExecArray | null;

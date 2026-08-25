@@ -40,6 +40,20 @@ _RAW_HTML_SOURCE = re.compile(r"(?:<!doctype\s+html|<html\b).*", flags=re.IGNORE
 
 _GENERIC_ARTIFACT_NOTICE = re.compile(r"完整\s*HTML\s*报告已生成文件产物", flags=re.IGNORECASE)
 
+_ARTIFACT_MARKDOWN_LINK = re.compile(
+    r"\[(?P<label>[^\]\n]+)\]\(\s*/api/artifacts/[A-Za-z0-9_-]+/(?:preview|download)\s*\)",
+    flags=re.IGNORECASE,
+)
+_ARTIFACT_LINK_ONLY_LINE = re.compile(
+    r"^\s*(?:[-*+]\s+|\d+\.\s+)?"
+    r"\[[^\]\n]+\]\(\s*/api/artifacts/[A-Za-z0-9_-]+/(?:preview|download)\s*\)\s*$",
+    flags=re.IGNORECASE,
+)
+_ARTIFACT_SECTION_HEADING = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:完整(?:文件|内容|成果包?)|附件(?:文件|下载|列表)?)[：:]?\s*$",
+    flags=re.IGNORECASE,
+)
+
 
 def _artifact_label(artifact: dict[str, Any]) -> str:
     mime_type = str(artifact.get("mime_type") or "")
@@ -50,6 +64,25 @@ def _artifact_label(artifact: dict[str, Any]) -> str:
         "text/csv": "CSV",
         "application/json": "JSON",
     }.get(mime_type, "文件")
+
+
+def _remove_embedded_artifact_links(text: str) -> str:
+    """Remove duplicated internal artifact links from model-authored prose."""
+    lines = text.splitlines()
+    removed_indexes: set[int] = set()
+    for index, line in enumerate(lines):
+        if not _ARTIFACT_LINK_ONLY_LINE.fullmatch(line):
+            continue
+        removed_indexes.add(index)
+        previous = index - 1
+        while previous >= 0 and not lines[previous].strip():
+            previous -= 1
+        if previous >= 0 and _ARTIFACT_SECTION_HEADING.fullmatch(lines[previous]):
+            removed_indexes.add(previous)
+
+    cleaned = "\n".join(line for index, line in enumerate(lines) if index not in removed_indexes)
+    cleaned = _ARTIFACT_MARKDOWN_LINK.sub(lambda match: match.group("label"), cleaned)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def _compact_generated_report(text: str, artifacts: list[dict[str, Any]] | None = None) -> str:
@@ -65,6 +98,7 @@ def _compact_generated_report(text: str, artifacts: list[dict[str, Any]] | None 
         lead = text[: match.start()].strip()
         tail = text[match.end() :].strip()
         text = "\n\n".join(part for part in (lead, tail) if part)
+    text = _remove_embedded_artifact_links(text)
     if _GENERIC_ARTIFACT_NOTICE.search(text) and len(text.strip()) < 200:
         text = description
     if len(text) > 1800:
@@ -325,7 +359,8 @@ class AssetAgent(AssetRequestResolver):
             "完成工具调用后，用中文简洁回答；需要判断时直接给出首选建议、证据和适用条件，最终选择交给用户，"
             "不要用‘不存在唯一最好方案’、‘不同指标代表不同取舍’等常识性段落代替建议。"
             "如果工具结果包含 artifacts，正文仍必须给出结论、关键依据、限制和下一步的简短摘要；"
-            "附件只能承载完整明细，不能代替聊天正文。禁止再次输出 HTML 或 Markdown 源码。"
+            "附件只能承载完整明细，不能代替聊天正文。禁止在正文中复制 artifact 的 preview_url、"
+            "download_url 或任何 /api/artifacts/ 路径，界面会自动展示附件。禁止再次输出 HTML 或 Markdown 源码。"
             "明确数据日期、来源和数据缺失。产品只服务于小散户的短中期基金交易研究和模拟交易，不承诺收益，"
             "股票分析不能冒充基金建议。若只是闲聊或询问能力，可以直接回答。"
             "系统支持查询模拟盘账户、持仓和订单；只有用户明确要求时才可创建或取消模拟盘订单，"
@@ -414,14 +449,14 @@ class AssetAgent(AssetRequestResolver):
                     }
                     return
                 for event in node_update.get("tool_events", []):
-                    if event.get("name") in {"run_fund_or_stock_analysis", "save_artifacts"}:
-                        try:
-                            tool_payload = json.loads(str(event.get("result", "")))
+                    try:
+                        tool_payload = json.loads(str(event.get("result", "")))
+                        if isinstance(tool_payload, dict):
                             generated_artifacts.extend(
                                 item for item in tool_payload.get("artifacts", []) if isinstance(item, dict)
                             )
-                        except (TypeError, json.JSONDecodeError):
-                            pass
+                    except (TypeError, json.JSONDecodeError):
+                        pass
                     yield {
                         "type": "tool",
                         "name": event.get("name", "unknown"),

@@ -111,6 +111,7 @@ export function ChatPage() {
   const requestIdRef = useRef(0);
   const activeTaskIdRef = useRef<string | null>(null);
   const taskEventCursorRef = useRef<Record<string, number>>({});
+  const inputComposingRef = useRef(false);
 
   const activeConversation = useMemo(
     () =>
@@ -1486,8 +1487,23 @@ export function ChatPage() {
               <Input
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
+                onCompositionStart={() => {
+                  inputComposingRef.current = true;
+                }}
+                onCompositionEnd={() => {
+                  window.setTimeout(() => {
+                    inputComposingRef.current = false;
+                  }, 0);
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
+                    if (
+                      inputComposingRef.current ||
+                      event.nativeEvent.isComposing ||
+                      event.keyCode === 229
+                    ) {
+                      return;
+                    }
                     event.preventDefault();
                     void sendMessage(input);
                   }
