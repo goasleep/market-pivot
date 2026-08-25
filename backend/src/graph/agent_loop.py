@@ -31,6 +31,7 @@ from tools.policies import tool_requires_confirmation
 
 DEFAULT_MAX_STEPS = 100
 TOOL_TIMEOUT_SECONDS = 60
+RESEARCH_PLAN_TIMEOUT_SECONDS = 300
 LONG_RUNNING_TOOL_TIMEOUT_SECONDS = 900
 LLM_TIMEOUT_SECONDS = 90
 _UNFINISHED_ANSWER = re.compile(r"下一步(?:需要|要)|进一步(?:校准|确认)?需|仍需(?:查询|查找|核对)|待(?:查询|核对|确认)")
@@ -38,6 +39,8 @@ _UNFINISHED_ANSWER = re.compile(r"下一步(?:需要|要)|进一步(?:校准|确
 
 def tool_timeout_seconds(name: str) -> int:
     """Return the execution budget for a tool invocation."""
+    if name == "run_research_plan":
+        return RESEARCH_PLAN_TIMEOUT_SECONDS
     if name in {
         "run_fund_or_stock_analysis",
         "run_backtest",
@@ -53,6 +56,7 @@ def tool_timeout_seconds(name: str) -> int:
 def tool_attempts(name: str) -> int:
     """Return retry count without duplicating expensive or mutating work."""
     if name in {
+        "run_research_plan",
         "run_fund_or_stock_analysis",
         "run_backtest",
         "design_and_run_backtest",
