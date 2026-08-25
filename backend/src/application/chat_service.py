@@ -16,6 +16,7 @@ from llm_runtime import use_llm_profile
 from widgets.a2ui import render_activity, render_markdown, render_research_plan, render_tool_result
 
 asset_agent = fund_agent  # Backward-compatible injection point for existing task workers and tests.
+PROGRESS_UPDATE_INTERVAL_SECONDS = 45.0
 
 
 def _json(value: Any) -> str:
@@ -69,6 +70,7 @@ class ChatTaskManager:
         self._tasks: dict[str, asyncio.Task] = {}
         self._subscribers: dict[str, set[asyncio.Queue[dict | None]]] = {}
         self._task_locks: dict[str, asyncio.Lock] = {}
+        self._progress_snapshots: dict[str, dict[str, Any]] = {}
         self._worker: asyncio.Task | None = None
         self._stopping = asyncio.Event()
 
@@ -369,6 +371,11 @@ class ChatTaskManager:
         seen_tool_events: set[str] = set()
         async for event in events:
             if event.get("type") == "execution_metadata":
+                contract = event.get("task_contract") if isinstance(event.get("task_contract"), dict) else {}
+                routing = contract.get("routing") if isinstance(contract.get("routing"), dict) else {}
+                snapshot = self._progress_snapshots.setdefault(task_input.task_id, {})
+                snapshot["mode"] = str(routing.get("mode") or "supervisor_decides")
+                snapshot["deliverables"] = [str(item) for item in contract.get("deliverables", [])]
                 state = await self.store.get_task_state(task_input.task_id)
                 if state is not None:
                     state["graph_name"] = str(event.get("graph_name") or state.get("graph_name"))
@@ -378,6 +385,7 @@ class ChatTaskManager:
                     await self.store.set_task_state(task_input.task_id, state)
                 continue
             if event.get("type") == "task_outcome":
+                self._progress_snapshots.setdefault(task_input.task_id, {})["terminal"] = True
                 state = await self.store.get_task_state(task_input.task_id)
                 if state is not None:
                     if isinstance(event.get("task_contract"), dict):
@@ -429,6 +437,7 @@ class ChatTaskManager:
                         include_create=bool(event.get("create", False)),
                     ),
                 )
+                self._progress_snapshots.setdefault(task_input.task_id, {})["plan_progress"] = plan.get("progress")
                 continue
             if event.get("type") == "tool":
                 event_key = f"{event.get('name', 'unknown')}:{event.get('result', '')}"
@@ -436,6 +445,11 @@ class ChatTaskManager:
                     continue
                 seen_tool_events.add(event_key)
                 artifacts, references = await self._emit_tool_event(task_input, event)
+                snapshot = self._progress_snapshots.setdefault(task_input.task_id, {})
+                completed_tools = snapshot.setdefault("completed_tools", [])
+                tool_name = str(event.get("name") or "unknown")
+                if event.get("status", "completed") == "completed" and tool_name not in completed_tools:
+                    completed_tools.append(tool_name)
                 self._queue_unique_artifacts(pending_artifacts, artifacts)
                 self._queue_unique_references(pending_references, references)
                 continue
@@ -443,6 +457,8 @@ class ChatTaskManager:
             if text:
                 prefix = "分析摘要：" if event.get("type") == "reasoning" else ""
                 await self._emit_text(task_input, f"{prefix}{text}")
+                if event.get("type") in {"progress", "reasoning"}:
+                    self._progress_snapshots.setdefault(task_input.task_id, {})["last_summary"] = str(text)[:300]
 
         for artifact in pending_artifacts:
             await self._emit_artifact(task_input, artifact)
@@ -457,6 +473,10 @@ class ChatTaskManager:
     async def _run(self, task_input: ChatTaskInput) -> None:
         task_id = task_input.task_id
         heartbeat = asyncio.create_task(self._heartbeat(task_id), name=f"chat-heartbeat-{task_id}")
+        progress_reporter = asyncio.create_task(
+            self._progress_reporter(task_input),
+            name=f"chat-progress-{task_id}",
+        )
         try:
             await self._emit_text(task_input, "Fund Agent：正在识别任务、风险边界和所需数据。")
             orchestration_surface = f"orchestration-{task_id}"
@@ -521,11 +541,13 @@ class ChatTaskManager:
             await self._broadcast(task_id, {"event": "done", "data": "{}"})
         finally:
             heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
+            progress_reporter.cancel()
+            await asyncio.gather(heartbeat, progress_reporter, return_exceptions=True)
             await self._broadcast(task_id, None)
             self._tasks.pop(task_id, None)
             self._subscribers.pop(task_id, None)
             self._task_locks.pop(task_id, None)
+            self._progress_snapshots.pop(task_id, None)
 
     async def respond(self, task_id: str, interaction_id: str, option_id: str) -> dict[str, Any]:
         """Answer one pending interaction and resume the durable Agent task."""
@@ -594,6 +616,10 @@ class ChatTaskManager:
     async def _run_resume(self, task_input: ChatTaskInput, interaction: dict[str, Any]) -> None:
         task_id = task_input.task_id
         heartbeat = asyncio.create_task(self._heartbeat(task_id), name=f"chat-heartbeat-{task_id}")
+        progress_reporter = asyncio.create_task(
+            self._progress_reporter(task_input),
+            name=f"chat-progress-{task_id}",
+        )
         try:
             await self._emit_text(task_input, "已收到你的选择，Agent 继续执行。")
             interaction_payload = dict(interaction.get("payload") or {})
@@ -652,11 +678,38 @@ class ChatTaskManager:
             await self._broadcast(task_id, {"event": "done", "data": "{}"})
         finally:
             heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
+            progress_reporter.cancel()
+            await asyncio.gather(heartbeat, progress_reporter, return_exceptions=True)
             await self._broadcast(task_id, None)
             self._tasks.pop(task_id, None)
             self._subscribers.pop(task_id, None)
             self._task_locks.pop(task_id, None)
+            self._progress_snapshots.pop(task_id, None)
+
+    async def _progress_reporter(self, task_input: ChatTaskInput) -> None:
+        """Persist useful progress while a long task has not produced a final answer."""
+        while True:
+            await asyncio.sleep(PROGRESS_UPDATE_INTERVAL_SECONDS)
+            record = await self.store.get_task(task_input.task_id)
+            if not record or record["status"] not in {"pending", "running"}:
+                return
+            snapshot = self._progress_snapshots.get(task_input.task_id, {})
+            if snapshot.get("terminal"):
+                return
+            mode = str(snapshot.get("mode") or "正在由Supervisor判断")
+            completed_tools = [str(item) for item in snapshot.get("completed_tools", [])]
+            deliverables = [str(item) for item in snapshot.get("deliverables", [])]
+            parts = [f"阶段性进展：任务仍在执行，当前模式为 {mode}。"]
+            if completed_tools:
+                parts.append(f"已完成步骤：{'、'.join(completed_tools[-6:])}；相关结果已保留在上方。")
+            else:
+                parts.append("当前尚未形成可安全交付的结构化结论，正在完成首个分析步骤。")
+            if deliverables:
+                parts.append(f"正在优先补齐：{'、'.join(deliverables[:4])}。")
+            plan_progress = snapshot.get("plan_progress")
+            if isinstance(plan_progress, (int, float)):
+                parts.append(f"研究计划进度：{plan_progress:.0f}%。")
+            await self._emit_text(task_input, "".join(parts))
 
     async def _heartbeat(self, task_id: str) -> None:
         while True:

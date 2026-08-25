@@ -20,8 +20,8 @@ COMPLEX_QUESTION = (
 )
 
 
-def test_research_plan_tool_has_five_minute_single_attempt_budget():
-    assert tool_timeout_seconds("run_research_plan") == 300
+def test_research_plan_tool_has_thirty_minute_single_attempt_budget():
+    assert tool_timeout_seconds("run_research_plan") == 1800
     assert tool_attempts("run_research_plan") == 1
 
 

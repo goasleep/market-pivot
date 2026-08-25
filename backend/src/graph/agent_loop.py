@@ -30,10 +30,10 @@ from models.supervisor import CompletionResult, SupervisorOutcome
 from tools.policies import tool_requires_confirmation
 
 DEFAULT_MAX_STEPS = 100
-TOOL_TIMEOUT_SECONDS = 60
-RESEARCH_PLAN_TIMEOUT_SECONDS = 300
-LONG_RUNNING_TOOL_TIMEOUT_SECONDS = 900
-LLM_TIMEOUT_SECONDS = 90
+LLM_TIMEOUT_SECONDS = 1800
+TOOL_TIMEOUT_SECONDS = 1800
+RESEARCH_PLAN_TIMEOUT_SECONDS = 1800
+LONG_RUNNING_TOOL_TIMEOUT_SECONDS = 1800
 _UNFINISHED_ANSWER = re.compile(r"下一步(?:需要|要)|进一步(?:校准|确认)?需|仍需(?:查询|查找|核对)|待(?:查询|核对|确认)")
 
 
@@ -224,7 +224,9 @@ async def judge_completion(state: AgentLoopState) -> dict[str, Any]:
                     prompt,
                     system=(
                         "你是 Supervisor 的完成判定器，不负责回答原问题。判断候选答案是否完成任务合同。"
-                        "若答案说下一步要查、仍需核对，且信息可通过现有公开数据或工具获得，必须返回 terminal=false。"
+                        "采用交付优先：用户明确要求的最小交付项已完成时可以结束；可选证据缺失应披露，"
+                        "但不要为了追求完美阻止一个已经有用、诚实且可执行的回答。"
+                        "若关键交付项仍缺失且现有工具可取得，返回terminal=false。"
                         "只有确实需要用户私有信息/授权时才 needs_input。数据已尽力查询但不可得时可 data_unavailable。"
                         "返回字段：outcome(satisfied|partial|needs_input|data_unavailable|failed)、"
                         "satisfied、terminal、missing、next_action、reason。"
@@ -236,11 +238,11 @@ async def judge_completion(state: AgentLoopState) -> dict[str, Any]:
         except Exception as exc:
             logger.warning("Completion judge failed; using conservative fallback: {}", exc)
             result = CompletionResult(
-                outcome=SupervisorOutcome.PARTIAL if budget_exhausted else SupervisorOutcome.SATISFIED,
-                satisfied=not budget_exhausted,
+                outcome=SupervisorOutcome.PARTIAL,
+                satisfied=False,
                 terminal=True,
-                missing=[] if not budget_exhausted else ["完成判定器不可用"],
-                reason="完成判定器异常，已按已有证据保守收敛",
+                missing=["完成判定结果不可用"],
+                reason="完成判定器异常；已保留候选答案，但不能默认判定为完成",
             )
 
     if budget_exhausted and not result.terminal:

@@ -9,6 +9,18 @@ from application.chat_service import ChatStore, ChatTaskInput, ChatTaskManager
 from data.chat_models import ChatMessageSearch
 
 
+def _markdown_texts(events):
+    texts = []
+    for event in events:
+        if event.get("event") != "a2ui":
+            continue
+        payload = json.loads(event["data"]).get("a2ui", {})
+        value = payload.get("updateDataModel", {}).get("value", {})
+        if isinstance(value, dict) and isinstance(value.get("text"), str):
+            texts.append(value["text"])
+    return texts
+
+
 def test_public_task_error_hides_provider_details():
     message = chat_service._public_task_error(RuntimeError("sensitive_words_detected request-id-secret"))
 
@@ -231,6 +243,61 @@ async def test_chat_task_projects_plan_updates_to_stable_a2ui_surface(store, mon
     state = await store.get_task_state("task-plan")
     assert state is not None
     assert state["graph_name"] == "supervisor-agent"
+
+
+@pytest.mark.asyncio
+async def test_long_chat_emits_periodic_stage_result(store, monkeypatch):
+    _, assistant_id = await store.prepare_task(
+        conversation_id="conversation-progress",
+        task_id="task-progress",
+        message="执行综合回测",
+    )
+
+    class SlowAssetAgent:
+        def prepare(self, **kwargs):
+            return kwargs
+
+        async def chat(self, request):
+            del request
+            yield {
+                "type": "execution_metadata",
+                "graph_name": "supervisor-agent",
+                "thread_id": "task-progress",
+                "task_contract": {
+                    "objective": "执行综合回测",
+                    "deliverables": ["环境判断", "回测结果", "结论"],
+                    "routing": {"mode": "mixed_workflow"},
+                },
+            }
+            await chat_service.asyncio.sleep(0.05)
+            yield {"type": "tool", "name": "run_backtest", "status": "completed", "result": "{}"}
+            await chat_service.asyncio.sleep(0.05)
+            yield {"type": "text", "text": "最终结论。"}
+            yield {
+                "type": "task_outcome",
+                "task_contract": {"objective": "执行综合回测"},
+                "acceptance": {"outcome": "satisfied", "satisfied": True, "terminal": True},
+            }
+
+    monkeypatch.setattr(chat_service, "asset_agent", SlowAssetAgent())
+    monkeypatch.setattr(chat_service, "PROGRESS_UPDATE_INTERVAL_SECONDS", 0.02)
+    manager = ChatTaskManager(store)
+    await manager.start(
+        ChatTaskInput(
+            task_id="task-progress",
+            conversation_id="conversation-progress",
+            message="执行综合回测",
+            strategy=None,
+            asset_type="etf",
+            assistant_message_id=assistant_id,
+        )
+    )
+    events = [event async for event in manager.subscribe("task-progress")]
+    texts = _markdown_texts(events)
+
+    assert any("阶段性进展" in text for text in texts)
+    assert any("mixed_workflow" in text or "回测" in text for text in texts)
+    assert any("run_backtest" in text or "已完成" in text for text in texts)
 
 
 @pytest.mark.asyncio

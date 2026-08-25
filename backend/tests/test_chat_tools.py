@@ -8,7 +8,7 @@ from langchain_core.tools import StructuredTool
 
 import graph.agent_loop as agent_loop_module
 from agents.sentiment_analyst import analyze as analyze_sentiment
-from agents.stock_agent import StockAgent, _compact_generated_report
+from agents.stock_agent import StockAgent, _compact_generated_report, _select_tools_for_routing
 from application import strategy_comparison
 from application.research import research_service
 from artifacts.service import ArtifactService
@@ -25,6 +25,7 @@ from graph.agent_loop import (
 )
 from llm.context import ContextWindowExceededError
 from models.schemas import AssetType, Decision, MarketContext, TradeDecision
+from models.supervisor import ExecutionMode, TaskRoutingDecision
 from tools import artifacts as artifact_tools
 from tools import assets, data, research, simulation
 from tools.policies import tool_requires_confirmation
@@ -560,6 +561,105 @@ def test_compare_strategy_backtests_runs_same_assumptions_for_builtin_strategies
     assert captured["options"] == {"publish_artifacts": True, "generate_explanation": True}
 
 
+def test_strategy_comparison_returns_core_metrics_without_full_curves_or_trades():
+    curve = [{"date": f"2026-01-{index % 28 + 1:02d}", "value": index} for index in range(10_000)]
+    payload = {
+        "data_type": "strategy_backtest_comparison",
+        "ticker": "510300",
+        "asset_type": "etf",
+        "evaluation_start_date": "2018-01-01",
+        "evaluation_end_date": "2026-08-21",
+        "strategy_count": 1,
+        "ranking": ["trend_pullback"],
+        "comparisons": [
+            {
+                "strategy_name": "trend_pullback",
+                "display_name": "趋势回踩",
+                "annualized_return": 0.081,
+                "max_drawdown": 0.173,
+                "calmar_ratio": 0.468,
+                "win_rate": 0.55,
+                "total_trades": 28,
+                "total_fees": 1234.5,
+                "equity_curve": curve,
+                "drawdown_curve": curve,
+                "signal_curve": curve,
+                "trades": [{"date": "2026-01-01", "action": "buy"}] * 100,
+            }
+        ],
+        "cost_scenarios": {
+            "base": [
+                {
+                    "strategy_name": "trend_pullback",
+                    "total_return": 0.42,
+                    "max_drawdown": 0.173,
+                    "total_fees": 1234.5,
+                    "total_trades": 28,
+                }
+            ]
+        },
+        "acceptance": {"satisfied": True, "missing": []},
+        "conclusion": {"official": True, "limitations": ["历史回测不代表未来"]},
+        "price_curve": curve,
+        "artifacts": [
+            {
+                "artifact_id": "artifact-full",
+                "name": "完整结果.json",
+                "mime_type": "application/json",
+                "size_bytes": 12_000_000,
+                "object_key": "private/full.json",
+                "download_url": "/api/artifacts/artifact-full/download",
+            }
+        ],
+    }
+
+    compact = research._comparison_supervisor_payload(payload)
+    encoded = json.dumps(compact, ensure_ascii=False)
+
+    assert len(encoded) < 20_000
+    assert "price_curve" not in compact
+    assert "equity_curve" not in compact["comparisons"][0]
+    assert "trades" not in compact["comparisons"][0]
+    assert compact["supervisor_summary"]["core_metrics"][0]["annualized_return"] == 0.081
+    assert compact["supervisor_summary"]["core_metrics"][0]["calmar_ratio"] == 0.468
+    assert compact["supervisor_summary"]["cost_scenarios"]["base"][0]["total_fees"] == 1234.5
+    assert compact["artifacts"][0]["artifact_id"] == "artifact-full"
+    assert "object_key" not in compact["artifacts"][0]
+    assert "不要调用 read_artifact" in compact["supervisor_summary"]["instruction"]
+
+
+def test_backtest_routing_hides_read_artifact_from_supervisor():
+    def placeholder():
+        return "ok"
+
+    read_tool = StructuredTool.from_function(
+        func=placeholder,
+        name="read_artifact",
+        description="Read artifact",
+    )
+    backtest_tool = StructuredTool.from_function(
+        func=placeholder,
+        name="compare_strategy_backtests",
+        description="Run comparison",
+    )
+    tools = [read_tool, backtest_tool]
+
+    for mode in (ExecutionMode.BACKTEST_EXECUTION, ExecutionMode.MIXED_WORKFLOW):
+        selected = _select_tools_for_routing(
+            tools,
+            [read_tool],
+            TaskRoutingDecision(mode=mode, requires_tools=True),
+        )
+        assert [tool.name for tool in selected] == ["compare_strategy_backtests"]
+
+    research_selected = _select_tools_for_routing(
+        tools,
+        [read_tool],
+        TaskRoutingDecision(mode=ExecutionMode.EVIDENCE_RESEARCH, requires_tools=True),
+    )
+    assert [tool.name for tool in research_selected] == ["read_artifact", "compare_strategy_backtests"]
+
+
 def test_strategy_comparison_without_history_returns_completed_observation(monkeypatch):
     async def no_history(*_args, **_kwargs):
         raise BacktestDataError("159999 所有历史行情源均不可用")
@@ -981,14 +1081,39 @@ def test_chat_renders_backtest_result_with_curve_and_trades():
 
 def test_generated_html_source_is_compacted_when_a_file_artifact_exists():
     response = _compact_generated_report(
-        "报告已生成。\n\n```html\n<!doctype html><html><body>完整报告</body></html>\n```"
+        "报告已生成。\n\n```html\n<!doctype html><html><body>完整报告</body></html>\n```",
+        [{"name": "研究报告.html", "mime_type": "text/html", "metadata": {"description": "完整研究结论"}}],
     )
 
     assert "<!doctype html>" not in response
-    assert "文件产物" in response
+    assert "报告已生成" in response
+    assert "HTML" in response
 
 
 def test_long_generated_report_is_compacted_when_artifact_exists():
-    response = _compact_generated_report("标题\n" + ("很长的分析内容。\n" * 20))
+    response = _compact_generated_report(
+        "标题\n" + ("很长的分析内容。\n" * 200),
+        [{"name": "验证方案.md", "mime_type": "text/markdown", "metadata": {"description": "完整验证方案"}}],
+    )
 
-    assert response == "完整 HTML 报告已生成文件产物，请点击下方卡片预览或下载。"
+    assert response.startswith("标题")
+    assert "Markdown" in response
+    assert "验证方案.md" in response
+    assert len(response) > 100
+
+
+def test_generic_artifact_notice_is_replaced_with_description():
+    response = _compact_generated_report(
+        "完整 HTML 报告已生成文件产物，请点击下方卡片预览或下载。",
+        [
+            {
+                "name": "A股宽基验证方案.md",
+                "mime_type": "text/markdown",
+                "metadata": {"description": "覆盖数据、策略、成本、指标和稳健性检验的预注册方案。"},
+            }
+        ],
+    )
+
+    assert "覆盖数据、策略、成本" in response
+    assert "Markdown" in response
+    assert "HTML 报告" not in response

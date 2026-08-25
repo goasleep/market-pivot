@@ -27,6 +27,165 @@ def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+_CORE_BACKTEST_FIELDS = (
+    "strategy_name",
+    "display_name",
+    "description",
+    "total_return",
+    "annualized_return",
+    "annualized_volatility",
+    "max_drawdown",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "calmar_ratio",
+    "win_rate",
+    "profit_factor",
+    "exposure",
+    "turnover",
+    "total_fees",
+    "total_trades",
+    "final_value",
+    "excess_return",
+    "error",
+)
+
+
+def _core_backtest_row(row: Any) -> dict[str, Any]:
+    if not isinstance(row, dict):
+        return {}
+    compact = {field: row.get(field) for field in _CORE_BACKTEST_FIELDS if field in row}
+    diagnostics = row.get("diagnostics")
+    out_of_sample = diagnostics.get("out_of_sample") if isinstance(diagnostics, dict) else None
+    if isinstance(out_of_sample, dict):
+        compact["out_of_sample"] = {
+            key: out_of_sample.get(key)
+            for key in ("start_date", "end_date", "out_of_sample_return", "max_drawdown", "sharpe_ratio")
+            if key in out_of_sample
+        }
+    return compact
+
+
+def _compact_cost_scenarios(value: Any) -> dict[str, list[dict[str, Any]]]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(name): [_core_backtest_row(row) for row in rows if isinstance(row, dict)]
+        for name, rows in value.items()
+        if isinstance(rows, list)
+    }
+
+
+def _compact_artifacts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    fields = (
+        "artifact_id",
+        "name",
+        "artifact_type",
+        "mime_type",
+        "size_bytes",
+        "preview_url",
+        "download_url",
+    )
+    return [
+        {field: artifact.get(field) for field in fields if artifact.get(field) is not None}
+        for artifact in value
+        if isinstance(artifact, dict)
+    ]
+
+
+def _compact_snapshot(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    fields = (
+        "source",
+        "source_id",
+        "provider",
+        "adjustment",
+        "requested_start_date",
+        "requested_end_date",
+        "actual_start_date",
+        "actual_end_date",
+        "row_count",
+        "sha256",
+        "fetched_at",
+    )
+    return {field: value.get(field) for field in fields if value.get(field) is not None}
+
+
+def _comparison_supervisor_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return only explainable metrics; full curves and trades remain in artifacts."""
+    raw_comparisons = payload.get("comparisons")
+    comparisons = [
+        _core_backtest_row(row)
+        for row in raw_comparisons
+        if isinstance(row, dict)
+    ] if isinstance(raw_comparisons, list) else []
+    cost_scenarios = _compact_cost_scenarios(payload.get("cost_scenarios"))
+    artifacts = _compact_artifacts(payload.get("artifacts"))
+    conclusion = payload.get("conclusion") if isinstance(payload.get("conclusion"), dict) else {}
+    acceptance = payload.get("acceptance") if isinstance(payload.get("acceptance"), dict) else {}
+    data_validation = payload.get("data_validation") if isinstance(payload.get("data_validation"), dict) else {}
+    validation_summary = {
+        key: data_validation.get(key)
+        for key in ("status", "selected_source", "selection_reason", "rule_version")
+        if data_validation.get(key) is not None
+    }
+    compact = {
+        "data_type": "strategy_backtest_comparison",
+        "_tool_name": "compare_strategy_backtests",
+        "available": payload.get("available", True),
+        "data_status": payload.get("data_status", "available"),
+        "ticker": payload.get("ticker"),
+        "asset_type": payload.get("asset_type"),
+        "requested_start_date": payload.get("requested_start_date"),
+        "evaluation_start_date": payload.get("evaluation_start_date") or payload.get("start_date"),
+        "evaluation_end_date": payload.get("evaluation_end_date") or payload.get("end_date"),
+        "actual_start_date": payload.get("actual_start_date"),
+        "actual_end_date": payload.get("actual_end_date"),
+        "history_years": payload.get("history_years"),
+        "initial_capital": payload.get("initial_capital"),
+        "strategy_count": payload.get("strategy_count", len(comparisons)),
+        "benchmark": payload.get("benchmark"),
+        "ranking_metric": payload.get("ranking_metric"),
+        "ranking_label": payload.get("ranking_label"),
+        "ranking": list(payload.get("ranking") or []),
+        "comparisons": comparisons,
+        "cost_scenarios": cost_scenarios,
+        "cost_consistency": payload.get("cost_consistency", {}),
+        "data_snapshot": _compact_snapshot(payload.get("data_snapshot")),
+        "data_validation": validation_summary,
+        "execution": payload.get("execution", {}),
+        "acceptance": acceptance,
+        "conclusion": conclusion,
+        "research_decision": payload.get("research_decision", {}),
+        "artifacts": artifacts,
+        "artifact_count": len(artifacts),
+        "artifact_usage": "完整曲线、逐日净值、信号和成交明细仅供用户下载审计；Supervisor 不应读取附件形成正文。",
+        "provenance": payload.get("provenance", {}),
+    }
+    if payload.get("message") is not None:
+        compact["message"] = payload.get("message")
+    if payload.get("error") is not None:
+        compact["error"] = payload.get("error")
+    compact["supervisor_summary"] = {
+        "instruction": (
+            "核心指标已经完整包含在本对象中。请直接解释 comparisons、cost_scenarios、acceptance、"
+            "conclusion 和数据口径；不要调用 read_artifact 或 list_artifacts 补取回测正文。"
+        ),
+        "period": {
+            "start": compact["evaluation_start_date"],
+            "end": compact["evaluation_end_date"],
+        },
+        "core_metrics": comparisons,
+        "cost_scenarios": cost_scenarios,
+        "ranking": compact["ranking"],
+        "acceptance": acceptance,
+        "conclusion": conclusion,
+    }
+    return compact
+
+
 @tool
 async def compute_technical_indicators(ticker: str, asset_type: str = "stock", limit: int = 120) -> str:
     """获取历史价格并计算均线、MACD、RSI、KDJ、布林带和量能指标。"""
@@ -229,7 +388,7 @@ async def compare_strategy_backtests(
     objective: str = "",
     market_benchmark_ticker: str = "000300",
 ) -> str:
-    """在共享数据快照上比较标准策略，并完成成本、样本外和稳定性检验。"""
+    """比较策略并直接返回核心指标；完整曲线和成交明细仅保存在审计附件中。"""
     kind = AssetType(asset_type)
     strategies = strategy_comparison.standard_strategy_suite(kind)
     if strategy_names:
@@ -291,7 +450,7 @@ async def compare_strategy_backtests(
             ),
         }
     )
-    return _dump(payload)
+    return _dump(_comparison_supervisor_payload(payload))
 
 
 @tool

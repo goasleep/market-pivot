@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -109,6 +110,59 @@ async def test_chat_with_tools_normalizes_generated_content(monkeypatch):
     result = await service.chat_with_tools([], [])
 
     assert result.content == "技术性的交易与相关行为"
+
+
+@pytest.mark.asyncio
+async def test_async_model_calls_use_thirty_minute_timeout(monkeypatch):
+    captured: list[float] = []
+    original_wait = service_module.asyncio.wait
+
+    async def capture_wait(awaitables, timeout):
+        captured.append(timeout)
+        return await original_wait(awaitables, timeout=timeout)
+
+    class FakeModel:
+        def bind_tools(self, _tools):
+            return self
+
+        async def ainvoke(self, _messages):
+            return AIMessage(content="完成")
+
+    service = LLMService()
+    monkeypatch.setattr(service, "get_model", lambda **_kwargs: FakeModel())
+    monkeypatch.setattr(service_module.asyncio, "wait", capture_wait)
+
+    await service.chat("问题")
+    await service.chat_langchain([])
+    await service.chat_with_tools([], [])
+
+    assert captured == [1800, 1800, 1800]
+
+
+@pytest.mark.asyncio
+async def test_async_model_hard_timeout_does_not_wait_for_provider_cancellation(monkeypatch):
+    finished = asyncio.Event()
+
+    class CancellationDelayingModel:
+        async def ainvoke(self, _messages):
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.08)
+                finished.set()
+                return AIMessage(content="迟到结果")
+
+    service = LLMService()
+    monkeypatch.setattr(service, "get_model", lambda **_kwargs: CancellationDelayingModel())
+    monkeypatch.setattr(service_module, "LLM_CALL_TIMEOUT_SECONDS", 0.01)
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(TimeoutError, match="hard limit"):
+        await service.chat("问题")
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 0.05
+    await asyncio.wait_for(finished.wait(), timeout=0.2)
 
 
 @pytest.mark.asyncio

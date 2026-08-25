@@ -27,7 +27,39 @@ _GENERATED_TEXT_REPLACEMENTS = (
     ("性交易", "性的交易"),
     ("性交", "相关行为"),
 )
-VISION_CALL_TIMEOUT_SECONDS = 60.0
+LLM_CALL_TIMEOUT_SECONDS = 1800.0
+VISION_CALL_TIMEOUT_SECONDS = LLM_CALL_TIMEOUT_SECONDS
+
+
+def _consume_background_task_result(task: asyncio.Task[Any]) -> None:
+    """Consume a late provider result after a hard deadline to avoid task warnings."""
+    try:
+        task.result()
+    except BaseException:
+        pass
+
+
+async def _ainvoke_with_timeout(
+    model: Any,
+    messages: list[Any],
+    *,
+    timeout: float | None = None,
+) -> Any:
+    """Apply a hard per-call limit without imposing an outer task deadline.
+
+    ``asyncio.wait_for`` waits for cancellation to finish. Some OpenAI-compatible
+    transports defer or suppress that cancellation, allowing a nominal timeout to
+    overrun indefinitely. ``asyncio.wait`` lets the Agent stop waiting at the
+    deadline; the provider task is cancelled best-effort and observed separately.
+    """
+    call_timeout = LLM_CALL_TIMEOUT_SECONDS if timeout is None else timeout
+    task = asyncio.ensure_future(model.ainvoke(messages))
+    done, _ = await asyncio.wait({task}, timeout=call_timeout)
+    if task in done:
+        return task.result()
+    task.cancel()
+    task.add_done_callback(_consume_background_task_result)
+    raise TimeoutError(f"LLM call exceeded the {call_timeout:g}-second hard limit")
 
 
 def _normalize_generated_financial_text(text: str) -> str:
@@ -221,7 +253,7 @@ class LLMService:
         )
         try:
             context = select_messages_for_model(messages, model=model, max_output_tokens=max_tokens)
-            response = await chat_model.ainvoke(_to_messages(context.messages))
+            response = await _ainvoke_with_timeout(chat_model, _to_messages(context.messages))
         except Exception as exc:
             if not is_context_overflow_error(exc):
                 logger.error("LLM call failed: {}", exc)
@@ -229,7 +261,7 @@ class LLMService:
             logger.warning("LLM context rejected; retrying with projected application prompt: {}", exc)
             recovery_budget = _recovery_budget(model=model, max_tokens=max_tokens)
             recovery_messages = _project_application_prompt(prompt, system, recovery_budget)
-            response = await chat_model.ainvoke(_to_messages(recovery_messages))
+            response = await _ainvoke_with_timeout(chat_model, _to_messages(recovery_messages))
         try:
             content = _normalize_generated_financial_text(_message_text(response))
             logger.debug("LLM response ({}): {} chars", model or "configured", len(content))
@@ -349,8 +381,9 @@ class LLMService:
         )
         context = select_messages_for_model(messages, model=model)
         try:
-            response = await asyncio.wait_for(
-                chat_model.ainvoke(_to_messages(context.messages)),
+            response = await _ainvoke_with_timeout(
+                chat_model,
+                _to_messages(context.messages),
                 timeout=VISION_CALL_TIMEOUT_SECONDS,
             )
             return _parse_json_object(_message_text(response))
@@ -381,13 +414,13 @@ class LLMService:
         )
         try:
             context = select_messages_for_model(messages, model=model)
-            response = await chat_model.ainvoke(_to_messages(context.messages))
+            response = await _ainvoke_with_timeout(chat_model, _to_messages(context.messages))
         except Exception as exc:
             if not is_context_overflow_error(exc):
                 raise
             logger.warning("LangChain context rejected; retrying with reduced context budget: {}", exc)
             context = select_messages_for_model(messages, budget=_recovery_budget(model=model))
-            response = await chat_model.ainvoke(_to_messages(context.messages))
+            response = await _ainvoke_with_timeout(chat_model, _to_messages(context.messages))
         return _normalize_generated_financial_text(_message_text(response))
 
     async def chat_with_tools(
@@ -405,21 +438,22 @@ class LLMService:
         responsible for executing returned tool calls and feeding ToolMessage
         results back into the conversation.
         """
-        bound_model = self.get_model(
+        chat_model = self.get_model(
             model=model,
             temperature=temperature,
             profile_id=profile_id,
             route=route,
-        ).bind_tools(tools)
+        )
+        bound_model = chat_model.bind_tools(tools) if tools else chat_model
         try:
             context = select_messages_for_model(messages, tools=tools, model=model)
-            response = await bound_model.ainvoke(_to_messages(context.messages))
+            response = await _ainvoke_with_timeout(bound_model, _to_messages(context.messages))
         except Exception as exc:
             if not is_context_overflow_error(exc):
                 raise
             logger.warning("Tool-chat context rejected; retrying with reduced context budget: {}", exc)
             context = select_messages_for_model(messages, tools=tools, budget=_recovery_budget(model=model))
-            response = await bound_model.ainvoke(_to_messages(context.messages))
+            response = await _ainvoke_with_timeout(bound_model, _to_messages(context.messages))
         return _normalize_generated_message(response)
 
 

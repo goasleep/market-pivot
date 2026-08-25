@@ -16,7 +16,7 @@ from loguru import logger
 from agents.asset_requests import AssetAgentRequest, AssetIntent, AssetRequestResolver
 from application.research import research_service
 from application.research_plan import research_plan_service
-from application.task_contract import compile_task_contract
+from application.task_contract import classify_task_execution, compile_task_contract
 from graph.agent_loop import (
     get_agent_loop,
     resume_agent_loop,
@@ -27,6 +27,7 @@ from graph.agent_loop import (
 from graph.checkpointing import checkpoint_manager
 from llm.context import select_conversation_history
 from models.schemas import AssetType
+from models.supervisor import ExecutionMode, TaskRoutingDecision
 from observability import build_trace_config
 from tools.registry import build_artifact_tools, build_chat_tools
 
@@ -37,17 +38,59 @@ _HTML_SOURCE_BLOCK = re.compile(
 _RAW_HTML_SOURCE = re.compile(r"(?:<!doctype\s+html|<html\b).*", flags=re.IGNORECASE | re.DOTALL)
 
 
-def _compact_generated_report(text: str) -> str:
-    """Keep the chat concise when a report file has already been generated."""
+_GENERIC_ARTIFACT_NOTICE = re.compile(r"完整\s*HTML\s*报告已生成文件产物", flags=re.IGNORECASE)
+
+
+def _artifact_label(artifact: dict[str, Any]) -> str:
+    mime_type = str(artifact.get("mime_type") or "")
+    return {
+        "text/markdown": "Markdown",
+        "text/html": "HTML",
+        "application/pdf": "PDF",
+        "text/csv": "CSV",
+        "application/json": "JSON",
+    }.get(mime_type, "文件")
+
+
+def _compact_generated_report(text: str, artifacts: list[dict[str, Any]] | None = None) -> str:
+    """Remove embedded source while retaining a useful chat-native conclusion."""
+    artifacts = artifacts or []
+    artifact = artifacts[0] if artifacts else {}
+    name = str(artifact.get("name") or "完整报告")
+    label = _artifact_label(artifact)
+    metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
+    description = str(metadata.get("description") or "").strip()
     match = _HTML_SOURCE_BLOCK.search(text) or _RAW_HTML_SOURCE.search(text)
-    notice = "完整 HTML 报告已生成文件产物，请点击下方卡片预览或下载。"
     if match is not None:
         lead = text[: match.start()].strip()
         tail = text[match.end() :].strip()
-        return "\n\n".join(part for part in (lead, notice, tail) if part)
-    if len(text) > 1600 or text.count("\n") > 18:
-        return notice
-    return text
+        text = "\n\n".join(part for part in (lead, tail) if part)
+    if _GENERIC_ARTIFACT_NOTICE.search(text) and len(text.strip()) < 200:
+        text = description
+    if len(text) > 1800:
+        prefix = text[:1600]
+        boundary = max(prefix.rfind("\n\n"), prefix.rfind("。"), prefix.rfind("；"))
+        text = prefix[: boundary + 1].strip() if boundary >= 400 else prefix.rstrip()
+        text = f"{text}\n\n（正文已节选，完整内容保存在附件中。）"
+    if not text.strip():
+        text = description or "报告已经生成，核心结论和完整明细请查看附件。"
+    notice = f"完整内容见下方附件：{name}（{label}），可直接预览或下载。"
+    return "\n\n".join(part for part in (text.strip(), notice) if part)
+
+
+def _select_tools_for_routing(
+    all_tools: list[StructuredTool],
+    artifact_tools: list[StructuredTool],
+    routing: TaskRoutingDecision,
+) -> list[StructuredTool]:
+    """Enforce the execution surface chosen by the routing model."""
+    if routing.mode == ExecutionMode.DIRECT_RESPONSE:
+        return []
+    if routing.mode == ExecutionMode.ARTIFACT_GENERATION:
+        return list(artifact_tools)
+    if routing.mode in {ExecutionMode.BACKTEST_EXECUTION, ExecutionMode.MIXED_WORKFLOW}:
+        return [tool for tool in all_tools if tool.name != "read_artifact"]
+    return list(all_tools)
 
 
 class AssetAgent(AssetRequestResolver):
@@ -189,17 +232,32 @@ class AssetAgent(AssetRequestResolver):
                 "resume": {"request": self.request_payload(request)},
             }
             return
+        routing = await classify_task_execution(
+            request.message,
+            tickers=request.tickers,
+            asset_type=request.asset_type.value,
+            mutation_requested=request.allow_mutating_tools,
+        )
         task_contract = compile_task_contract(
             request.message,
             tickers=request.tickers,
             asset_type=request.asset_type.value,
             mutation_requested=request.allow_mutating_tools,
+            routing_decision=routing,
         )
         yield {
             "type": "execution_metadata",
             "graph_name": "supervisor-agent",
             "thread_id": request.task_id,
             "task_contract": task_contract.model_dump(mode="json"),
+        }
+        deliverable_text = "、".join(task_contract.deliverables[:4]) or "直接回答请求"
+        yield {
+            "type": "progress",
+            "text": (
+                f"阶段性结果：模型已将任务判定为 {routing.mode.value}；"
+                f"本轮优先交付：{deliverable_text}。"
+            ),
         }
         analysis_tool = self._analysis_tool(
             progress_callback,
@@ -210,17 +268,23 @@ class AssetAgent(AssetRequestResolver):
             conversation_id=request.conversation_id,
             task_id=request.task_id,
         )
-        tools = build_chat_tools(
+        all_tools = build_chat_tools(
             analysis_tool,
             artifact_tools=artifact_tools,
             allow_mutating_tools=request.allow_mutating_tools,
             conversation_id=request.conversation_id,
             task_id=request.task_id,
         )
-        tools.append(self._research_plan_tool(request, tools))
+        tools = _select_tools_for_routing(all_tools, artifact_tools, routing)
+        if routing.allow_research_plan and tools:
+            tools.append(self._research_plan_tool(request, list(tools)))
+        routing_payload = json.dumps(routing.model_dump(mode="json"), ensure_ascii=False)
         system = (
             "你是系统中唯一的 Supervisor Agent。你负责理解任务、选择行动、执行原子工具、必要时委派研究子能力、"
-            "整合证据并完成回答。不要把‘下一步需要查询/核对’当作答案；只要公开数据仍可通过现有工具获得，就继续执行。"
+            "整合证据并完成回答。当前模型路由决定是：" + routing_payload + "。"
+            "必须采用交付优先：先完成用户明确要求的最小交付项；一旦已有足够证据形成诚实、有用、可执行的回答，立即交付。"
+            "可选证据缺失时明确披露，不要为了追求完美而重复查询、重新运行已完成步骤或阻塞最终回答。"
+            "只有关键交付项仍缺失且现有工具可以取得时才继续执行。"
             "简单任务由你直接完成；复杂、多步骤研究可调用 run_research_plan，综合趋势与风险分析可调用 "
             "run_fund_or_stock_analysis；所有子能力结果都必须回到你这里再综合。"
             "用户只给出宽泛产品类别时，主动选择可验证且有代表性的样本，明确披露样本及选择依据；"
@@ -239,6 +303,9 @@ class AssetAgent(AssetRequestResolver):
             "需要网页正文时调用 fetch_web_content；需要财务或基金基础数据时调用 "
             "get_fundamentals 或 get_fund_nav_history；"
             "需要技术指标、风险计算、交易计划或回测时调用对应的原子工具，不要凭记忆计算。"
+            "回测工具会直接返回 Supervisor 所需的核心指标、成本情景、区间、数据口径、验收结论和限制；"
+            "必须直接使用这些结构化字段解释结果。回测附件只供用户下载审计，禁止为了形成聊天正文调用 "
+            "read_artifact 或 list_artifacts 读取完整回测文件。"
             "当用户询问投资理念、投资经验、市场观点、论文方法、策略依据或历史复盘方法时，"
             "调用 search_methodology 检索本地方法论库；方法论只能用于形成、解释和比较可验证假设，"
             "不能替代当前行情、结构化指标、风险计算或回测，也不能单独作为买卖结论。"
@@ -250,14 +317,15 @@ class AssetAgent(AssetRequestResolver):
             "JSON、CSV、图片和视频都属于 artifact。"
             "当用户要求报告、保存、下载，或内容已经适合独立阅读时，自行调用 save_artifacts；可以一次保存多个不同文件。"
             "保存文本时使用 content，保存 PDF、图片或视频时使用 content_base64；不要把完整 HTML 源码直接放进聊天回复。"
-            "已有产物可用 list_artifacts 查看，文本内容可用 read_artifact 读取，"
+            "非回测任务的已有产物可用 list_artifacts 查看，文本内容可用 read_artifact 读取，"
             "结构化价格序列可用 create_chart_artifact 生成使用 ECharts canvas 的 HTML 图表文件。"
             "每次调用工具前可以先给出一句简短的公开分析摘要，说明接下来要核对什么；不要输出详细内部思维链。"
             "如果工具返回失败，先读取错误代码和消息：临时网络错误可原参数重试一次；参数、格式或能力错误必须调整参数或改用"
             "同一意图范围内的替代工具，不能原样重复失败调用；权限不足、用户拒绝或无法安全修复时停止并明确说明。"
             "完成工具调用后，用中文简洁回答；需要判断时直接给出首选建议、证据和适用条件，最终选择交给用户，"
             "不要用‘不存在唯一最好方案’、‘不同指标代表不同取舍’等常识性段落代替建议。"
-            "如果工具结果包含 artifacts，说明报告文件已经生成；禁止再次输出 HTML 或 Markdown 源码，只需给出简短结论。"
+            "如果工具结果包含 artifacts，正文仍必须给出结论、关键依据、限制和下一步的简短摘要；"
+            "附件只能承载完整明细，不能代替聊天正文。禁止再次输出 HTML 或 Markdown 源码。"
             "明确数据日期、来源和数据缺失。产品只服务于小散户的短中期基金交易研究和模拟交易，不承诺收益，"
             "股票分析不能冒充基金建议。若只是闲聊或询问能力，可以直接回答。"
             "系统支持查询模拟盘账户、持仓和订单；只有用户明确要求时才可创建或取消模拟盘订单，"
@@ -273,7 +341,7 @@ class AssetAgent(AssetRequestResolver):
         messages: list[Any] = [system_message, *history_selection.messages, current_message]
         final_response = ""
         completion_result: dict[str, Any] = {}
-        artifacts_generated = False
+        generated_artifacts: list[dict[str, Any]] = []
         chat_config = build_trace_config(
             "supervisor-agent",
             tags=["asset-agent", "chat", request.intent.value],
@@ -349,7 +417,9 @@ class AssetAgent(AssetRequestResolver):
                     if event.get("name") in {"run_fund_or_stock_analysis", "save_artifacts"}:
                         try:
                             tool_payload = json.loads(str(event.get("result", "")))
-                            artifacts_generated = artifacts_generated or bool(tool_payload.get("artifacts"))
+                            generated_artifacts.extend(
+                                item for item in tool_payload.get("artifacts", []) if isinstance(item, dict)
+                            )
                         except (TypeError, json.JSONDecodeError):
                             pass
                     yield {
@@ -357,6 +427,14 @@ class AssetAgent(AssetRequestResolver):
                         "name": event.get("name", "unknown"),
                         "status": event.get("status", "completed"),
                         "result": event.get("result", ""),
+                    }
+                    yield {
+                        "type": "progress",
+                        "text": (
+                            f"阶段性结果：工具 {event.get('name', 'unknown')} 已"
+                            f"{'完成' if event.get('status', 'completed') == 'completed' else '结束但未取得有效结果'}；"
+                            "已获得的结构化结果已保留，Supervisor 正在优先整理可交付结论。"
+                        ),
                     }
                 for event in node_update.get("reasoning_events", []):
                     if isinstance(event, dict) and event.get("text"):
@@ -372,7 +450,11 @@ class AssetAgent(AssetRequestResolver):
                 "acceptance": completion_result,
             }
         if final_response:
-            text = _compact_generated_report(final_response) if artifacts_generated else final_response
+            text = (
+                _compact_generated_report(final_response, generated_artifacts)
+                if generated_artifacts
+                else final_response
+            )
             yield {"type": "text", "text": text}
 
     async def resume_checkpoint(self, request: AssetAgentRequest) -> AsyncIterator[dict[str, Any]]:

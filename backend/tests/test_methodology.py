@@ -5,6 +5,7 @@ import pytest
 import agents.stock_agent as stock_agent_module
 from agents.stock_agent import AssetAgentRequest, AssetIntent, StockAgent
 from methodology.library import MethodologyLibrary
+from models.supervisor import ExecutionMode, TaskRoutingDecision
 from tools import assets, methodology
 from tools.registry import build_chat_tools
 
@@ -81,7 +82,18 @@ def test_stock_agent_prompt_and_tool_surface_include_methodology(monkeypatch):
             }
         }
 
+    async def route_to_research(*args, **kwargs):
+        del args, kwargs
+        return TaskRoutingDecision(
+            mode=ExecutionMode.EVIDENCE_RESEARCH,
+            requires_tools=True,
+            allow_research_plan=True,
+            deliverables=["解释方法论"],
+            confidence=1.0,
+        )
+
     monkeypatch.setattr(stock_agent_module, "stream_agent_loop", fake_stream)
+    monkeypatch.setattr(stock_agent_module, "classify_task_execution", route_to_research)
     request = AssetAgentRequest(
         message="请解释趋势跟踪的投资理念",
         history=[],

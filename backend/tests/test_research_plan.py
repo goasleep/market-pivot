@@ -27,6 +27,7 @@ from graph.research_plan import (
 from llm.context import ContextBudget, ContextWindowExceededError, TokenCounter
 from models.research_plan import ResearchPlan, ResearchStep
 from models.schemas import AssetType
+from models.supervisor import ExecutionMode, TaskRoutingDecision
 
 
 def _plan(steps):
@@ -547,7 +548,7 @@ async def test_research_plan_uses_shared_long_running_tool_timeout(monkeypatch):
         {"ticker": "510300", "asset_type": "etf"},
     )
 
-    assert captured["timeout"] == research_graph.tool_timeout_seconds("run_fund_or_stock_analysis") == 900
+    assert captured["timeout"] == research_graph.tool_timeout_seconds("run_fund_or_stock_analysis") == 1800
 
 
 @pytest.mark.asyncio
@@ -908,7 +909,18 @@ async def test_all_readonly_research_intents_expose_plan_as_supervisor_tool(monk
             }
         }
 
+    async def route_to_research(*args, **kwargs):
+        del args, kwargs
+        return TaskRoutingDecision(
+            mode=ExecutionMode.EVIDENCE_RESEARCH,
+            requires_tools=True,
+            allow_research_plan=True,
+            deliverables=["完成研究"],
+            confidence=1.0,
+        )
+
     monkeypatch.setattr(stock_agent_module, "stream_agent_loop", fake_supervisor)
+    monkeypatch.setattr(stock_agent_module, "classify_task_execution", route_to_research)
     request = AssetAgentRequest(
         message=f"执行 {intent.value} 研究",
         history=[],

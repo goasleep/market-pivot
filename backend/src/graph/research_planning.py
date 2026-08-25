@@ -14,8 +14,8 @@ from models.schemas import AssetType
 from models.strategy_research import TaskContract, strategy_comparison_contract
 
 DEPTH_BUDGETS = {
-    "quick": ResearchBudget(max_steps=3, max_tool_calls=4, max_replans=1, deadline_seconds=300),
-    "standard": ResearchBudget(max_steps=8, max_tool_calls=16, max_replans=1, deadline_seconds=900),
+    "quick": ResearchBudget(max_steps=3, max_tool_calls=4, max_replans=1, deadline_seconds=1800),
+    "standard": ResearchBudget(max_steps=8, max_tool_calls=16, max_replans=1, deadline_seconds=1800),
     "deep": ResearchBudget(max_steps=16, max_tool_calls=32, max_replans=2, deadline_seconds=1800),
 }
 DEPTH_STEP_RANGES = {"quick": (1, 3), "standard": (4, 8), "deep": (9, 16)}
