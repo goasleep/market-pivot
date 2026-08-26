@@ -72,10 +72,7 @@ class FundScreener:
             frame = frame.with_columns(pl.lit("").alias("name"))
         if keyword:
             frame = frame.filter(
-                pl.col("name")
-                .cast(pl.String)
-                .str.to_lowercase()
-                .str.contains(keyword.strip().lower(), literal=True)
+                pl.col("name").cast(pl.String).str.to_lowercase().str.contains(keyword.strip().lower(), literal=True)
             )
         if min_pct_chg is not None:
             frame = frame.filter(pl.col("pct_chg") >= min_pct_chg)

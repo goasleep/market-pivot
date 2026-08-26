@@ -16,11 +16,12 @@ class Decision(str, Enum):
 
 
 class AssetType(str, Enum):
-    """Supported exchange-traded assets."""
+    """Concrete routable financial products exposed by the public API."""
 
     STOCK = "stock"
     ETF = "etf"
     LOF = "lof"
+    OPEN_FUND = "open_fund"
 
 
 class Instrument(BaseModel):
@@ -683,6 +684,12 @@ class LiveOrderIntent(BaseModel):
     submitted_date: str
     fill_policy: Literal["next_open", "same_close", "manual"] = "next_open"
 
+    @model_validator(mode="after")
+    def reject_open_fund_execution(self):
+        if self.asset_type == AssetType.OPEN_FUND:
+            raise ValueError("open_fund 不支持真实或模拟订单执行")
+        return self
+
 
 class AssetTradingRules(BaseModel):
     """Trading constraints that vary by asset type."""
@@ -751,6 +758,8 @@ class SimulationAccountConfig(BaseModel):
 
     @model_validator(mode="after")
     def _set_trading_rules(self):
+        if self.asset_type == AssetType.OPEN_FUND:
+            raise ValueError("open_fund 首期不支持模拟申购、赎回、份额确认或到账周期")
         if self.trading_rules is None or self.trading_rules.asset_type != self.asset_type:
             self.trading_rules = AssetTradingRules(
                 asset_type=self.asset_type,

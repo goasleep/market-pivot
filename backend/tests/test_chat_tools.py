@@ -8,7 +8,8 @@ from langchain_core.tools import StructuredTool
 
 import graph.agent_loop as agent_loop_module
 from agents.sentiment_analyst import analyze as analyze_sentiment
-from agents.stock_agent import StockAgent, _compact_generated_report, _select_tools_for_routing
+from agents.stock_agent import AssetAgent as StockAgent
+from agents.stock_agent import _compact_generated_report, _select_tools_for_routing
 from application import strategy_comparison
 from application.research import research_service
 from artifacts.service import ArtifactService
@@ -20,6 +21,7 @@ from engine.simulation_account import SimulationAccountService
 from graph.agent_loop import (
     LONG_RUNNING_TOOL_TIMEOUT_SECONDS,
     TOOL_TIMEOUT_SECONDS,
+    _find_reusable_tool_event,
     tool_attempts,
     tool_timeout_seconds,
 )
@@ -255,7 +257,7 @@ def test_chat_agent_exposes_atomic_research_tools():
     names = {tool.name for tool in build_chat_tools(assets.get_realtime_quote)}
     assert {
         "fetch_web_content",
-        "get_fund_nav_history",
+        "get_exchange_fund_nav_history",
         "get_fundamentals",
         "compute_technical_indicators",
         "calculate_risk_metrics",
@@ -460,8 +462,8 @@ def test_realtime_quote_falls_back_to_latest_history(monkeypatch):
             ]
         )
 
-    monkeypatch.setattr(assets, "async_get_fund_realtime", empty_realtime)
-    monkeypatch.setattr(assets, "async_get_fund_history", history)
+    monkeypatch.setattr(assets, "async_get_exchange_fund_quote", empty_realtime)
+    monkeypatch.setattr(assets, "async_get_exchange_fund_history", history)
 
     result = asyncio.run(assets.get_realtime_quote.ainvoke({"ticker": "510300", "asset_type": "etf"}))
     payload = json.loads(result)
@@ -492,10 +494,10 @@ def test_empty_fund_nav_is_returned_as_unavailable_observation(monkeypatch):
     async def empty_nav(*_args, **_kwargs):
         return pd.DataFrame()
 
-    monkeypatch.setattr(assets, "async_get_fund_nav_history", empty_nav)
+    monkeypatch.setattr(assets, "async_get_exchange_fund_nav_history", empty_nav)
 
     result = asyncio.run(
-        assets.get_fund_nav_history.ainvoke({"ticker": "159999", "asset_type": "etf"})
+        assets.get_exchange_fund_nav_history.ainvoke({"ticker": "159999", "asset_type": "etf"})
     )
     payload = json.loads(result)
 
@@ -509,7 +511,7 @@ def test_empty_technical_history_is_returned_as_unavailable_observation(monkeypa
     async def empty_history(*_args, **_kwargs):
         return pd.DataFrame()
 
-    monkeypatch.setattr(research, "async_get_fund_history", empty_history)
+    monkeypatch.setattr(research, "async_get_exchange_fund_history", empty_history)
 
     result = asyncio.run(
         research.compute_technical_indicators.ainvoke({"ticker": "159999", "asset_type": "etf"})
@@ -956,8 +958,9 @@ def test_analysis_tool_returns_decision_when_report_generation_fails(monkeypatch
 
 
 def test_analysis_tool_has_dedicated_long_running_budget():
-    assert tool_timeout_seconds("run_fund_or_stock_analysis") == LONG_RUNNING_TOOL_TIMEOUT_SECONDS
-    assert tool_attempts("run_fund_or_stock_analysis") == 1
+    assert LONG_RUNNING_TOOL_TIMEOUT_SECONDS == 30 * 60
+    assert tool_timeout_seconds("run_stock_comprehensive_analysis") == LONG_RUNNING_TOOL_TIMEOUT_SECONDS
+    assert tool_attempts("run_stock_comprehensive_analysis") == 1
     assert tool_timeout_seconds("run_backtest") == LONG_RUNNING_TOOL_TIMEOUT_SECONDS
     assert tool_timeout_seconds("design_and_run_backtest") == LONG_RUNNING_TOOL_TIMEOUT_SECONDS
     assert tool_timeout_seconds("compare_strategy_backtests") == LONG_RUNNING_TOOL_TIMEOUT_SECONDS
@@ -966,12 +969,91 @@ def test_analysis_tool_has_dedicated_long_running_budget():
     assert tool_attempts("get_latest_news") == 2
 
 
+def test_run_backtest_reuses_matching_successful_designed_backtest():
+    prior = {
+        "name": "design_and_run_backtest",
+        "status": "completed",
+        "args": {
+            "ticker": "518880",
+            "start_date": "2023-01-01",
+            "end_date": "2025-12-31",
+            "asset_type": "etf",
+        },
+        "result": json.dumps(
+            {
+                "data_type": "backtest_experiment",
+                "backtest": True,
+                "result": {"total_return": 0.21},
+            }
+        ),
+    }
+
+    reusable = _find_reusable_tool_event(
+        "run_backtest",
+        {
+            "ticker": "518880",
+            "start_date": "2023-01-01",
+            "end_date": "2025-12-31",
+            "asset_type": "etf",
+        },
+        [prior],
+    )
+
+    assert reusable is prior
+
+
+@pytest.mark.parametrize(
+    ("prior_update", "requested_update"),
+    [
+        ({"result": json.dumps({"available": False, "data_status": "unavailable"})}, {}),
+        ({}, {"ticker": "159934"}),
+        ({}, {"start_date": "2024-01-01"}),
+    ],
+)
+def test_run_backtest_does_not_reuse_unavailable_or_mismatched_design(
+    prior_update,
+    requested_update,
+):
+    prior = {
+        "name": "design_and_run_backtest",
+        "status": "completed",
+        "args": {
+            "ticker": "518880",
+            "start_date": "2023-01-01",
+            "end_date": "2025-12-31",
+            "asset_type": "etf",
+        },
+        "result": json.dumps({"data_type": "backtest_experiment", "result": {"total_return": 0.21}}),
+        **prior_update,
+    }
+    requested = {
+        "ticker": "518880",
+        "start_date": "2023-01-01",
+        "end_date": "2025-12-31",
+        "asset_type": "etf",
+        **requested_update,
+    }
+
+    assert _find_reusable_tool_event("run_backtest", requested, [prior]) is None
+
+
+def test_non_backtest_tools_are_not_reused():
+    prior = {
+        "name": "get_realtime_quote",
+        "status": "completed",
+        "args": {"ticker": "518880", "asset_type": "etf"},
+        "result": json.dumps({"available": True, "price": 6.2}),
+    }
+
+    assert _find_reusable_tool_event("get_realtime_quote", prior["args"], [prior]) is None
+
+
 def test_render_activity_exposes_error_reason():
-    messages = render_activity("run_fund_or_stock_analysis", "failed", error="tool_timeout: 超过 300 秒")
+    messages = render_activity("run_stock_comprehensive_analysis", "failed", error="tool_timeout: 超过 300 秒")
     update = next(message["updateDataModel"] for message in messages if "updateDataModel" in message)
 
     assert update["value"] == {
-        "name": "run_fund_or_stock_analysis",
+        "name": "run_stock_comprehensive_analysis",
         "status": "failed",
         "error": "tool_timeout: 超过 300 秒",
     }
@@ -979,7 +1061,7 @@ def test_render_activity_exposes_error_reason():
 
 def test_failed_analysis_payload_does_not_render_a_decision_card():
     messages = render_tool_result(
-        "run_fund_or_stock_analysis",
+        "run_stock_comprehensive_analysis",
         json.dumps({"error": "tool_timeout: 工具执行超过 300 秒"}, ensure_ascii=False),
     )
 
@@ -988,7 +1070,7 @@ def test_failed_analysis_payload_does_not_render_a_decision_card():
 
 def test_chat_renders_analysis_result_as_inline_a2ui():
     messages = render_tool_result(
-        "run_fund_or_stock_analysis",
+        "run_stock_comprehensive_analysis",
         json.dumps(
             {
                 "ticker": "510300",

@@ -25,30 +25,23 @@ from models.schemas import (
 class SimulationBroker(Protocol):
     """Minimal contract required by a paper-trading provider adapter."""
 
-    def submit_order(self, order: SimulationOrder) -> SimulationOrder:
-        ...
+    def submit_order(self, order: SimulationOrder) -> SimulationOrder: ...
 
-    def cancel_order(self, order_id: str) -> SimulationOrder | None:
-        ...
+    def cancel_order(self, order_id: str) -> SimulationOrder | None: ...
 
-    def sync(self) -> dict:
-        ...
+    def sync(self) -> dict: ...
 
 
 class LiveBroker(Protocol):
     """Provider-neutral contract for a reviewed live trading gateway."""
 
-    async def submit_order(self, intent: LiveOrderIntent) -> LiveOrderResult:
-        ...
+    async def submit_order(self, intent: LiveOrderIntent) -> LiveOrderResult: ...
 
-    async def cancel_order(self, broker_order_id: str) -> LiveOrderResult:
-        ...
+    async def cancel_order(self, broker_order_id: str) -> LiveOrderResult: ...
 
-    async def sync(self) -> dict[str, Any]:
-        ...
+    async def sync(self) -> dict[str, Any]: ...
 
-    async def close(self) -> None:
-        ...
+    async def close(self) -> None: ...
 
 
 class LiveBrokerUnavailableError(RuntimeError):
@@ -198,9 +191,7 @@ class ExternalSimulationBroker:
         self.config = config
 
     def _not_implemented(self) -> None:
-        raise NotImplementedError(
-            f"外部模拟平台 {self.config.provider} 尚未接入；当前请使用 internal 模拟账户"
-        )
+        raise NotImplementedError(f"外部模拟平台 {self.config.provider} 尚未接入；当前请使用 internal 模拟账户")
 
     def submit_order(self, order: SimulationOrder) -> SimulationOrder:
         self._not_implemented()
@@ -218,11 +209,7 @@ class SimulationBrokerUnavailableError(RuntimeError):
 
 def _row_value(row: dict[str, Any], *names: str, default: Any = None) -> Any:
     """Read a CSV field while tolerating BOMs and whitespace in headers."""
-    normalised = {
-        str(key).strip().lstrip("\ufeff"): value
-        for key, value in row.items()
-        if key is not None
-    }
+    normalised = {str(key).strip().lstrip("\ufeff"): value for key, value in row.items() if key is not None}
     for name in names:
         if name in normalised:
             return normalised[name]

@@ -9,13 +9,12 @@ from typing import Any, AsyncIterator
 
 from loguru import logger
 
-from agents.fund_agent import fund_agent
+from agents.asset_agent import asset_agent
 from application.chat_store import ChatStore
 from config import resolve_llm_profile
 from llm_runtime import use_llm_profile
 from widgets.a2ui import render_activity, render_markdown, render_research_plan, render_tool_result
 
-asset_agent = fund_agent  # Backward-compatible injection point for existing task workers and tests.
 PROGRESS_UPDATE_INTERVAL_SECONDS = 45.0
 
 
@@ -42,7 +41,7 @@ class ChatTaskInput:
     llm_profile_id: str | None = None
     llm_model: str | None = None
     llm_auto: bool = False
-    graph_name: str = "supervisor-agent"
+    graph_name: str = "financial-harness"
     thread_id: str | None = None
     resume_from_checkpoint: bool = False
 
@@ -54,12 +53,28 @@ def _llm_route(intent: Any, message: str = "") -> str:
     else:
         value = getattr(intent, "value", str(intent))
     research_terms = (
-        "分析", "回测", "策略", "对比", "行情", "历史", "新闻", "风险", "买入", "卖出",
-        "基金", "股票", "etf", "lof",
+        "分析",
+        "回测",
+        "策略",
+        "对比",
+        "行情",
+        "历史",
+        "新闻",
+        "风险",
+        "买入",
+        "卖出",
+        "基金",
+        "股票",
+        "etf",
+        "lof",
     )
-    return "analysis" if value in {"analyze", "backtest", "compare", "strategies"} or any(
-        term in message.lower() for term in research_terms
-    ) or any(char.isdigit() for char in message) else "chat"
+    return (
+        "analysis"
+        if value in {"analyze", "backtest", "compare", "strategies"}
+        or any(term in message.lower() for term in research_terms)
+        or any(char.isdigit() for char in message)
+        else "chat"
+    )
 
 
 class ChatTaskManager:
@@ -105,10 +120,7 @@ class ChatTaskManager:
                     if state is None:
                         continue
                     record = await self.store.get_task(task_id)
-                    state["resume_from_checkpoint"] = bool(
-                        record
-                        and record["status"] == "interrupted"
-                    )
+                    state["resume_from_checkpoint"] = bool(record and record["status"] == "interrupted")
                     resume_interaction = state.get("resume_interaction")
                     await self.start(
                         self._task_input_from_state(state),
@@ -132,9 +144,7 @@ class ChatTaskManager:
         if record and record["status"] == "cancel_requested":
             await self.store.update_task(task_input.task_id, "cancelled")
             return
-        if record and record["status"] in {
-            "completed", "failed", "cancelled", "waiting_user", "superseded"
-        }:
+        if record and record["status"] in {"completed", "failed", "cancelled", "waiting_user", "superseded"}:
             return
         if not await self.store.begin_task(task_input.task_id):
             return
@@ -192,9 +202,12 @@ class ChatTaskManager:
         lock = self._task_locks.setdefault(task_id, asyncio.Lock())
         async with lock:
             record = await self.store.get_task(task_id)
-            if event.get("event") != "done" and record and record["status"] in {
-                "cancel_requested", "cancelled", "completed", "failed", "interrupted", "superseded"
-            }:
+            if (
+                event.get("event") != "done"
+                and record
+                and record["status"]
+                in {"cancel_requested", "cancelled", "completed", "failed", "interrupted", "superseded"}
+            ):
                 return
             persisted = await self.store.append_event(task_id, event["event"], event["data"])
             for queue in tuple(self._subscribers.get(task_id, set())):
@@ -380,6 +393,9 @@ class ChatTaskManager:
                 if state is not None:
                     state["graph_name"] = str(event.get("graph_name") or state.get("graph_name"))
                     state["thread_id"] = str(event.get("thread_id") or task_input.task_id)
+                    state["runtime_version"] = str(event.get("runtime_version") or "")
+                    state["contract_version"] = str(event.get("contract_version") or "")
+                    state["skill_versions"] = dict(event.get("skill_versions") or {})
                     if isinstance(event.get("task_contract"), dict):
                         state["task_contract"] = event["task_contract"]
                     await self.store.set_task_state(task_input.task_id, state)
@@ -402,6 +418,10 @@ class ChatTaskManager:
                             {
                                 "task_contract": event.get("task_contract") or {},
                                 "acceptance": event.get("acceptance") or {},
+                                "asset_type": event.get("asset_type"),
+                                "fund_domain": event.get("fund_domain"),
+                                "product_category": event.get("product_category"),
+                                "pricing_basis": event.get("pricing_basis"),
                             }
                         ),
                     },
@@ -583,7 +603,7 @@ class ChatTaskManager:
             llm_profile_id=state.get("llm_profile_id"),
             llm_model=state.get("llm_model"),
             llm_auto=bool(state.get("llm_auto", False)),
-            graph_name=str(state.get("graph_name") or "supervisor-agent"),
+            graph_name=str(state.get("graph_name") or "financial-harness"),
             thread_id=str(state.get("thread_id") or state["task_id"]),
             resume_from_checkpoint=bool(state.get("resume_from_checkpoint", False)),
         )
@@ -608,7 +628,7 @@ class ChatTaskManager:
             llm_profile_id=state.get("llm_profile_id"),
             llm_model=state.get("llm_model"),
             llm_auto=bool(state.get("llm_auto", False)),
-            graph_name=str(state.get("graph_name") or "supervisor-agent"),
+            graph_name=str(state.get("graph_name") or "financial-harness"),
             thread_id=str(state.get("thread_id") or state["task_id"]),
             resume_from_checkpoint=bool(state.get("resume_from_checkpoint", False)),
         )

@@ -1,0 +1,13 @@
+id: artifact.manage
+version: 1.0.0
+title: 研究产物
+description: 保存、读取或绘制可预览下载的研究附件。
+domain: shared
+asset_types: [any]
+intents: [artifact, report]
+capabilities: [artifact.manage]
+tools: [save_artifacts, list_artifacts, read_artifact, create_chart_artifact]
+evidence_types: [artifact]
+tags: [报告, 文件, 图表]
+allow_side_effects: true
+cost: medium

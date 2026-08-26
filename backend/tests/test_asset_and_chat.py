@@ -1,4 +1,4 @@
-from agents.stock_agent import StockAgent
+from agents.stock_agent import AssetAgent as StockAgent
 from models.schemas import AssetType
 
 
@@ -18,12 +18,12 @@ def test_stock_agent_routes_fund_and_follow_up_context():
     assert follow_up.ticker == "510300"
 
 
-def test_stock_agent_infers_exchange_traded_fund_from_ticker_prefix():
+def test_request_resolver_does_not_verify_product_type_from_ticker_prefix():
     agent = StockAgent()
 
-    assert agent.prepare("回测 510300").asset_type == AssetType.ETF
-    assert agent.prepare("分析 159915").asset_type == AssetType.ETF
-    assert agent.prepare("查看 166009").asset_type == AssetType.LOF
+    assert agent.prepare("回测 510300").asset_type == AssetType.STOCK
+    assert agent.prepare("分析 159915").asset_type == AssetType.STOCK
+    assert agent.prepare("查看 166009").asset_type == AssetType.STOCK
     assert agent.prepare("分析股票 510300").asset_type == AssetType.STOCK
 
 

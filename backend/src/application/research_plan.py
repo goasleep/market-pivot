@@ -33,11 +33,7 @@ def _plan_snapshot(
     steps = []
     for step in plan.steps:
         result = results.get(step.id)
-        recovery_history = (
-            [item.model_dump(mode="json") for item in result.recovery_history]
-            if result
-            else []
-        )
+        recovery_history = [item.model_dump(mode="json") for item in result.recovery_history] if result else []
         steps.append(
             {
                 "id": step.id,
@@ -173,9 +169,7 @@ class ResearchPlanService:
                 }
                 completed = {key for key, result in results.items() if result.status == "completed"}
                 running_ids = {
-                    step.id
-                    for step in plan.steps
-                    if step.id not in results and set(step.depends_on) <= completed
+                    step.id for step in plan.steps if step.id not in results and set(step.depends_on) <= completed
                 }
             plan_update = _plan_snapshot(values, running_ids=running_ids)
             if plan_update:
@@ -194,13 +188,13 @@ class ResearchPlanService:
                 tool_name = {
                     "market_snapshot": "get_realtime_quote",
                     "price_history": "get_historical_prices",
-                    "fund_nav": "get_fund_nav_history",
+                    "fund_nav": "get_exchange_fund_nav_history",
                     "fundamentals": "get_fundamentals",
                     "news": "search_web",
                     "methodology": "search_methodology",
                     "backtest": "design_and_run_backtest",
                     "comparison": "compare_quotes",
-                    "comprehensive_analysis": "run_fund_or_stock_analysis",
+                    "comprehensive_analysis": "run_stock_comprehensive_analysis",
                     "data_catalog": "search_market_data_catalog",
                     "data_query": "query_market_data",
                     "data_validation": "task_acceptance",

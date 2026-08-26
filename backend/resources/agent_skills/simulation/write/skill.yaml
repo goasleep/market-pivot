@@ -1,0 +1,14 @@
+id: simulation.write
+version: 1.0.0
+title: 模拟盘变更
+description: 创建纸面账户、部署策略或提交取消模拟订单。
+domain: shared
+asset_types: [any]
+intents: [simulation_mutation]
+capabilities: [simulation.write]
+requires: [simulation.read]
+tools: [create_simulation_account, deploy_backtest_experiment, set_strategy_deployment_status, submit_simulation_order, cancel_simulation_order]
+evidence_types: [simulation]
+validators: [evidence.required]
+tags: [模拟盘, 订单, 变更]
+allow_side_effects: true

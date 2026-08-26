@@ -11,9 +11,10 @@ from application.visual_evidence import visual_evidence_service
 from data.stock_provider import async_get_stock_history
 from llm import LLMService, get_llm_service
 from models.schemas import AgentReport, AgentStageResult, AssetType, Decision, MarketContext
-from strategies.skill_manager import get_strategy_instructions
+from strategies.strategy_registry import get_strategy_instructions
 
-_BASE_PROMPT = """You are a professional A-share technical analyst.
+_BASE_PROMPT = (
+    """You are a professional A-share technical analyst.
 You analyze technical indicators including MACD, RSI, KDJ, Bollinger Bands, moving averages, and volume patterns.
 You provide clear buy/sell/hold signals based on technical analysis.
 You must respond in Chinese.
@@ -23,7 +24,9 @@ You must respond with valid JSON in this format:
   "confidence": 0.0-1.0,
   "reasoning": "detailed analysis in Chinese",
   "key_indicators": {"macd": "...", "rsi": ..., "kdj": "..."}
-}""" + INVESTOR_CONTEXT
+}"""
+    + INVESTOR_CONTEXT
+)
 
 
 def _build_system_prompt(strategy_name: str | None = None, market_regime: str | None = None) -> str:

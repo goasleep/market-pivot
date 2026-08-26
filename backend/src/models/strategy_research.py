@@ -56,9 +56,7 @@ class StrategyComparisonSpec(BaseModel):
     benchmark: str = "buy_hold"
     market_benchmark_ticker: str = Field(default="000300", min_length=6, max_length=16)
     market_benchmark_name: str = "沪深300"
-    ranking_metric: Literal["total_return", "sharpe_ratio", "calmar_ratio", "out_of_sample_return"] = (
-        "total_return"
-    )
+    ranking_metric: Literal["total_return", "sharpe_ratio", "calmar_ratio", "out_of_sample_return"] = "total_return"
     strategies: tuple[StrategySpec, ...]
     task_contract: TaskContract
     cost_scenarios: tuple[CostScenario, ...] = ()

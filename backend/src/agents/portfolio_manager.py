@@ -30,7 +30,7 @@ from models.schemas import (
     TradeDecision,
     TradePlan,
 )
-from strategies.skill_manager import get_strategy_instructions, get_strategy_spec, register_strategy_spec
+from strategies.strategy_registry import get_strategy_instructions, get_strategy_spec, register_strategy_spec
 
 SYSTEM_PROMPT = (
     """You are a professional A-share portfolio manager.

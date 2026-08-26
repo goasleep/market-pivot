@@ -10,7 +10,8 @@ from data.stock_provider import async_get_stock_news
 from llm import LLMService, get_llm_service
 from models.schemas import AgentReport, AssetType, Decision, MarketContext
 
-SYSTEM_PROMPT = """You are a professional A-share market sentiment analyst.
+SYSTEM_PROMPT = (
+    """You are a professional A-share market sentiment analyst.
 You analyze news articles, market sentiment, and public opinion to gauge market mood.
 You provide buy/sell/hold signals based on sentiment analysis.
 You must respond in Chinese.
@@ -21,7 +22,9 @@ You must respond with valid JSON in this format:
   "reasoning": "detailed analysis in Chinese",
   "sentiment_score": -1.0 to 1.0,
   "key_themes": ["theme1", "theme2"]
-}""" + INVESTOR_CONTEXT
+}"""
+    + INVESTOR_CONTEXT
+)
 
 
 async def analyze(

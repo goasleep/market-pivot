@@ -131,7 +131,7 @@ def validate_source(source: str, policy: SandboxPolicy | None = None) -> dict[st
     }
 
 
-_CHILD_RUNNER = r'''
+_CHILD_RUNNER = r"""
 import json
 import sys
 import numpy as np
@@ -162,7 +162,7 @@ if isinstance(result, pd.Series):
 elif isinstance(result, np.ndarray):
     result = result.tolist()
 print(json.dumps({"positions": result}, allow_nan=False))
-'''
+"""
 
 
 def _limit_child(policy: SandboxPolicy) -> Any:

@@ -52,6 +52,7 @@ class TaskRoutingDecision(BaseModel):
 class TaskContract(BaseModel):
     objective: str
     deliverables: list[str] = Field(default_factory=list)
+    required_outputs: list[str] = Field(default_factory=list)
     evidence_requirements: list[str] = Field(default_factory=list)
     requires_tools: bool = False
     resolve_representative_product: bool = False

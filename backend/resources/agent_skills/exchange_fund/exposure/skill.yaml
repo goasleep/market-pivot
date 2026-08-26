@@ -1,0 +1,14 @@
+id: exchange_fund.exposure
+version: 2.0.0
+title: ETF 暴露结构
+description: 核对主要持仓、行业或资产暴露、集中度与报告期。
+domain: exchange_fund
+asset_types: [etf, lof]
+intents: [analyze, compare, screen]
+capabilities: [exchange_fund.exposure]
+requires: [exchange_fund.profile]
+tools: [get_exchange_fund_exposure]
+evidence_types: [exposure]
+output_fields: [holdings, sector_exposure, top10_concentration, report_date]
+validators: [evidence.required]
+tags: [持仓, 行业, 集中度, 报告期]

@@ -699,7 +699,7 @@ async def test_chat_keeps_analysis_images_as_previewable_artifact_cards(store, m
             del request
             yield {
                 "type": "tool",
-                "name": "run_fund_or_stock_analysis",
+                "name": "run_stock_comprehensive_analysis",
                 "status": "completed",
                 "result": json.dumps({"ticker": "510300", "artifacts": [image, report]}, ensure_ascii=False),
             }

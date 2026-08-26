@@ -223,8 +223,7 @@ class TradingEngine:
         )
         self.portfolio.trades.append(trade)
         logger.info(
-            f"SELL {ticker} {shares}@{execution_price:.2f} "
-            f"net={net_proceeds:.2f} cash={self.portfolio.cash:.2f}"
+            f"SELL {ticker} {shares}@{execution_price:.2f} net={net_proceeds:.2f} cash={self.portfolio.cash:.2f}"
         )
         return trade
 

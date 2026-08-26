@@ -155,8 +155,7 @@ class ChatStore:
             return [
                 part
                 for part in parts
-                if isinstance(part, dict)
-                and part.get("type") in {"text", "a2ui", "widget", "artifact", "interaction"}
+                if isinstance(part, dict) and part.get("type") in {"text", "a2ui", "widget", "artifact", "interaction"}
             ]
         return [_text_part(str(item.get("content", "")))]
 
@@ -231,22 +230,32 @@ class ChatStore:
             if active:
                 if active.status != "waiting_user":
                     raise ValueError(f"会话已有正在执行的任务: {active.task_id}")
-                await ChatTask.filter(task_id=active.task_id).using_db(connection).update(
-                    status="superseded",
-                    updated_at=timestamp,
+                await (
+                    ChatTask.filter(task_id=active.task_id)
+                    .using_db(connection)
+                    .update(
+                        status="superseded",
+                        updated_at=timestamp,
+                    )
                 )
-                await ChatMessage.filter(message_id=active.message_id).using_db(connection).update(
-                    status="superseded",
-                    updated_at=timestamp,
+                await (
+                    ChatMessage.filter(message_id=active.message_id)
+                    .using_db(connection)
+                    .update(
+                        status="superseded",
+                        updated_at=timestamp,
+                    )
                 )
-                await ChatTaskInteraction.filter(
-                    task_id=active.task_id,
-                    status="pending",
-                ).using_db(connection).update(status="cancelled", responded_at=timestamp)
+                await (
+                    ChatTaskInteraction.filter(
+                        task_id=active.task_id,
+                        status="pending",
+                    )
+                    .using_db(connection)
+                    .update(status="cancelled", responded_at=timestamp)
+                )
 
-            conversation = (
-                await ChatConversation.filter(conversation_id=conversation_id).using_db(connection).first()
-            )
+            conversation = await ChatConversation.filter(conversation_id=conversation_id).using_db(connection).first()
             if conversation is None:
                 if edit_message_id:
                     raise ValueError("不能编辑尚未持久化的会话")
@@ -259,8 +268,10 @@ class ChatStore:
                 )
                 persisted_messages = []
             else:
-                await ChatConversation.filter(conversation_id=conversation_id).using_db(connection).update(
-                    updated_at=timestamp
+                await (
+                    ChatConversation.filter(conversation_id=conversation_id)
+                    .using_db(connection)
+                    .update(updated_at=timestamp)
                 )
                 persisted_messages = await (
                     ChatMessage.filter(conversation_id=conversation_id)
@@ -298,18 +309,10 @@ class ChatStore:
                 if item["status"] != "completed" or item["role"] not in {"user", "assistant"}:
                     continue
                 parts = json.loads(item["parts_json"])
-                effective_history.append(
-                    {"role": item["role"], "content": parts_text(parts), "parts": parts}
-                )
-            user_position = (
-                max(int(item["position"]) for item in persisted_messages) + 1
-                if persisted_messages
-                else 0
-            )
+                effective_history.append({"role": item["role"], "content": parts_text(parts), "parts": parts})
+            user_position = max(int(item["position"]) for item in persisted_messages) + 1 if persisted_messages else 0
             duplicate_message = await (
-                ChatMessage.filter(message_id__in=[user_message_id, assistant_message_id])
-                .using_db(connection)
-                .exists()
+                ChatMessage.filter(message_id__in=[user_message_id, assistant_message_id]).using_db(connection).exists()
             )
             if duplicate_message:
                 raise ValueError("消息 ID 已被使用")
@@ -455,9 +458,7 @@ class ChatStore:
         await ChatTask.filter(
             task_id=task_id,
             status__in=["pending", "running", "cancel_requested", "waiting_user"],
-        ).update(
-            status="cancel_requested", updated_at=timestamp
-        )
+        ).update(status="cancel_requested", updated_at=timestamp)
         await ChatMessage.filter(message_id=task.message_id).update(status="cancel_requested", updated_at=timestamp)
         await ChatTaskInteraction.filter(task_id=task_id, status="pending").update(
             status="cancelled", responded_at=timestamp
@@ -651,8 +652,10 @@ class ChatStore:
     async def _references_by_message(self, message_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
         if not message_ids:
             return {}
-        rows = await ChatMessageReference.filter(message_id__in=message_ids).order_by("message_id", "position").values(
-            "message_id", "reference_json"
+        rows = (
+            await ChatMessageReference.filter(message_id__in=message_ids)
+            .order_by("message_id", "position")
+            .values("message_id", "reference_json")
         )
         references: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
@@ -664,8 +667,10 @@ class ChatStore:
         conversation = await ChatConversation.filter(conversation_id=conversation_id).first()
         if conversation is None:
             return None
-        rows = await ChatMessage.filter(conversation_id=conversation_id).order_by("position").values(
-            "message_id", "role", "parts_json", "status", "task_id", "created_at"
+        rows = (
+            await ChatMessage.filter(conversation_id=conversation_id)
+            .order_by("position")
+            .values("message_id", "role", "parts_json", "status", "task_id", "created_at")
         )
         refs = await self._references_by_message([row["message_id"] for row in rows])
         task_ids = [str(row["task_id"]) for row in rows if row.get("task_id")]
@@ -703,11 +708,7 @@ class ChatStore:
         branch_conversation_id = f"conversation-{uuid4().hex}"
 
         async with in_transaction() as connection:
-            source = (
-                await ChatConversation.filter(conversation_id=source_conversation_id)
-                .using_db(connection)
-                .first()
-            )
+            source = await ChatConversation.filter(conversation_id=source_conversation_id).using_db(connection).first()
             if source is None:
                 raise ValueError("源会话不存在")
 
@@ -825,18 +826,20 @@ class ChatStore:
                     .distinct()
                     .values_list("conversation_id", flat=True)
                 )
-            title_ids = await ChatConversation.filter(title__icontains=needle).values_list(
-                "conversation_id", flat=True
-            )
+            title_ids = await ChatConversation.filter(title__icontains=needle).values_list("conversation_id", flat=True)
             ids = list(set(title_ids) | set(content_ids))
             conversations = conversations.filter(conversation_id__in=ids)
-        rows = await conversations.order_by("-updated_at").limit(max(1, min(limit, 200))).values(
-            "conversation_id", "title", "created_at", "updated_at"
+        rows = (
+            await conversations.order_by("-updated_at")
+            .limit(max(1, min(limit, 200)))
+            .values("conversation_id", "title", "created_at", "updated_at")
         )
         result = []
         for row in rows:
-            messages = await ChatMessage.filter(conversation_id=row["conversation_id"]).order_by("position").values(
-                "message_id", "role", "parts_json", "status", "task_id", "created_at"
+            messages = (
+                await ChatMessage.filter(conversation_id=row["conversation_id"])
+                .order_by("position")
+                .values("message_id", "role", "parts_json", "status", "task_id", "created_at")
             )
             refs = await self._references_by_message([message["message_id"] for message in messages])
             result.append(

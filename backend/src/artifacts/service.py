@@ -241,13 +241,11 @@ def _legacy_render_signal_attribution_html(attribution: dict[str, Any]) -> str:
         rows.append(
             f'<div class="signal-row"><span class="signal-name">{label}</span>'
             f'<div class="signal-track"><span class="{tone}" style="width:{abs(value):.1f}%"></span></div>'
-            f'<strong>{value:+.0f}</strong></div>'
+            f"<strong>{value:+.0f}</strong></div>"
         )
     return (
         '<div class="signal-attribution" role="img" aria-label="信号归因图">'
-        '<div class="signal-attribution-title">信号归因</div>'
-        + "".join(rows)
-        + "</div>"
+        '<div class="signal-attribution-title">信号归因</div>' + "".join(rows) + "</div>"
     )
 
 
@@ -255,8 +253,7 @@ def _report_prompt_payload(decision: TradeDecision, market_context: Any | None) 
     """Build a compact fact set for the report editor without exposing URLs."""
     dashboard = decision.dashboard.model_dump(mode="json") if decision.dashboard else {}
     agent_reports = {
-        str(name): _text(reasoning, "暂无观点")[:1600]
-        for name, reasoning in decision.agent_reports.items()
+        str(name): _text(reasoning, "暂无观点")[:1600] for name, reasoning in decision.agent_reports.items()
     }
     web_results = getattr(market_context, "web_results", []) or []
     history_points = _history_points(market_context)
@@ -490,10 +487,7 @@ def render_analysis_html(
 
     def make_link(label: str, url: str) -> str:
         token = f"__REPORT_LINK_{len(link_tokens)}__"
-        link_tokens.append(
-            f'<a class="report-link" href="{url}" target="_blank" '
-            f'rel="noreferrer noopener">{label}</a>'
-        )
+        link_tokens.append(f'<a class="report-link" href="{url}" target="_blank" rel="noreferrer noopener">{label}</a>')
         return token
 
     def preserve_markdown_link(match: re.Match[str]) -> str:
@@ -929,9 +923,7 @@ class ArtifactService:
     ) -> list[dict[str, Any]]:
         """Create the single user-facing HTML report through ReportAgent."""
         artifact_id = (
-            f"artifact-{hashlib.sha256(f'{execution_key}:0'.encode()).hexdigest()[:24]}"
-            if execution_key
-            else None
+            f"artifact-{hashlib.sha256(f'{execution_key}:0'.encode()).hexdigest()[:24]}" if execution_key else None
         )
         if artifact_id:
             await init_database(db_url=self.db_url)

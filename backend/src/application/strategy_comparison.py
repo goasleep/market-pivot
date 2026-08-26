@@ -356,9 +356,7 @@ async def compare_strategies(
         else str(frame.iloc[-1]["date"])
     )
     prepared = (
-        prepared_bundle
-        if not cross_validated_bundle and len(frame) == len(prepared_frame)
-        else (frame, snapshot)
+        prepared_bundle if not cross_validated_bundle and len(frame) == len(prepared_frame) else (frame, snapshot)
     )
     evaluation_frame = frame[frame["date"] >= evaluation_start].reset_index(drop=True)
     base = next(item for item in spec.cost_scenarios if item.name == "base")
@@ -401,10 +399,7 @@ async def compare_strategies(
         )
     ]
     actual_years = max(
-        (
-            date.fromisoformat(str(snapshot["actual_end_date"]))
-            - date.fromisoformat(str(evaluation_start))
-        ).days
+        (date.fromisoformat(str(snapshot["actual_end_date"])) - date.fromisoformat(str(evaluation_start))).days
         / 365.25,
         0,
     )
@@ -439,8 +434,7 @@ async def compare_strategies(
         "execution": _account_config(spec, base).effective_trading_rules(spec.asset_type).model_dump(mode="json")
         | {"fill_time": spec.fill_time},
         "price_curve": [
-            {"date": str(row["date"]), "value": round(float(row["close"]), 6)}
-            for _, row in evaluation_frame.iterrows()
+            {"date": str(row["date"]), "value": round(float(row["close"]), 6)} for _, row in evaluation_frame.iterrows()
         ],
         "comparisons": results,
         "ranking": ranking,
@@ -611,9 +605,7 @@ def build_market_regime_attribution(payload: dict[str, Any]) -> dict[str, Any]:
                     "strategy_return": round(strategy_return, 6),
                     "benchmark_return": round(benchmark_return, 6),
                     "excess_return": round(strategy_return - benchmark_return, 6),
-                    "win_day_rate": round(float((strategy_sample > 0).mean()), 6)
-                    if not strategy_sample.empty
-                    else 0.0,
+                    "win_day_rate": round(float((strategy_sample > 0).mean()), 6) if not strategy_sample.empty else 0.0,
                     "average_exposure": round(float(exposure[mask].dropna().mean()), 6)
                     if not exposure[mask].dropna().empty
                     else None,
@@ -710,9 +702,7 @@ def _one_strategy_trade_attribution(strategy: dict[str, Any]) -> dict[str, Any]:
         "win_rate": round(len(profits) / len(matched), 6) if matched else None,
         "average_win": round(float(np.mean(profits)), 6) if profits else None,
         "average_loss": round(float(np.mean(losses)), 6) if losses else None,
-        "payoff_ratio": round(float(np.mean(profits)) / abs(float(np.mean(losses))), 6)
-        if profits and losses
-        else None,
+        "payoff_ratio": round(float(np.mean(profits)) / abs(float(np.mean(losses))), 6) if profits and losses else None,
         "average_holding_days": round(float(np.mean([item["holding_days"] for item in matched])), 2)
         if matched
         else None,
@@ -771,14 +761,10 @@ def build_robustness_assessments(payload: dict[str, Any]) -> list[dict[str, Any]
                 "grade": grade,
                 "checks": conditions,
                 "rolling_window_count": len(rolling_returns),
-                "rolling_positive_ratio": round(
-                    sum(value > 0 for value in rolling_returns) / len(rolling_returns), 6
-                )
+                "rolling_positive_ratio": round(sum(value > 0 for value in rolling_returns) / len(rolling_returns), 6)
                 if rolling_returns
                 else None,
-                "rolling_median_return": round(float(np.median(rolling_returns)), 6)
-                if rolling_returns
-                else None,
+                "rolling_median_return": round(float(np.median(rolling_returns)), 6) if rolling_returns else None,
                 "rolling_worst_return": round(min(rolling_returns), 6) if rolling_returns else None,
                 "parameter_status": parameter.get("status", "unknown"),
                 "parameter_variant_count": len(variant_returns),
@@ -961,9 +947,7 @@ def build_strategy_assessments(payload: dict[str, Any]) -> list[dict[str, Any]]:
         if sensitivity_status not in {"stable", "unknown"}:
             weaknesses.append(f"参数敏感性状态为 {sensitivity_status}")
         if weakest_regime and float(weakest_regime.get("strategy_return") or 0) < 0:
-            weaknesses.append(
-                f"{weakest_regime.get('label')}阶段收益 {float(weakest_regime['strategy_return']):.2%}"
-            )
+            weaknesses.append(f"{weakest_regime.get('label')}阶段收益 {float(weakest_regime['strategy_return']):.2%}")
         trade_attribution = trade_by_name.get(name) or {}
         concentration = trade_attribution.get("top3_profit_concentration")
         if concentration is not None and float(concentration) > 0.6:
@@ -1050,9 +1034,7 @@ def build_research_decision(payload: dict[str, Any]) -> dict[str, Any]:
         )
     concentration = trade.get("top3_profit_concentration")
     if concentration is not None and float(concentration) > 0.5:
-        falsification_risks.append(
-            f"前三笔盈利贡献 {float(concentration):.1%}；移除少数大盈利后，结论可能反转。"
-        )
+        falsification_risks.append(f"前三笔盈利贡献 {float(concentration):.1%}；移除少数大盈利后，结论可能反转。")
     if robust.get("grade") == "weak":
         falsification_risks.append("滚动、样本外、参数或压力成本检查多数未通过，当前优势可能依赖特定样本。")
     validation = payload.get("data_validation") or {}
@@ -1172,9 +1154,9 @@ async def _run_market_benchmark(
             "comparisons": [],
         }
 
-    market_frame = market_frame[
-        market_frame["date"] <= (spec.evaluation_end_date or spec.end_date)
-    ].reset_index(drop=True)
+    market_frame = market_frame[market_frame["date"] <= (spec.evaluation_end_date or spec.end_date)].reset_index(
+        drop=True
+    )
     evaluation_rows = market_frame[market_frame["date"] >= evaluation_start]
     if len(evaluation_rows) < 2:
         return {
@@ -1317,9 +1299,7 @@ def _base_cost_consistency(
             left = comparison.get(field)
             right = base.get(field)
             if left is None or right is None or not np.isclose(float(left), float(right), rtol=0, atol=1e-12):
-                mismatches.append(
-                    {"strategy_name": name, "field": field, "comparison": left, "base_scenario": right}
-                )
+                mismatches.append({"strategy_name": name, "field": field, "comparison": left, "base_scenario": right})
     return {"passed": not mismatches, "mismatches": mismatches}
 
 
@@ -1385,8 +1365,10 @@ def _update_expression_window(expression, window: int, *, indicator: str | None 
     if expression is None:
         return
     for operand in (expression.left, expression.right):
-        if operand is not None and operand.type == "indicator" and (
-            indicator is None or operand.indicator == indicator
+        if (
+            operand is not None
+            and operand.type == "indicator"
+            and (indicator is None or operand.indicator == indicator)
         ):
             operand.window = window
     for child in expression.children:
@@ -1538,8 +1520,7 @@ def _acceptance(spec: StrategyComparisonSpec, payload: dict[str, Any]) -> TaskAc
         "shared_data_snapshot": bool(payload.get("data_snapshot", {}).get("sha256")),
         "cross_validation_attempted": bool(payload.get("data_validation", {}).get("rule_version")),
         "fair_evaluation_period": all(
-            row.get("equity_curve")
-            and row["equity_curve"][0].get("date") == payload.get("evaluation_start_date")
+            row.get("equity_curve") and row["equity_curve"][0].get("date") == payload.get("evaluation_start_date")
             for row in rows
         ),
     }
@@ -1590,9 +1571,7 @@ def _comparison_recommendations(
         if row and row.get("strategy_name") == primary_key
     ]
     basis = "、".join(dimensions) or "当前样本的综合风险收益表现"
-    recommendations = [
-        f"我的首选是{_display_name(primary)}：它在{basis}上领先，建议将其作为下一轮模拟验证的主策略。"
-    ]
+    recommendations = [f"我的首选是{_display_name(primary)}：它在{basis}上领先，建议将其作为下一轮模拟验证的主策略。"]
     if total.get("strategy_name") != primary_key:
         total_return = float(total.get("total_return") or 0)
         total_drawdown = float(total.get("max_drawdown") or 0)
@@ -1676,9 +1655,7 @@ def build_comparison_conclusion(
         if payload.get("parameter_sensitivity", {}).get(row.get("strategy_name"), {}).get("status") == "stable"
     ]
     robustness_pool = stable or rows
-    stress_by_name = {
-        row.get("strategy_name"): row for row in payload.get("cost_scenarios", {}).get("stress", [])
-    }
+    stress_by_name = {row.get("strategy_name"): row for row in payload.get("cost_scenarios", {}).get("stress", [])}
     robustness = max(
         robustness_pool,
         key=lambda row: (
@@ -1741,9 +1718,7 @@ async def enrich_comparison_conclusion(
     payload: dict[str, Any],
 ) -> ComparisonConclusion:
     """Let the Agent recommend from frozen facts without changing winners or metrics."""
-    stress_by_name = {
-        row.get("strategy_name"): row for row in payload.get("cost_scenarios", {}).get("stress", [])
-    }
+    stress_by_name = {row.get("strategy_name"): row for row in payload.get("cost_scenarios", {}).get("stress", [])}
     prompt = {
         "ticker": payload.get("ticker"),
         "evaluation_period": [payload.get("evaluation_start_date"), payload.get("evaluation_end_date")],
@@ -1756,9 +1731,7 @@ async def enrich_comparison_conclusion(
                 "max_drawdown": row.get("max_drawdown"),
                 "sharpe_ratio": row.get("sharpe_ratio"),
                 "calmar_ratio": row.get("calmar_ratio"),
-                "out_of_sample_return": row.get("diagnostics", {})
-                .get("out_of_sample", {})
-                .get("out_of_sample_return"),
+                "out_of_sample_return": row.get("diagnostics", {}).get("out_of_sample", {}).get("out_of_sample_return"),
                 "stress_total_return": stress_by_name.get(row.get("strategy_name"), {}).get("total_return"),
             }
             for row in payload.get("comparisons", [])

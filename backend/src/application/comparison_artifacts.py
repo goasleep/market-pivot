@@ -181,11 +181,7 @@ def _winner_label(item: dict[str, Any] | None) -> str:
 
 def _market_comparison_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [
-        {
-            key: value
-            for key, value in row.items()
-            if key not in {"asset_equity_curve", "market_equity_curve"}
-        }
+        {key: value for key, value in row.items() if key not in {"asset_equity_curve", "market_equity_curve"}}
         for row in ((payload.get("market_benchmark") or {}).get("comparisons") or [])
         if isinstance(row, dict)
     ]
@@ -215,9 +211,7 @@ def _money(value: Any) -> str:
 
 def _chart_svg(payload: dict[str, Any], *, drawdown: bool = False) -> str:
     by_name = {
-        str(item.get("strategy_name")): item
-        for item in payload.get("comparisons", [])
-        if isinstance(item, dict)
+        str(item.get("strategy_name")): item for item in payload.get("comparisons", []) if isinstance(item, dict)
     }
     ordered_names = [str(payload.get("benchmark") or ""), *map(str, payload.get("ranking") or [])]
     selected = []
@@ -274,9 +268,7 @@ def _chart_svg(payload: dict[str, Any], *, drawdown: bool = False) -> str:
             y = top + plot_height * (high - value) / (high - low)
             points.append(f"{x:.1f},{y:.1f}")
         color = colors[index % len(colors)]
-        paths.append(
-            f'<polyline points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="2.4"/>'
-        )
+        paths.append(f'<polyline points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="2.4"/>')
         legend_x = left + index * 235
         legends.append(
             f'<line x1="{legend_x}" y1="{height - 20}" x2="{legend_x + 24}" y2="{height - 20}" '
@@ -326,20 +318,21 @@ def _html_report(payload: dict[str, Any]) -> str:
     )
     warnings = "".join(f"<li>{html.escape(str(item))}</li>" for item in conclusion.get("data_warnings", []))
     limitations = "".join(f"<li>{html.escape(str(item))}</li>" for item in conclusion.get("limitations", []))
-    recommendations = "".join(
-        f"<li>{html.escape(str(item))}</li>" for item in conclusion.get("recommendations", [])
-    ) or "<li>当前没有生成 Agent 建议，请结合逐策略诊断判断。</li>"
+    recommendations = (
+        "".join(f"<li>{html.escape(str(item))}</li>" for item in conclusion.get("recommendations", []))
+        or "<li>当前没有生成 Agent 建议，请结合逐策略诊断判断。</li>"
+    )
     assessment_cards = []
     for item in payload.get("strategy_assessments", []):
         strengths = "".join(f"<li>{html.escape(str(value))}</li>" for value in item.get("strengths", []))
         weaknesses = "".join(f"<li>{html.escape(str(value))}</li>" for value in item.get("weaknesses", []))
         assessment_cards.append(
-            f"<article class=\"diagnosis\"><div class=\"diagnosis-head\"><span class=\"rank\">"
+            f'<article class="diagnosis"><div class="diagnosis-head"><span class="rank">'
             f"#{html.escape(str(item.get('rank') or '—'))}</span><h3>"
             f"{html.escape(str(item.get('display_name') or item.get('strategy_name')))}</h3>"
-            f"<span class=\"verdict\">{html.escape(str(item.get('verdict') or '待判断'))}</span></div>"
+            f'<span class="verdict">{html.escape(str(item.get("verdict") or "待判断"))}</span></div>'
             f"<p><strong>怎么交易：</strong>{html.escape(str(item.get('mechanism') or '未记录'))}</p>"
-            f"<div class=\"two-cols\"><div><h4>本期为什么好</h4><ul>{strengths}</ul></div>"
+            f'<div class="two-cols"><div><h4>本期为什么好</h4><ul>{strengths}</ul></div>'
             f"<div><h4>本期为什么不好</h4><ul>{weaknesses}</ul></div></div>"
             f"<p><strong>适合：</strong>{html.escape(str(item.get('suitable_market') or '—'))}</p>"
             f"<p><strong>容易失效：</strong>{html.escape(str(item.get('failure_mode') or '—'))}</p></article>"
@@ -358,19 +351,15 @@ def _html_report(payload: dict[str, Any]) -> str:
             _percent(row.get("asset_max_drawdown"), signed=False),
             _percent(row.get("market_max_drawdown"), signed=False),
         ]
-        market_table_rows.append(
-            "<tr>" + "".join(f"<td>{html.escape(str(value))}</td>" for value in values) + "</tr>"
-        )
+        market_table_rows.append("<tr>" + "".join(f"<td>{html.escape(str(value))}</td>" for value in values) + "</tr>")
     market_html = ""
     if market_benchmark:
         market_header_html = "".join(f"<th>{item}</th>" for item in market_headers)
-        market_note = html.escape(
-            str(market_benchmark.get("simulation_note") or market_benchmark.get("error") or "")
-        )
+        market_note = html.escape(str(market_benchmark.get("simulation_note") or market_benchmark.get("error") or ""))
         market_html = (
             f"<h2>同一策略：当前标的 vs "
             f"{html.escape(str(market_benchmark.get('name') or market_benchmark.get('ticker')))}</h2>"
-            f"<p class=\"meta\">{market_note}</p>"
+            f'<p class="meta">{market_note}</p>'
             f"<table><thead><tr>{market_header_html}</tr></thead>"
             f"<tbody>{''.join(market_table_rows)}</tbody></table>"
         )
@@ -416,7 +405,7 @@ def _html_report(payload: dict[str, Any]) -> str:
                 "<tr>"
                 f"<td>{html.escape(display_by_name.get(str(strategy_name), str(strategy_name)))}</td>"
                 f"<td>{html.escape(str(variant.get('variant') or '—'))}</td>"
-                f"<td class=\"{css_class}\">{_percent(value)}</td>"
+                f'<td class="{css_class}">{_percent(value)}</td>'
                 f"<td>{_number(variant.get('sharpe_ratio'))}</td></tr>"
             )
     regime_rows = []
@@ -471,9 +460,10 @@ def _html_report(payload: dict[str, Any]) -> str:
         for key, value in (payload.get("acceptance", {}).get("checks") or {}).items()
     )
     decision = payload.get("research_decision") or {}
-    falsification_html = "".join(
-        f"<li>{html.escape(str(item))}</li>" for item in decision.get("falsification_risks", [])
-    ) or "<li>尚未生成可证伪风险。</li>"
+    falsification_html = (
+        "".join(f"<li>{html.escape(str(item))}</li>" for item in decision.get("falsification_risks", []))
+        or "<li>尚未生成可证伪风险。</li>"
+    )
     experiment_html = "".join(
         "<tr>"
         f"<td>{html.escape(str(item.get('question') or '—'))}</td>"
@@ -483,8 +473,7 @@ def _html_report(payload: dict[str, Any]) -> str:
     )
     gate = decision.get("deployment_gate") or {}
     gate_rows = "".join(
-        f"<tr><td>{html.escape(_GATE_LABELS.get(str(key), str(key)))}</td>"
-        f"<td>{'通过' if value else '未通过'}</td></tr>"
+        f"<tr><td>{html.escape(_GATE_LABELS.get(str(key), str(key)))}</td><td>{'通过' if value else '未通过'}</td></tr>"
         for key, value in (gate.get("checks") or {}).items()
     )
     gate_status = _GATE_STATUS_LABELS.get(str(gate.get("status")), str(gate.get("status") or "仅限研究"))
@@ -527,17 +516,17 @@ details{{margin-top:14px}}summary{{cursor:pointer;font-weight:700;color:#1d4ed8}
 @media print{{body{{background:white}}main{{box-shadow:none;margin:0;max-width:none}}details{{display:block}}}}
 </style></head><body><main>
 <h1>{ticker} 多策略量化回测</h1>
-<p class="meta">评价期 {payload.get('evaluation_start_date')} 至 {payload.get('evaluation_end_date')} ·
-热身 {payload.get('warmup_bars')} 个交易日 · {payload.get('strategy_count')} 个策略 ·
+<p class="meta">评价期 {payload.get("evaluation_start_date")} 至 {payload.get("evaluation_end_date")} ·
+热身 {payload.get("warmup_bars")} 个交易日 · {payload.get("strategy_count")} 个策略 ·
 数据核验 {validation_status} ·
-数据源 {payload.get('data_validation', {}).get('selected_source')}</p>
+数据源 {payload.get("data_validation", {}).get("selected_source")}</p>
 <p class="lead">本报告先说明策略如何交易及本期为什么表现好或不好，再给出净值、回撤、样本外、成本压力和数据审计证据。</p>
 <h2>Agent 建议</h2><div class="advice"><ul>{recommendations}</ul></div>
 <h2>研究结论与下一步</h2>
-<p class="gate-status">当前首选：{html.escape(str(decision.get('preferred_display_name') or '—'))} ·
+<p class="gate-status">当前首选：{html.escape(str(decision.get("preferred_display_name") or "—"))} ·
 稳健性：{html.escape(robustness_label)} ·
 准入：{html.escape(gate_status)}</p>
-<p>{html.escape(str(gate.get('message') or '当前仅限研究与模拟验证。'))}</p>
+<p>{html.escape(str(gate.get("message") or "当前仅限研究与模拟验证。"))}</p>
 <div class="two-cols"><div class="panel"><h3>最可能推翻当前建议的证据</h3><ul>{falsification_html}</ul></div>
 <div class="panel"><h3>部署准入检查</h3><div class="table-wrap"><table><tbody>
 {gate_rows}</tbody></table></div></div></div>
@@ -549,41 +538,41 @@ details{{margin-top:14px}}summary{{cursor:pointer;font-weight:700;color:#1d4ed8}
 <h3>归一化净值</h3>{_chart_svg(payload)}
 <h3>回撤</h3>{_chart_svg(payload, drawdown=True)}
 <h2>完整绩效对比</h2><div class="table-wrap"><table><thead><tr>{header_html}</tr></thead>
-<tbody>{''.join(table_rows)}</tbody></table></div>
+<tbody>{"".join(table_rows)}</tbody></table></div>
 <h2>逐策略诊断</h2><div class="diagnoses">
-{''.join(assessment_cards) or '<div class="empty">暂无逐策略诊断</div>'}</div>
+{"".join(assessment_cards) or '<div class="empty">暂无逐策略诊断</div>'}</div>
 <h2>市场阶段归因</h2><p class="meta">上涨、下跌、横盘为互斥阶段；高波动为可与三类趋势阶段重叠的风险切片。</p>
 <div class="table-wrap"><table><thead><tr><th>策略</th><th>市场阶段</th><th>天数</th><th>策略收益</th>
 <th>标的收益</th><th>相对超额</th><th>平均仓位</th><th>最差单日</th></tr></thead>
-<tbody>{''.join(regime_rows)}</tbody></table></div>
+<tbody>{"".join(regime_rows)}</tbody></table></div>
 <h2>交易级归因</h2><p class="meta">按 FIFO 配对实际成交，计入成交记录中的佣金、税费和过户费。</p>
 <div class="table-wrap"><table><thead><tr><th>策略</th><th>闭合交易段</th><th>已实现盈亏</th><th>胜率</th>
 <th>平均盈亏比</th><th>平均持有天数</th><th>最长连亏</th><th>前三笔盈利占比</th><th>未闭合股数</th></tr></thead>
-<tbody>{''.join(trade_summary_rows)}</tbody></table></div>
+<tbody>{"".join(trade_summary_rows)}</tbody></table></div>
 <details><summary>查看所有 FIFO 闭合交易段</summary><div class="table-wrap"><table><thead><tr>
 <th>策略</th><th>买入日</th><th>卖出日</th><th>数量</th><th>持有天数</th><th>盈亏</th><th>收益率</th>
-</tr></thead><tbody>{''.join(matched_trade_rows)}</tbody></table></div></details>
+</tr></thead><tbody>{"".join(matched_trade_rows)}</tbody></table></div></details>
 <h2>稳健性证据</h2><div class="table-wrap"><table><thead><tr><th>策略</th><th>等级</th>
 <th>样本外收益</th><th>滚动正收益率</th><th>最差滚动收益</th><th>参数敏感性</th><th>压力成本收益</th>
-<th>成本拖累</th></tr></thead><tbody>{''.join(robustness_rows)}</tbody></table></div>
+<th>成本拖累</th></tr></thead><tbody>{"".join(robustness_rows)}</tbody></table></div>
 <details open><summary>相邻参数结果</summary><div class="table-wrap"><table><thead><tr>
-<th>策略</th><th>参数版本</th><th>总收益</th><th>夏普</th></tr></thead><tbody>{''.join(parameter_rows)}</tbody>
+<th>策略</th><th>参数版本</th><th>总收益</th><th>夏普</th></tr></thead><tbody>{"".join(parameter_rows)}</tbody>
 </table></div></details>
 <h2>交易成本压力测试</h2><details open><summary>展开低成本、基准和压力情景</summary>
 <div class="table-wrap"><table><thead><tr><th>情景</th><th>策略</th><th>收益</th><th>回撤</th>
-<th>费用</th></tr></thead><tbody>{''.join(cost_rows)}</tbody></table></div></details>
+<th>费用</th></tr></thead><tbody>{"".join(cost_rows)}</tbody></table></div></details>
 {market_html}
 <h2>数据与执行审计</h2>
-<p class="meta">选择理由：{html.escape(str(validation.get('selection_reason') or '未记录'))} ·
+<p class="meta">选择理由：{html.escape(str(validation.get("selection_reason") or "未记录"))} ·
 数据快照 SHA-256：<code>
-{html.escape(str(payload.get('data_snapshot', {}).get('sha256') or '未记录'))}</code></p>
+{html.escape(str(payload.get("data_snapshot", {}).get("sha256") or "未记录"))}</code></p>
 <div class="table-wrap"><table><thead><tr><th>数据源</th><th>选中</th><th>质量分</th>
 <th>实际区间</th><th>哈希</th></tr></thead><tbody>{source_rows}</tbody></table></div>
 <div class="two-cols"><div><h3>成交与费用假设</h3><div class="table-wrap"><table>
 <tbody>{execution_rows}</tbody></table></div></div>
 <div><h3>验收检查</h3><div class="table-wrap"><table><tbody>{acceptance_rows}</tbody></table></div></div></div>
 <h2>数据警告与局限</h2><div class="two-cols"><div class="panel"><h3>数据警告</h3>
-<ul>{warnings or '<li>未发现额外数据警告</li>'}</ul></div>
+<ul>{warnings or "<li>未发现额外数据警告</li>"}</ul></div>
 <div class="panel"><h3>模型局限</h3><ul>{limitations}</ul></div></div>
 <p class="meta">以上结论仅适用于本报告记录的固定数据、参数、评价区间和成交假设，用于短中期研究与模拟盘。</p>
 </main></body></html>"""
@@ -669,9 +658,7 @@ def _workbook(payload: dict[str, Any], selected_rows: list[dict[str, Any]]) -> b
         ("研究首选", decision.get("preferred_display_name") or "—"),
         (
             "稳健性等级",
-            _ROBUSTNESS_LABELS.get(
-                str(decision.get("robustness_grade")), decision.get("robustness_grade") or "未知"
-            ),
+            _ROBUSTNESS_LABELS.get(str(decision.get("robustness_grade")), decision.get("robustness_grade") or "未知"),
         ),
         ("部署准入", _GATE_STATUS_LABELS.get(str(gate.get("status")), gate.get("status") or "仅限研究")),
         ("准入说明", gate.get("message") or "当前仅限研究与模拟验证"),
@@ -812,9 +799,7 @@ def _workbook(payload: dict[str, Any], selected_rows: list[dict[str, Any]]) -> b
             {
                 "check": "行情行数核对",
                 "engine_value": len(selected_rows),
-                "formula_check": (
-                    f"=COUNTA('选定行情数据'!A2:A{len(selected_rows) + 1})={len(selected_rows)}"
-                ),
+                "formula_check": (f"=COUNTA('选定行情数据'!A2:A{len(selected_rows) + 1})={len(selected_rows)}"),
             },
             {
                 "check": "费用合计核对",

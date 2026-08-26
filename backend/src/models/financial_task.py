@@ -22,9 +22,9 @@ class ResearchAssetType(str, Enum):
     """Research scope is broader than the orderable exchange asset model."""
 
     STOCK = "stock"
-    FUND = "fund"
     ETF = "etf"
     LOF = "lof"
+    OPEN_FUND = "open_fund"
 
 
 class DatasetRequirement(BaseModel):

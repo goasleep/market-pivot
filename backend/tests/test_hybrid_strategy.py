@@ -276,7 +276,7 @@ async def test_deployed_hybrid_strategy_uses_target_weight_and_persists_state(mo
             )
         }
 
-    monkeypatch.setattr(automation_module, "async_get_fund_history", fake_history)
+    monkeypatch.setattr(automation_module, "async_get_exchange_fund_history", fake_history)
     monkeypatch.setattr(automation_module, "build_market_context", fake_context)
     monkeypatch.setattr(automation_module.research_service, "run", approving_agent)
 

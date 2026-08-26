@@ -41,10 +41,7 @@ class HistorySeries:
         return ":".join((self.dataset, self.asset_type, self.ticker, self.adjustment))
 
     def data_key(self, year: int, digest: str) -> str:
-        return (
-            f"data/{self.dataset}/{self.asset_type}/{self.ticker}/"
-            f"{self.adjustment}/{year}/snapshot-{digest}.parquet"
-        )
+        return f"data/{self.dataset}/{self.asset_type}/{self.ticker}/{self.adjustment}/{year}/snapshot-{digest}.parquet"
 
 
 @dataclass(frozen=True)

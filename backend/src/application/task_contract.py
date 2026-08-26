@@ -10,9 +10,19 @@ from loguru import logger
 
 from application.fund_task_compiler import compile_fund_task
 from llm.service import get_llm_service
+from models.fund_task import FundTaskKind
 from models.supervisor import ExecutionMode, TaskContract, TaskRoutingDecision
 
 _REPRESENTATIVE_WORDS = re.compile(r"代表产品|自动选择|场内.*场外|ETF.*联接|联接.*ETF", re.IGNORECASE)
+_OUTPUT_LABELS = {
+    "candidate_pool": "候选基金池",
+    "comparison": "候选对比",
+    "primary_selection": "明确首选",
+    "selection_rationale": "选择依据",
+    "alternative_selection": "至少一个备选",
+    "exclusions": "未选候选及排除原因",
+    "data_as_of": "数据日期与来源",
+}
 
 
 async def classify_task_execution(
@@ -58,6 +68,25 @@ async def classify_task_execution(
             ),
         )
         decision = TaskRoutingDecision.model_validate(payload)
+        compiled_fund_task = compile_fund_task(
+            message,
+            tickers=tuple(tickers),
+            asset_type=asset_type,
+            mutation_requested=mutation_requested,
+        )
+        if (
+            compiled_fund_task is not None
+            and compiled_fund_task.task_kind == FundTaskKind.UNIVERSE_RESEARCH
+            and not decision.requires_tools
+        ):
+            decision = decision.model_copy(
+                update={
+                    "mode": ExecutionMode.EVIDENCE_RESEARCH,
+                    "requires_tools": True,
+                    "allow_research_plan": True,
+                    "reason": "基金候选筛选需要全市场结构化数据",
+                }
+            )
         if mutation_requested and not decision.requires_tools:
             decision = decision.model_copy(
                 update={
@@ -94,8 +123,9 @@ def compile_task_contract(
         else None
     )
     deliverables = list(routing.deliverables)
-    if not deliverables and task_spec is not None:
-        deliverables = list(task_spec.required_outputs)
+    required_outputs = list(task_spec.required_outputs) if task_spec is not None else []
+    if not deliverables and required_outputs:
+        deliverables = [_OUTPUT_LABELS.get(output, output) for output in required_outputs]
     evidence = []
     if task_spec is not None and task_spec.evidence_mode.value != "none":
         evidence.append(task_spec.evidence_mode.value)
@@ -104,6 +134,7 @@ def compile_task_contract(
     return TaskContract(
         objective=message.strip(),
         deliverables=deliverables,
+        required_outputs=required_outputs,
         evidence_requirements=evidence,
         requires_tools=routing.requires_tools,
         resolve_representative_product=bool(_REPRESENTATIVE_WORDS.search(message)),

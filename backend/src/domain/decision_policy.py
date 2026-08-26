@@ -53,8 +53,7 @@ class OrderSizer:
         if decision.decision == Decision.BUY:
             position_pct = min(max(decision.position_size or 0.2, 0.0), rules.max_single_position_pct)
             existing_invested = sum(
-                position.shares * (position.current_price or position.avg_cost)
-                for position in portfolio.positions
+                position.shares * (position.current_price or position.avg_cost) for position in portfolio.positions
             )
             total_value = max(portfolio.total_value, portfolio.cash)
             max_invest = min(

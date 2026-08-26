@@ -1,0 +1,14 @@
+id: exchange_fund.premium_discount
+version: 2.0.0
+title: ETF 折溢价
+description: 校验价格和 NAV/IOPV 时点可比性后计算折溢价。
+domain: exchange_fund
+asset_types: [etf, lof]
+intents: [analyze, compare, screen]
+capabilities: [exchange_fund.premium_discount]
+requires: [exchange_fund.profile, market.quote, exchange_fund.nav]
+tools: [calculate_exchange_fund_premium_discount]
+evidence_types: [premium_discount]
+output_fields: [price, nav_or_iopv, premium_discount_rate, price_at, nav_at, comparable]
+validators: [evidence.required]
+tags: [折溢价, NAV, IOPV, QDII]

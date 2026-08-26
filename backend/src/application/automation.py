@@ -17,7 +17,7 @@ from application.research import research_service
 from application.strategy_state import strategy_runtime_states
 from config import get_llm_config, settings
 from data.backtest_data import prepare_backtest_data
-from data.fund_provider import async_get_fund_history
+from data.exchange_fund_provider import async_get_exchange_fund_history
 from data.market_context import build_market_context
 from data.stock_provider import async_get_stock_history, async_get_stock_realtime
 from engine.broker_adapters import (
@@ -279,7 +279,7 @@ class AutomationService:
                 if deployment.asset_type.value == "stock":
                     frame = await async_get_stock_history(ticker, start_date=start_date, end_date=effective_date)
                 else:
-                    frame = await async_get_fund_history(
+                    frame = await async_get_exchange_fund_history(
                         ticker,
                         asset_type=deployment.asset_type.value,
                         start_date=start_date,
@@ -315,9 +315,7 @@ class AutomationService:
                     for position in account.portfolio.positions
                 )
                 current_exposure = (
-                    held.shares * current_price / marked_total
-                    if held is not None and marked_total
-                    else 0.0
+                    held.shares * current_price / marked_total if held is not None and marked_total else 0.0
                 )
                 if held is not None and runtime_state.entry_price is None:
                     runtime_state.entry_price = held.avg_cost
@@ -388,9 +386,7 @@ class AutomationService:
         for ticker, item in analyses.items():
             held = positions.get(ticker)
             current_weight = (
-                held.shares * float(item["price"]) / marked_total
-                if held is not None and marked_total
-                else 0.0
+                held.shares * float(item["price"]) / marked_total if held is not None and marked_total else 0.0
             )
             raw_targets[ticker] = (
                 float(item["target_exposure"])

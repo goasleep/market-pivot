@@ -1,0 +1,14 @@
+id: exchange_fund.portfolio_fit
+version: 2.0.0
+title: ETF 组合适配
+description: 计算相关性、组合集中度、边际风险与仓位约束。
+domain: exchange_fund
+asset_types: [etf, lof]
+intents: [portfolio, analyze, compare]
+capabilities: [exchange_fund.portfolio_fit]
+requires: [exchange_fund.profile, market.history, risk.metrics]
+tools: [calculate_exchange_fund_portfolio_fit]
+evidence_types: [portfolio_risk]
+output_fields: [correlation, current_concentration, proposed_weight, new_concentration]
+validators: [evidence.required]
+tags: [组合, 相关性, 集中度, 仓位]

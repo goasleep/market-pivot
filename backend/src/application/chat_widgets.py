@@ -10,7 +10,7 @@ import asyncio
 from typing import Any
 
 from data.akshare_provider import async_get_stock_history, get_breaker_status
-from strategies.skill_manager import list_strategies
+from strategies.strategy_registry import list_strategies
 from widgets.a2ui import (
     CATALOG,
     render_breaker_status,

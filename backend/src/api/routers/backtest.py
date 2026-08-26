@@ -3,7 +3,7 @@
 import asyncio
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -12,7 +12,7 @@ from application.backtest_jobs import backtest_jobs
 from application.backtest_service import run_backtest, run_pool_backtest
 from models.schemas import AssetType, PortfolioSpec
 from strategies.compiler import available_indicators
-from strategies.skill_manager import get_strategy_spec
+from strategies.strategy_registry import get_strategy_spec
 
 router = APIRouter()
 
@@ -51,6 +51,17 @@ def _validate_mode(mode: str, symbols: list[str]) -> None:
         raise ValueError(f"{mode} 模式至少需要两个标的")
 
 
+def _validate_backtest_pricing_basis(asset_type: AssetType) -> None:
+    if asset_type == AssetType.OPEN_FUND:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "open_fund 不适用价格/成交量回测；请通过 open_fund.nav_backtest 使用已公布 NAV、"
+                "下一可用 NAV 执行规则和显式费率假设"
+            ),
+        )
+
+
 def _strategy_payload(
     strategy_name: str,
     strategy_spec: dict | None,
@@ -68,6 +79,7 @@ def _strategy_payload(
 
 @router.post("/run")
 async def run_backtest_api(req: BacktestRequest):
+    _validate_backtest_pricing_basis(req.asset_type)
     symbols = _symbols(req)
     _validate_mode(req.mode, symbols)
     strategy_spec = _strategy_payload(req.strategy, req.strategy_spec, req.asset_type)
@@ -93,20 +105,34 @@ async def run_backtest_api(req: BacktestRequest):
             portfolio_spec=portfolio_spec if req.mode == "portfolio" else None,
         )
     return await run_backtest(
-        ticker=symbols[0], start_date=req.start_date, end_date=req.end_date,
-        initial_capital=req.initial_capital, initial_position=req.initial_position,
-        decision_interval=req.decision_interval, fill_time=req.fill_time,
-        strategy_name=req.strategy, asset_type=req.asset_type, strategy_spec=strategy_spec,
+        ticker=symbols[0],
+        start_date=req.start_date,
+        end_date=req.end_date,
+        initial_capital=req.initial_capital,
+        initial_position=req.initial_position,
+        decision_interval=req.decision_interval,
+        fill_time=req.fill_time,
+        strategy_name=req.strategy,
+        asset_type=req.asset_type,
+        strategy_spec=strategy_spec,
     )
 
 
 @router.get("/stream")
 async def stream_backtest(
-    ticker: str, start_date: str, end_date: str, initial_capital: float = 1_000_000,
-    initial_position: int = 0, decision_interval: int = 1, fill_time: str = "next_open",
-    strategy: str = "bull_trend", asset_type: AssetType = AssetType.STOCK,
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    initial_capital: float = 1_000_000,
+    initial_position: int = 0,
+    decision_interval: int = 1,
+    fill_time: str = "next_open",
+    strategy: str = "bull_trend",
+    asset_type: AssetType = AssetType.STOCK,
     strategy_spec: dict | None = None,
 ):
+    _validate_backtest_pricing_basis(asset_type)
+
     async def event_generator():
         queue: asyncio.Queue[dict] = asyncio.Queue()
         executable_spec = _strategy_payload(strategy, strategy_spec, asset_type)
@@ -114,12 +140,21 @@ async def stream_backtest(
         async def progress(stage: str, message: str):
             await queue.put({"event": "progress", "stage": stage, "message": message})
 
-        task = asyncio.create_task(run_backtest(
-            ticker=ticker, start_date=start_date, end_date=end_date,
-            initial_capital=initial_capital, initial_position=initial_position,
-            decision_interval=decision_interval, fill_time=fill_time, strategy_name=strategy,
-            asset_type=asset_type, progress_callback=progress, strategy_spec=executable_spec,
-        ))
+        task = asyncio.create_task(
+            run_backtest(
+                ticker=ticker,
+                start_date=start_date,
+                end_date=end_date,
+                initial_capital=initial_capital,
+                initial_position=initial_position,
+                decision_interval=decision_interval,
+                fill_time=fill_time,
+                strategy_name=strategy,
+                asset_type=asset_type,
+                progress_callback=progress,
+                strategy_spec=executable_spec,
+            )
+        )
         try:
             while True:
                 if task.done() and queue.empty():
@@ -137,6 +172,7 @@ async def stream_backtest(
 
 @router.post("/jobs")
 async def create_backtest_job(req: BacktestRequest):
+    _validate_backtest_pricing_basis(req.asset_type)
     symbols = _symbols(req)
     _validate_mode(req.mode, symbols)
     params = req.model_dump(exclude_none=True)

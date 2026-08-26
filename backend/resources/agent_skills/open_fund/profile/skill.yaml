@@ -1,0 +1,14 @@
+id: open_fund.profile
+version: 2.0.0
+title: 场外基金产品核验
+description: 通过结构化 Provider 核验场外开放式基金、份额类别、产品类别和申赎状态。
+domain: open_fund
+asset_types: [open_fund]
+product_categories: [equity, hybrid, bond, money_market, index, enhanced_index, qdii, fof, unknown]
+intents: [analyze, compare, screen]
+capabilities: [open_fund.profile]
+tools: [get_open_fund_profile]
+evidence_types: [fund_profile]
+output_fields: [fund_code, name, product_category, share_class, verified, subscription_status, redemption_status, as_of]
+validators: [evidence.required]
+tags: [场外基金, 产品核验, 份额类别, 申赎]

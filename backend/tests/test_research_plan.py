@@ -8,7 +8,8 @@ from pydantic import ValidationError
 
 import agents.stock_agent as stock_agent_module
 import graph.research_plan as research_graph
-from agents.stock_agent import AssetAgentRequest, AssetIntent, StockAgent
+from agents.stock_agent import AssetAgent as StockAgent
+from agents.stock_agent import AssetAgentRequest, AssetIntent
 from application.research_plan import _plan_snapshot
 from graph.research_plan import (
     ResearchPlanContext,
@@ -529,7 +530,7 @@ async def test_research_plan_uses_shared_long_running_tool_timeout(monkeypatch):
     captured: dict[str, int] = {}
 
     @tool
-    async def run_fund_or_stock_analysis(ticker: str, asset_type: str = "stock") -> str:
+    async def run_stock_comprehensive_analysis(ticker: str, asset_type: str = "stock") -> str:
         """Run comprehensive analysis."""
         return json.dumps({"ticker": ticker, "asset_type": asset_type})
 
@@ -540,15 +541,15 @@ async def test_research_plan_uses_shared_long_running_tool_timeout(monkeypatch):
         return await original_wait_for(awaitable, timeout=timeout)
 
     monkeypatch.setattr(research_graph.asyncio, "wait_for", capture_wait_for)
-    context = ResearchPlanContext(tools={run_fund_or_stock_analysis.name: run_fund_or_stock_analysis})
+    context = ResearchPlanContext(tools={run_stock_comprehensive_analysis.name: run_stock_comprehensive_analysis})
 
     await _call_tool(
         context,
-        "run_fund_or_stock_analysis",
+        "run_stock_comprehensive_analysis",
         {"ticker": "510300", "asset_type": "etf"},
     )
 
-    assert captured["timeout"] == research_graph.tool_timeout_seconds("run_fund_or_stock_analysis") == 1800
+    assert captured["timeout"] == research_graph.tool_timeout_seconds("run_stock_comprehensive_analysis") == 1800
 
 
 @pytest.mark.asyncio
@@ -994,7 +995,7 @@ async def test_standard_research_graph_runs_ready_steps_in_parallel(monkeypatch)
         )
 
     @tool
-    async def run_fund_or_stock_analysis(ticker: str, asset_type: str = "stock") -> str:
+    async def run_stock_comprehensive_analysis(ticker: str, asset_type: str = "stock") -> str:
         """Run comprehensive analysis."""
         return await payload({"decision": "hold", "provenance": provenance})
 
@@ -1017,7 +1018,7 @@ async def test_standard_research_graph_runs_ready_steps_in_parallel(monkeypatch)
         compute_technical_indicators,
         get_fundamentals,
         search_web,
-        run_fund_or_stock_analysis,
+        run_stock_comprehensive_analysis,
         calculate_risk_metrics,
     ]
     graph = build_research_plan_graph(MemorySaver())

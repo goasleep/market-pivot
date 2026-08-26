@@ -23,9 +23,7 @@ def get_chat_model(
     the settings API take effect without restarting the backend.
     """
     cfg = config or (
-        get_llm_config()
-        if profile_id is None and model is None
-        else get_llm_config(profile_id=profile_id, model=model)
+        get_llm_config() if profile_id is None and model is None else get_llm_config(profile_id=profile_id, model=model)
     )
     selected_model = model or cfg["model"]
     preset = cfg.get("model_info") or MODEL_CONFIGS.get(selected_model, {})

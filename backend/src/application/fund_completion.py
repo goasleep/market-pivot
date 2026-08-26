@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from models.fund_task import FundTaskAcceptance, FundTaskSpec, TaskOutcome
+import re
+
+from models.fund_task import FundAnswerAcceptance, FundIntentSpec, TaskOutcome
 
 _OUTPUT_TERMS = {
     "inputs": ("输入", "已知"),
@@ -39,19 +41,34 @@ _OUTPUT_TERMS = {
     "key_differences": ("区别", "差异", "相比"),
     "risks": ("风险", "波动", "亏损"),
     "applicable_conditions": ("适合", "条件", "期限"),
+    "candidate_pool": ("候选", "入围"),
+    "comparison": ("对比", "比较", "排序"),
+    "primary_selection": ("首选", "第一选择", "优先选择"),
+    "selection_rationale": ("依据", "理由", "适合", "因为"),
+    "alternative_selection": ("备选", "次选", "第二选择"),
+    "data_as_of": ("截至", "数据日期", "交易日", "来源"),
 }
+_FUND_CODE = re.compile(r"(?<!\d)\d{6}(?!\d)")
 
 
-def validate_fund_response(spec: FundTaskSpec, answer: str) -> FundTaskAcceptance:
+def validate_fund_response(spec: FundIntentSpec, answer: str) -> FundAnswerAcceptance:
     if not answer.strip():
-        return FundTaskAcceptance(outcome=TaskOutcome.FAILED, satisfied=False, missing=["answer"])
+        return FundAnswerAcceptance(outcome=TaskOutcome.FAILED, satisfied=False, missing=["answer"])
     checks: dict[str, bool] = {}
     for output in spec.required_outputs:
         terms = _OUTPUT_TERMS.get(output, (output,))
-        checks[output] = any(term.lower() in answer.lower() for term in terms)
+        if output == "data_as_of":
+            has_date = any(term in answer for term in ("截至", "数据日期", "交易日"))
+            checks[output] = has_date and "来源" in answer
+        else:
+            checks[output] = any(term.lower() in answer.lower() for term in terms)
+    selection = spec.selection_requirements
+    if selection is not None:
+        candidate_count = len(set(_FUND_CODE.findall(answer)))
+        checks["minimum_candidates"] = candidate_count >= selection.minimum_candidates
     missing = [key for key, passed in checks.items() if not passed]
     if not missing:
-        return FundTaskAcceptance(outcome=TaskOutcome.SATISFIED, satisfied=True, checks=checks)
+        return FundAnswerAcceptance(outcome=TaskOutcome.SATISFIED, satisfied=True, checks=checks)
     passed = sum(checks.values())
     outcome = TaskOutcome.PARTIAL if passed else TaskOutcome.FAILED
-    return FundTaskAcceptance(outcome=outcome, satisfied=False, checks=checks, missing=missing)
+    return FundAnswerAcceptance(outcome=outcome, satisfied=False, checks=checks, missing=missing)

@@ -15,10 +15,10 @@ router = APIRouter()
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., description="A stock or exchange-traded fund request")
+    message: str = Field(..., description="A stock, exchange-traded fund, or open-fund request")
     strategy: str | None = Field(default=None, description="Strategy override")
     conversation_id: str | None = Field(default=None, description="Client-side conversation identifier")
-    asset_type: AssetType | None = Field(default=None, description="Optional stock, ETF, or LOF override")
+    asset_type: AssetType | None = Field(default=None, description="Optional stock, ETF, LOF, or open-fund override")
     task_id: str | None = Field(default=None, description="Client-generated task identifier")
     user_message_id: str | None = Field(default=None, min_length=1, max_length=255)
     assistant_message_id: str | None = Field(default=None, min_length=1, max_length=255)

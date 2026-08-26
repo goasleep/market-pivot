@@ -6,7 +6,7 @@ import pytest_asyncio
 from langgraph.checkpoint.memory import MemorySaver
 
 from agents.asset_requests import RequestMode
-from agents.stock_agent import StockAgent
+from agents.stock_agent import AssetAgent as StockAgent
 from application.chat_service import ChatStore, ChatTaskInput, ChatTaskManager
 from application.data_analysis_sandbox import run_data_analysis, validate_analysis_source
 from application.financial_task_planner import compile_financial_task_spec

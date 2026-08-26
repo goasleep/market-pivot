@@ -186,7 +186,7 @@ async def test_deployed_confirm_mode_waits_for_confirmation_and_is_idempotent(mo
     async def fake_history(*_args, **_kwargs):
         return _history()
 
-    monkeypatch.setattr(automation_module, "async_get_fund_history", fake_history)
+    monkeypatch.setattr(automation_module, "async_get_exchange_fund_history", fake_history)
 
     async def fake_context(*_args, **_kwargs):
         return SimpleNamespace(
@@ -264,7 +264,7 @@ async def test_agent_can_veto_a_deployed_stop_loss_sell(monkeypatch, tmp_path):
     monkeypatch.setattr(automation_module, "simulation_accounts", accounts)
     monkeypatch.setattr(automation_module, "automation_store", store)
     monkeypatch.setattr(automation_module, "deployment_service", deployments)
-    monkeypatch.setattr(automation_module, "async_get_fund_history", fake_history)
+    monkeypatch.setattr(automation_module, "async_get_exchange_fund_history", fake_history)
     monkeypatch.setattr(automation_module, "build_market_context", fake_context)
     monkeypatch.setattr(automation_module.research_service, "run", veto_agent)
 
@@ -301,7 +301,7 @@ async def test_agent_can_veto_a_deployed_buy(monkeypatch, tmp_path):
     monkeypatch.setattr(automation_module, "simulation_accounts", accounts)
     monkeypatch.setattr(automation_module, "automation_store", store)
     monkeypatch.setattr(automation_module, "deployment_service", deployments)
-    monkeypatch.setattr(automation_module, "async_get_fund_history", fake_history)
+    monkeypatch.setattr(automation_module, "async_get_exchange_fund_history", fake_history)
     monkeypatch.setattr(automation_module, "build_market_context", fake_context)
     monkeypatch.setattr(automation_module.research_service, "run", veto_agent)
 

@@ -172,7 +172,7 @@ def render_research_plan(
 ) -> list[dict[str, Any]]:
     """Render one replaceable public plan snapshot without exposing chain of thought."""
     steps = [item for item in plan.get("steps", []) if isinstance(item, dict)]
-    children = ["title", "meta", "objective", "outcome", "progress"]
+    children = ["title", "meta", "skills", "objective", "outcome", "progress", "missing"]
     outcome = str(plan.get("outcome_status") or "")
     outcome_labels = {
         "satisfied": "业务验收：通过",
@@ -184,15 +184,27 @@ def render_research_plan(
         {"id": "root", "component": "Card", "children": children},
         _text("title", "股票 / 基金研究执行计划", "h3"),
         _text("meta", _ref("/meta"), "caption"),
+        _text("skills", _ref("/skills"), "caption"),
         _text("objective", _ref("/objective"), "body"),
         {"id": "outcome", "component": "Badge", "text": _ref("/outcomeLabel"), "tone": _ref("/outcomeTone")},
         {"id": "progress", "component": "Progress", "value": _ref("/progress")},
+        _text("missing", _ref("/missing"), "caption"),
     ]
     for index, step in enumerate(steps):
         component_id = f"step-{index}"
         children.append(component_id)
         recovery = step.get("recovery") if isinstance(step.get("recovery"), dict) else None
         detail = str(step.get("error") or "")
+        evidence_status = str(step.get("evidence_status") or "")
+        public_meta = " · ".join(
+            item
+            for item in (
+                str(step.get("skill_id") or step.get("capability_id") or ""),
+                f"证据 {evidence_status}" if evidence_status else "",
+                f"数据 {step.get('as_of')}" if step.get("as_of") else "",
+            )
+            if item
+        )
         evidence_issues = [str(item) for item in step.get("evidence_issues", []) if str(item)]
         if not detail and evidence_issues:
             detail = "数据说明：" + "；".join(evidence_issues)
@@ -203,6 +215,7 @@ def render_research_plan(
                 "abort": "停止重试",
             }.get(str(recovery.get("action")), "失败恢复")
             detail = f"{recovery_label}：{recovery.get('summary') or detail}"
+        detail = "；".join(item for item in (public_meta, detail) if item)
         components.append(
             {
                 "id": component_id,
@@ -226,6 +239,10 @@ def render_research_plan(
         components,
         {
             "objective": str(plan.get("objective") or "市场研究"),
+            "skills": "能力：" + "、".join(str(item) for item in plan.get("selected_skills", [])[:12]),
+            "missing": (
+                "待补齐：" + "、".join(str(item) for item in plan.get("missing", [])[:8]) if plan.get("missing") else ""
+            ),
             "outcomeLabel": outcome_labels.get(outcome, "业务验收：执行中"),
             "outcomeTone": (
                 "positive"
@@ -741,6 +758,7 @@ def render_tool_result(
     from widgets.a2ui_tool_results import render_tool_result as dispatch_tool_result
 
     return dispatch_tool_result(tool_name, raw_result, surface_id)
+
 
 CATALOG = {
     "$id": CATALOG_ID,

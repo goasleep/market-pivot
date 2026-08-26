@@ -24,17 +24,83 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
 from loguru import logger
 
+from application.fund_completion import validate_fund_response
 from llm.context import context_safe_error, is_context_overflow_error
 from llm.service import get_llm_service
+from models.fund_task import FundIntentSpec, FundTaskKind
 from models.supervisor import CompletionResult, SupervisorOutcome
 from tools.policies import tool_requires_confirmation
 
 DEFAULT_MAX_STEPS = 100
-LLM_TIMEOUT_SECONDS = 1800
-TOOL_TIMEOUT_SECONDS = 1800
-RESEARCH_PLAN_TIMEOUT_SECONDS = 1800
-LONG_RUNNING_TOOL_TIMEOUT_SECONDS = 1800
+MAX_EXECUTION_MINUTES = 30
+MAX_EXECUTION_SECONDS = MAX_EXECUTION_MINUTES * 60
+LLM_TIMEOUT_SECONDS = MAX_EXECUTION_SECONDS
+TOOL_TIMEOUT_SECONDS = MAX_EXECUTION_SECONDS
+RESEARCH_PLAN_TIMEOUT_SECONDS = MAX_EXECUTION_SECONDS
+LONG_RUNNING_TOOL_TIMEOUT_SECONDS = MAX_EXECUTION_SECONDS
 _UNFINISHED_ANSWER = re.compile(r"下一步(?:需要|要)|进一步(?:校准|确认)?需|仍需(?:查询|查找|核对)|待(?:查询|核对|确认)")
+_TOOL_OBSERVATION_LIMIT = 6000
+_REUSABLE_BACKTEST_TOOLS = {
+    "run_backtest",
+    "design_and_run_backtest",
+    "compare_strategy_backtests",
+    "design_and_run_sandbox_strategy",
+}
+
+
+def _compact_json_value(value: Any, *, depth: int = 0) -> Any:
+    """Keep model-facing observations bounded while preserving audit results elsewhere."""
+    if depth >= 5:
+        return str(value)[:500]
+    if isinstance(value, dict):
+        return {str(key): _compact_json_value(item, depth=depth + 1) for key, item in value.items()}
+    if isinstance(value, list):
+        if len(value) <= 8:
+            return [_compact_json_value(item, depth=depth + 1) for item in value]
+        return {
+            "_truncated": True,
+            "count": len(value),
+            "first": [_compact_json_value(item, depth=depth + 1) for item in value[:2]],
+            "latest": [_compact_json_value(item, depth=depth + 1) for item in value[-5:]],
+        }
+    if isinstance(value, str) and len(value) > 1000:
+        return f"{value[:900]}…[truncated {len(value) - 900} chars]"
+    return value
+
+
+def compact_tool_observation(result: str, *, limit: int = _TOOL_OBSERVATION_LIMIT) -> str:
+    """Compress only the ToolMessage sent back to the LLM; tool events retain the full payload."""
+    if len(result) <= limit:
+        return result
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return f"{result[: limit - 80]}…[full result retained in Evidence Store]"
+    compacted = json.dumps(_compact_json_value(payload), ensure_ascii=False, default=str)
+    if len(compacted) <= limit:
+        return compacted
+    metadata = {
+        key: payload.get(key)
+        for key in (
+            "data_type",
+            "status",
+            "data_status",
+            "available",
+            "ticker",
+            "asset_type",
+            "as_of",
+            "fetched_at",
+            "freshness",
+            "sources",
+            "provenance",
+            "errors",
+            "error",
+        )
+        if isinstance(payload, dict) and key in payload
+    }
+    metadata["_observation_truncated"] = True
+    metadata["summary"] = compacted[: max(0, limit - 1200)]
+    return json.dumps(metadata, ensure_ascii=False, default=str)[:limit]
 
 
 def tool_timeout_seconds(name: str) -> int:
@@ -42,7 +108,7 @@ def tool_timeout_seconds(name: str) -> int:
     if name == "run_research_plan":
         return RESEARCH_PLAN_TIMEOUT_SECONDS
     if name in {
-        "run_fund_or_stock_analysis",
+        "run_stock_comprehensive_analysis",
         "run_backtest",
         "design_and_run_backtest",
         "compare_strategy_backtests",
@@ -57,7 +123,7 @@ def tool_attempts(name: str) -> int:
     """Return retry count without duplicating expensive or mutating work."""
     if name in {
         "run_research_plan",
-        "run_fund_or_stock_analysis",
+        "run_stock_comprehensive_analysis",
         "run_backtest",
         "design_and_run_backtest",
         "compare_strategy_backtests",
@@ -66,6 +132,73 @@ def tool_attempts(name: str) -> int:
     }:
         return 1
     return 1 if name.startswith(("submit_", "cancel_", "create_", "fill_")) else 2
+
+
+def _tool_result_is_reusable(event: dict[str, Any]) -> bool:
+    if event.get("status") != "completed":
+        return False
+    try:
+        payload = json.loads(str(event.get("result") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return not (
+        payload.get("available") is False
+        or payload.get("data_status") == "unavailable"
+        or payload.get("error")
+    )
+
+
+def _same_backtest_scope(designed_args: dict[str, Any], requested_args: dict[str, Any]) -> bool:
+    requested_ticker = str(requested_args.get("ticker") or "")
+    designed_tickers = {
+        str(item)
+        for item in [designed_args.get("ticker"), *(designed_args.get("tickers") or [])]
+        if item
+    }
+    if (
+        not requested_ticker
+        or designed_tickers != {requested_ticker}
+        or str(designed_args.get("mode") or "auto") not in {"auto", "single"}
+    ):
+        return False
+    return all(
+        str(designed_args.get(field) or default) == str(requested_args.get(field) or default)
+        for field, default in (
+            ("start_date", ""),
+            ("end_date", ""),
+            ("asset_type", "stock"),
+            ("initial_capital", 1_000_000),
+            ("decision_interval", 1),
+        )
+    )
+
+
+def _find_reusable_tool_event(
+    name: str,
+    args: dict[str, Any],
+    tool_events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return prior evidence that makes an identical expensive call redundant."""
+    if name not in _REUSABLE_BACKTEST_TOOLS:
+        return None
+    for event in reversed(tool_events):
+        if not _tool_result_is_reusable(event):
+            continue
+        prior_name = str(event.get("name") or "")
+        prior_args = event.get("args")
+        if not isinstance(prior_args, dict):
+            continue
+        if prior_name == name and prior_args == args:
+            return event
+        if (
+            name == "run_backtest"
+            and prior_name == "design_and_run_backtest"
+            and _same_backtest_scope(prior_args, args)
+        ):
+            return event
+    return None
 
 
 class AgentLoopState(TypedDict, total=False):
@@ -98,6 +231,37 @@ def _content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     return str(content or "")
+
+
+def _fund_screening_acceptance(contract: dict[str, Any], candidate: str):
+    raw_spec = contract.get("source_task_spec")
+    if not isinstance(raw_spec, dict):
+        return None
+    try:
+        spec = FundIntentSpec.model_validate(raw_spec)
+    except Exception:
+        return None
+    if spec.task_kind != FundTaskKind.UNIVERSE_RESEARCH:
+        return None
+    return spec, validate_fund_response(spec, candidate)
+
+
+def _screened_candidate_count(tool_events: list[dict[str, Any]]) -> int | None:
+    counts: list[int] = []
+    for event in tool_events:
+        if event.get("name") != "screen_assets" or event.get("status") != "completed":
+            continue
+        try:
+            payload = json.loads(str(event.get("result") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("count"), int):
+            counts.append(payload["count"])
+    return max(counts) if counts else None
+
+
+def _candidate_shortage_is_disclosed(candidate: str) -> bool:
+    return bool(re.search(r"(?:只有|仅有|仅|不足|没有更多|暂无更多).{0,16}(?:只|个|候选|符合|合格)", candidate))
 
 
 def _message_objects(messages: list[Any]) -> list[Any]:
@@ -208,42 +372,67 @@ async def judge_completion(state: AgentLoopState) -> dict[str, Any]:
             reason="候选答案仍在描述下一步，尚未真正完成任务",
         )
     else:
-        prompt = json.dumps(
-            {
-                "task_contract": contract,
-                "candidate_answer": candidate,
-                "tool_observations": tool_events[-12:],
-                "budget_exhausted": budget_exhausted,
-            },
-            ensure_ascii=False,
-            default=str,
-        )
-        try:
-            payload = await asyncio.wait_for(
-                get_llm_service().chat_json(
-                    prompt,
-                    system=(
-                        "你是 Supervisor 的完成判定器，不负责回答原问题。判断候选答案是否完成任务合同。"
-                        "采用交付优先：用户明确要求的最小交付项已完成时可以结束；可选证据缺失应披露，"
-                        "但不要为了追求完美阻止一个已经有用、诚实且可执行的回答。"
-                        "若关键交付项仍缺失且现有工具可取得，返回terminal=false。"
-                        "只有确实需要用户私有信息/授权时才 needs_input。数据已尽力查询但不可得时可 data_unavailable。"
-                        "返回字段：outcome(satisfied|partial|needs_input|data_unavailable|failed)、"
-                        "satisfied、terminal、missing、next_action、reason。"
-                    ),
-                ),
-                timeout=LLM_TIMEOUT_SECONDS,
+        deterministic_acceptance = _fund_screening_acceptance(contract, candidate)
+        if deterministic_acceptance is not None and not deterministic_acceptance[1].satisfied:
+            spec, acceptance = deterministic_acceptance
+            selection = spec.selection_requirements
+            screened_count = _screened_candidate_count(tool_events)
+            disclosed_shortage = bool(
+                selection is not None
+                and screened_count is not None
+                and screened_count < selection.minimum_candidates
+                and _candidate_shortage_is_disclosed(candidate)
             )
-            result = CompletionResult.model_validate(payload)
-        except Exception as exc:
-            logger.warning("Completion judge failed; using conservative fallback: {}", exc)
             result = CompletionResult(
                 outcome=SupervisorOutcome.PARTIAL,
                 satisfied=False,
-                terminal=True,
-                missing=["完成判定结果不可用"],
-                reason="完成判定器异常；已保留候选答案，但不能默认判定为完成",
+                terminal=budget_exhausted or disclosed_shortage,
+                missing=acceptance.missing,
+                next_action="补充候选池、横向对比、首选与备选、排除原因及数据日期；候选必须达到合同要求的数量",
+                reason=(
+                    f"结构化筛选仅返回 {screened_count} 个候选，少于合同要求，答案已明确披露数据不足"
+                    if disclosed_shortage
+                    else "基金筛选答案未通过确定性交付校验"
+                ),
             )
+        else:
+            prompt = json.dumps(
+                {
+                    "task_contract": contract,
+                    "candidate_answer": candidate,
+                    "tool_observations": tool_events[-12:],
+                    "budget_exhausted": budget_exhausted,
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+            try:
+                payload = await asyncio.wait_for(
+                    get_llm_service().chat_json(
+                        prompt,
+                        system=(
+                            "你是 Supervisor 的完成判定器，不负责回答原问题。判断候选答案是否完成任务合同。"
+                            "采用交付优先：用户明确要求的最小交付项已完成时可以结束；可选证据缺失应披露，"
+                            "但不要为了追求完美阻止一个已经有用、诚实且可执行的回答。"
+                            "若关键交付项仍缺失且现有工具可取得，返回terminal=false。"
+                            "只有确实需要用户私有信息/授权时才 needs_input。"
+                            "数据已尽力查询但不可得时可 data_unavailable。"
+                            "返回字段：outcome(satisfied|partial|needs_input|data_unavailable|failed)、"
+                            "satisfied、terminal、missing、next_action、reason。"
+                        ),
+                    ),
+                    timeout=LLM_TIMEOUT_SECONDS,
+                )
+                result = CompletionResult.model_validate(payload)
+            except Exception as exc:
+                logger.warning("Completion judge failed; using conservative fallback: {}", exc)
+                result = CompletionResult(
+                    outcome=SupervisorOutcome.PARTIAL,
+                    satisfied=False,
+                    terminal=True,
+                    missing=["完成判定结果不可用"],
+                    reason="完成判定器异常；已保留候选答案，但不能默认判定为完成",
+                )
 
     if budget_exhausted and not result.terminal:
         result = result.model_copy(
@@ -298,7 +487,12 @@ async def execute_tool_calls(
     if not isinstance(response, AIMessage):
         return {"tool_events": [{"name": "unknown", "status": "invalid model response"}]}
 
-    calls = response.tool_calls or []
+    requested_calls = response.tool_calls or []
+    budget = (state.get("task_contract") or {}).get("budget") or {}
+    maximum_calls = int(budget.get("max_tool_calls") or 200)
+    remaining_calls = max(0, maximum_calls - len(state.get("tool_events") or []))
+    calls = requested_calls[:remaining_calls]
+    rejected_calls = requested_calls[remaining_calls:]
     approvals: dict[str, bool] = {}
     for call in calls:
         name = str(call.get("name", ""))
@@ -332,28 +526,31 @@ async def execute_tool_calls(
                 "checkpoint_messages": messages_to_dict(_message_objects(state["messages"])),
             }
 
-    tool_messages: list[ToolMessage] = []
-    events: list[dict[str, Any]] = []
-    for call in response.tool_calls or []:
+    semaphore = asyncio.Semaphore(4)
+
+    async def invoke_call(
+        index: int,
+        call: dict[str, Any],
+    ) -> tuple[int, dict[str, Any] | None, ToolMessage]:
         name = call.get("name", "")
         tool = runtime.context.tool_map.get(name)
-        call_id = call.get("id", "") or f"tool-call-{state.get('step', 0)}-{len(events)}"
+        call_id = call.get("id", "") or f"tool-call-{state.get('step', 0)}-{index}"
         if tool_requires_confirmation(name) and not approvals.get(call_id, False):
             result = json.dumps(
                 {"ok": False, "error": {"code": "user_denied", "message": "用户拒绝执行该工具"}},
                 ensure_ascii=False,
             )
-            events.append({"name": name, "status": "failed", "result": result})
-            tool_messages.append(ToolMessage(content=result, tool_call_id=call_id))
-            continue
+            return index, {"name": name, "status": "failed", "result": result}, ToolMessage(
+                content=result, tool_call_id=call_id
+            )
         if not tool:
             result = json.dumps(
                 {"ok": False, "error": {"code": "unknown_tool", "message": f"未知工具: {name}"}},
                 ensure_ascii=False,
             )
-            events.append({"name": name or "unknown", "status": "failed", "result": result})
-            tool_messages.append(ToolMessage(content=result, tool_call_id=call_id))
-            continue
+            return index, {"name": name or "unknown", "status": "failed", "result": result}, ToolMessage(
+                content=result, tool_call_id=call_id
+            )
 
         args = call.get("args", {})
         if not isinstance(args, dict):
@@ -361,10 +558,24 @@ async def execute_tool_calls(
                 {"ok": False, "error": {"code": "invalid_arguments", "message": "工具参数必须是对象"}},
                 ensure_ascii=False,
             )
-            events.append({"name": name, "status": "failed", "result": result})
-            tool_messages.append(ToolMessage(content=result, tool_call_id=call_id))
-            continue
+            return index, {"name": name, "status": "failed", "result": result}, ToolMessage(
+                content=result, tool_call_id=call_id
+            )
         args = dict(args)
+        reusable = _find_reusable_tool_event(name, args, state.get("tool_events") or [])
+        if reusable is not None:
+            prior_name = str(reusable.get("name") or name)
+            logger.info("Reusing completed tool evidence: {} -> {}", prior_name, name)
+            result = json.dumps(
+                {
+                    "ok": True,
+                    "reused": True,
+                    "prior_tool": prior_name,
+                    "message": "匹配的回测已完成；直接使用上一条工具证据生成最终回答，不要重复执行。",
+                },
+                ensure_ascii=False,
+            )
+            return index, None, ToolMessage(content=result, tool_call_id=call_id)
         if runtime.context.task_id and name in {
             "save_artifacts",
             "submit_simulation_order",
@@ -377,41 +588,80 @@ async def execute_tool_calls(
         timeout_seconds = tool_timeout_seconds(name)
         result: str | None = None
         error_payload: dict[str, Any] | None = None
-        for attempt in range(attempts):
-            try:
-                value = await asyncio.wait_for(
-                    tool.ainvoke(args, config=config),
-                    timeout=timeout_seconds,
-                )
-                result = str(value)
-                break
-            except asyncio.TimeoutError:
-                error_payload = {
-                    "code": "tool_timeout",
-                    "message": f"工具 {name} 执行超过 {timeout_seconds} 秒",
-                    "timeout_seconds": timeout_seconds,
-                    "attempt": attempt + 1,
-                    "attempts": attempts,
-                }
-            except Exception as exc:  # Tool failures are observations, not model failures.
-                error_code, error_message = context_safe_error(exc, str(exc)[:500])
-                error_payload = {
-                    "code": error_code,
-                    "message": error_message,
-                    "attempt": attempt + 1,
-                    "attempts": attempts,
-                }
-            if attempt + 1 < attempts:
-                await asyncio.sleep(0.2 * (attempt + 1))
+        async with semaphore:
+            for attempt in range(attempts):
+                try:
+                    value = await asyncio.wait_for(
+                        tool.ainvoke(args, config=config),
+                        timeout=timeout_seconds,
+                    )
+                    result = str(value)
+                    break
+                except asyncio.TimeoutError:
+                    error_payload = {
+                        "code": "tool_timeout",
+                        "message": f"工具 {name} 执行超过 {timeout_seconds} 秒",
+                        "timeout_seconds": timeout_seconds,
+                        "attempt": attempt + 1,
+                        "attempts": attempts,
+                    }
+                except Exception as exc:  # Tool failures are observations, not model failures.
+                    error_code, error_message = context_safe_error(exc, str(exc)[:500])
+                    error_payload = {
+                        "code": error_code,
+                        "message": error_message,
+                        "attempt": attempt + 1,
+                        "attempts": attempts,
+                    }
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(0.2 * (attempt + 1))
         if result is None:
             result = json.dumps(
                 {"ok": False, "error": error_payload or {"code": "tool_error", "message": "工具执行失败"}},
                 ensure_ascii=False,
             )
-            events.append({"name": name, "status": "failed", "result": result})
+            event = {"name": name, "status": "failed", "result": result, "args": args}
         else:
-            events.append({"name": name, "status": "completed", "result": result})
-        tool_messages.append(ToolMessage(content=result, tool_call_id=call_id))
+            event = {"name": name, "status": "completed", "result": result, "args": args}
+        model_result = (
+            compact_tool_observation(result)
+            if (state.get("task_contract") or {}).get("compact_tool_results")
+            else result
+        )
+        return index, event, ToolMessage(content=model_result, tool_call_id=call_id)
+
+    indexed_calls = list(enumerate(calls))
+    read_calls = [
+        (index, call)
+        for index, call in indexed_calls
+        if not tool_requires_confirmation(call.get("name", ""))
+    ]
+    write_calls = [(index, call) for index, call in indexed_calls if tool_requires_confirmation(call.get("name", ""))]
+    completed: list[tuple[int, dict[str, Any] | None, ToolMessage]] = []
+    if read_calls:
+        completed.extend(await asyncio.gather(*(invoke_call(index, call) for index, call in read_calls)))
+    for index, call in write_calls:
+        completed.append(await invoke_call(index, call))
+    for offset, call in enumerate(rejected_calls, start=len(calls)):
+        name = str(call.get("name") or "unknown")
+        call_id = str(call.get("id") or f"tool-call-{state.get('step', 0)}-{offset}")
+        result = json.dumps(
+            {
+                "ok": False,
+                "error": {"code": "tool_budget_exhausted", "message": f"工具调用预算上限为 {maximum_calls}"},
+            },
+            ensure_ascii=False,
+        )
+        completed.append(
+            (
+                offset,
+                {"name": name, "status": "failed", "result": result},
+                ToolMessage(content=result, tool_call_id=call_id),
+            )
+        )
+    completed.sort(key=lambda item: item[0])
+    events = [item[1] for item in completed if item[1] is not None]
+    tool_messages = [item[2] for item in completed]
 
     return {
         "messages": [*state["messages"], *tool_messages],

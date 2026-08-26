@@ -70,9 +70,7 @@ class AutomationStore:
         if "config" in changes:
             task["config"] = AutomationTaskConfig.model_validate(changes.pop("config"))
         else:
-            config_changes = {
-                key: value for key, value in changes.items() if key in AutomationTaskConfig.model_fields
-            }
+            config_changes = {key: value for key, value in changes.items() if key in AutomationTaskConfig.model_fields}
             if config_changes:
                 task["config"] = task["config"].model_copy(update=config_changes)
         for key, value in changes.items():
@@ -286,8 +284,10 @@ class AutomationStore:
 
     async def list_events(self, account_id: str, limit: int = 100) -> list[dict]:
         await self._ready()
-        rows = await AutomationEventRecord.filter(account_id=account_id).order_by("-created_at").limit(
-            max(1, min(limit, 1000))
+        rows = (
+            await AutomationEventRecord.filter(account_id=account_id)
+            .order_by("-created_at")
+            .limit(max(1, min(limit, 1000)))
         )
         return [
             {

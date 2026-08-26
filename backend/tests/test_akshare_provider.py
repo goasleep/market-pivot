@@ -45,7 +45,7 @@ def test_historical_fund_query_can_reuse_expired_immutable_cache(monkeypatch):
         "_retry_with_backoff",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network must not be used")),
     )
-    result = provider.get_fund_history(
+    result = provider.get_exchange_fund_history(
         "510300",
         asset_type="etf",
         start_date="2025-01-01",
@@ -100,7 +100,7 @@ def test_etf_history_uses_sina_when_eastmoney_returns_empty(monkeypatch):
     import akshare as ak
 
     monkeypatch.setattr(ak, "fund_etf_hist_em", lambda **kwargs: pd.DataFrame())
-    result = provider.get_fund_history(
+    result = provider.get_exchange_fund_history(
         "159667",
         asset_type="etf",
         start_date="2025-08-15",
@@ -170,7 +170,7 @@ def test_etf_nav_accepts_eastmoney_rows_with_fourteen_fields(monkeypatch):
         lambda func, *args, **kwargs: func(),
     )
 
-    result = provider.get_fund_nav_history(
+    result = provider.get_exchange_fund_nav_history(
         "159667",
         asset_type="etf",
         start_date="2025-08-15",

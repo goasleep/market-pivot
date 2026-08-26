@@ -13,9 +13,7 @@ from data.chat_models import ChatMessage, ChatMessageSearch
 
 def parts_text(parts: list[dict[str, Any]]) -> str:
     return "\n".join(
-        str(part.get("content", ""))
-        for part in parts
-        if part.get("type") == "text" and part.get("content")
+        str(part.get("content", "")) for part in parts if part.get("type") == "text" and part.get("content")
     ).strip()
 
 

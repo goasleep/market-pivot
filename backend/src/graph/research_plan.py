@@ -196,24 +196,24 @@ async def plan_research(state: ResearchPlanState) -> dict[str, Any]:
         ]
     else:
         prompt = json.dumps(
-        {
-            "objective": request.get("message"),
-            "intent": request.get("intent"),
-            "tickers": request.get("tickers", []),
-            "asset_type": request.get("asset_type", "stock"),
-            "depth": depth,
-            "max_steps": budget.max_steps,
-            "allowed_kinds": list(get_args(ResearchStepKind)),
-            "rules": [
-                "只输出公开的操作计划，不输出内部思维链",
-                "步骤必须构成无环依赖图",
-                "市场数值必须由结构化数据步骤提供",
-                "最终结论必须依赖证据步骤",
-                "回测和综合分析步骤 max_attempts=2，报告步骤 max_attempts=1",
-            ],
-        },
-        ensure_ascii=False,
-    )
+            {
+                "objective": request.get("message"),
+                "intent": request.get("intent"),
+                "tickers": request.get("tickers", []),
+                "asset_type": request.get("asset_type", "stock"),
+                "depth": depth,
+                "max_steps": budget.max_steps,
+                "allowed_kinds": list(get_args(ResearchStepKind)),
+                "rules": [
+                    "只输出公开的操作计划，不输出内部思维链",
+                    "步骤必须构成无环依赖图",
+                    "市场数值必须由结构化数据步骤提供",
+                    "最终结论必须依赖证据步骤",
+                    "回测和综合分析步骤 max_attempts=2，报告步骤 max_attempts=1",
+                ],
+            },
+            ensure_ascii=False,
+        )
         try:
             raw = await get_llm_service().chat_json(
                 prompt,
@@ -554,9 +554,7 @@ async def _execute_step(
     if step.kind == "price_history":
         limit = int(step.inputs.get("limit") or 120)
         date_args = {
-            key: value
-            for key in ("start_date", "end_date")
-            if (value := request.get(key) or step.inputs.get(key))
+            key: value for key in ("start_date", "end_date") if (value := request.get(key) or step.inputs.get(key))
         }
         payloads = await asyncio.gather(
             *(
@@ -575,7 +573,7 @@ async def _execute_step(
             *(
                 _call_tool(
                     context,
-                    "get_fund_nav_history",
+                    "get_exchange_fund_nav_history",
                     {"ticker": item, "asset_type": asset_type, "limit": limit},
                 )
                 for item in tickers[:10]
@@ -718,7 +716,7 @@ async def _execute_step(
             },
         )
     if step.kind == "comprehensive_analysis":
-        return await _call_tool(context, "run_fund_or_stock_analysis", common)
+        return await _call_tool(context, "run_stock_comprehensive_analysis", common)
     if step.kind == "risk":
         price = _find_price(state.get("step_results", {}))
         if not price:
@@ -988,9 +986,7 @@ async def verify_evidence(state: ResearchPlanState) -> dict[str, Any]:
             missing_items = [item for item in items if isinstance(item, dict) and item.get("available") is False]
             if missing_items:
                 unavailable = len(missing_items) == len(items)
-                issues.append(
-                    "所有标的均无可用数据" if unavailable else f"{len(missing_items)} 个标的缺少可用数据"
-                )
+                issues.append("所有标的均无可用数据" if unavailable else f"{len(missing_items)} 个标的缺少可用数据")
 
         if step.kind == "news":
             if not (output.get("results") or output.get("news")):

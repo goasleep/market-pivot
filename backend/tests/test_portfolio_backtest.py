@@ -33,7 +33,7 @@ async def test_portfolio_backtest_allocates_and_rebalances_with_shared_cash(monk
     async def fake_context(*_args, **_kwargs):
         return {"historical": True}
 
-    monkeypatch.setattr(backtester, "async_get_fund_history", fake_history)
+    monkeypatch.setattr(backtester, "async_get_exchange_fund_history", fake_history)
     monkeypatch.setattr(backtester, "build_market_context", fake_context)
 
     result = await run_pool_backtest(

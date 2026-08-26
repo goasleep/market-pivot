@@ -190,7 +190,7 @@ class AssetAgent(AssetRequestResolver):
 
         return StructuredTool.from_function(
             coroutine=run_analysis,
-            name="run_fund_or_stock_analysis",
+            name="run_stock_comprehensive_analysis",
             description=(
                 "运行短中期股票、ETF或LOF研究分析。只有用户明确需要分析、判断、策略或风险建议时调用。"
                 "必须同时传入 ticker 和 asset_type；asset_type 只能是 stock、etf 或 lof。"
@@ -288,10 +288,7 @@ class AssetAgent(AssetRequestResolver):
         deliverable_text = "、".join(task_contract.deliverables[:4]) or "直接回答请求"
         yield {
             "type": "progress",
-            "text": (
-                f"阶段性结果：模型已将任务判定为 {routing.mode.value}；"
-                f"本轮优先交付：{deliverable_text}。"
-            ),
+            "text": (f"阶段性结果：模型已将任务判定为 {routing.mode.value}；本轮优先交付：{deliverable_text}。"),
         }
         analysis_tool = self._analysis_tool(
             progress_callback,
@@ -313,14 +310,18 @@ class AssetAgent(AssetRequestResolver):
         if routing.allow_research_plan and tools:
             tools.append(self._research_plan_tool(request, list(tools)))
         routing_payload = json.dumps(routing.model_dump(mode="json"), ensure_ascii=False)
+        contract_payload = json.dumps(task_contract.model_dump(mode="json"), ensure_ascii=False)
         system = (
             "你是系统中唯一的 Supervisor Agent。你负责理解任务、选择行动、执行原子工具、必要时委派研究子能力、"
             "整合证据并完成回答。当前模型路由决定是：" + routing_payload + "。"
+            "本轮任务完成合同是：" + contract_payload + "。合同中的 required_outputs 和 source_task_spec 是不可省略的"
+            "业务交付底线；基金筛选任务必须按 selection_requirements 给出足量候选、横向对比、首选与备选、"
+            "排除原因以及数据日期。用户明确要求单一结果时，按合同降为单结果交付。"
             "必须采用交付优先：先完成用户明确要求的最小交付项；一旦已有足够证据形成诚实、有用、可执行的回答，立即交付。"
             "可选证据缺失时明确披露，不要为了追求完美而重复查询、重新运行已完成步骤或阻塞最终回答。"
             "只有关键交付项仍缺失且现有工具可以取得时才继续执行。"
             "简单任务由你直接完成；复杂、多步骤研究可调用 run_research_plan，综合趋势与风险分析可调用 "
-            "run_fund_or_stock_analysis；所有子能力结果都必须回到你这里再综合。"
+            "run_stock_comprehensive_analysis；所有子能力结果都必须回到你这里再综合。"
             "用户只给出宽泛产品类别时，主动选择可验证且有代表性的样本，明确披露样本及选择依据；"
             "只有无法可靠找到候选时才向用户追问。用户意图已经通过系统闸门确认，你只执行该意图范围内的任务；"
             "禁止根据记忆编造行情、历史价格或新闻。行情、历史、新闻、对比和策略都必须通过工具获取。"
@@ -335,7 +336,7 @@ class AssetAgent(AssetRequestResolver):
             "当用户要求走势、对比或可视化时，优先获取结构化历史/行情数据；聊天界面会把已知工具结果自动渲染为图表或数据表，"
             "不要在文本中伪造数据，也不要输出 SVG/HTML 源码。"
             "需要网页正文时调用 fetch_web_content；需要财务或基金基础数据时调用 "
-            "get_fundamentals 或 get_fund_nav_history；"
+            "get_fundamentals 或 get_exchange_fund_nav_history；"
             "需要技术指标、风险计算、交易计划或回测时调用对应的原子工具，不要凭记忆计算。"
             "回测工具会直接返回 Supervisor 所需的核心指标、成本情景、区间、数据口径、验收结论和限制；"
             "必须直接使用这些结构化字段解释结果。回测附件只供用户下载审计，禁止为了形成聊天正文调用 "
@@ -346,7 +347,8 @@ class AssetAgent(AssetRequestResolver):
             "最新新闻、公告、行业事件、政策、国家队动向和基金催化属于资讯数据，统一调用 search_web；"
             "search_web 会在内部选择可用搜索来源并合并去重，Agent 不需要选择具体来源；"
             "搜索结果必须注明来源、数据日期和链接。股票、ETF、LOF 都可以使用网页搜索。"
-            "如果用户要综合分析，调用 run_fund_or_stock_analysis，并且必须传入正确的 asset_type（stock、etf 或 lof）。"
+            "如果用户要综合分析，调用 run_stock_comprehensive_analysis，"
+            "并且必须传入正确的 asset_type（stock、etf 或 lof）。"
             "artifact 是可独立预览、下载或留档的生成产物；长文、HTML、Markdown、PDF、"
             "JSON、CSV、图片和视频都属于 artifact。"
             "当用户要求报告、保存、下载，或内容已经适合独立阅读时，自行调用 save_artifacts；可以一次保存多个不同文件。"
@@ -877,12 +879,8 @@ class AssetAgent(AssetRequestResolver):
         return trace_config
 
 
-# Backward-compatible names for persisted callers and existing integrations.
 StockIntent = AssetIntent
 StockAgentRequest = AssetAgentRequest
-StockAgent = AssetAgent
-asset_agent = AssetAgent()
-stock_agent = asset_agent
 
 
 def capabilities_text() -> str:

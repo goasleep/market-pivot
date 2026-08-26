@@ -73,9 +73,7 @@ def _extract_html(raw: str) -> str:
     start = re.search(r"<!doctype\s+html|<html\b", text, flags=re.IGNORECASE)
     if start:
         text = text[start.start() :]
-    if not re.search(r"<html\b", text, flags=re.IGNORECASE) or not re.search(
-        r"</html>\s*$", text, flags=re.IGNORECASE
-    ):
+    if not re.search(r"<html\b", text, flags=re.IGNORECASE) or not re.search(r"</html>\s*$", text, flags=re.IGNORECASE):
         raise ValueError("ReportAgent 未返回完整 HTML 文档")
     return text
 

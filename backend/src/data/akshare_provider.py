@@ -450,9 +450,7 @@ def _fetch_stock_history_upstream(ticker: str, start_date: str, end_date: str, a
             # response. AkShare also exposes Tencent's historical endpoint;
             # use it as a bounded fallback before marking the data missing.
             market = "sh" if ticker.startswith(("5", "6", "9")) else "sz"
-            logger.warning(
-                f"History primary source failed for {ticker}, trying Tencent fallback: {primary_exc}"
-            )
+            logger.warning(f"History primary source failed for {ticker}, trying Tencent fallback: {primary_exc}")
             try:
                 frame = ak.stock_zh_a_hist_tx(
                     symbol=f"{market}{ticker}",
@@ -513,9 +511,7 @@ def get_stock_history(
                 HistorySeries(dataset="price", asset_type="stock", ticker=ticker, adjustment=adjust or "none"),
                 start_date,
                 end_date,
-                lambda fetch_start, fetch_end: _fetch_stock_history_upstream(
-                    ticker, fetch_start, fetch_end, adjust
-                ),
+                lambda fetch_start, fetch_end: _fetch_stock_history_upstream(ticker, fetch_start, fetch_end, adjust),
             )
         except Exception as exc:
             logger.error(f"Failed to fetch history for {ticker}: {exc}")
@@ -736,7 +732,7 @@ def get_stock_list() -> list[dict]:
         return []
 
 
-def get_fund_realtime(ticker: str, asset_type: str = "etf") -> dict:
+def get_exchange_fund_quote(ticker: str, asset_type: str = "etf") -> dict:
     """Get an exchange-traded ETF/LOF quote via AkShare."""
     ticker = _format_ticker(ticker)
     if asset_type not in {"etf", "lof"}:
@@ -825,9 +821,7 @@ def _fetch_fund_history_upstream(
         except Exception as primary_exc:
             if asset_type != "etf":
                 raise
-            logger.warning(
-                f"ETF history primary source failed for {ticker}, trying Sina fallback: {primary_exc}"
-            )
+            logger.warning(f"ETF history primary source failed for {ticker}, trying Sina fallback: {primary_exc}")
             fallback = _fetch_etf_history_sina(ticker, start_date, end_date)
             if fallback.empty:
                 raise primary_exc
@@ -844,7 +838,7 @@ def _fetch_fund_history_upstream(
     return _normalize_fund_price_history(df, ticker, asset_type)
 
 
-def get_fund_history(
+def get_exchange_fund_history(
     ticker: str,
     asset_type: str = "etf",
     start_date: str = "",
@@ -959,7 +953,7 @@ def _fetch_fund_nav_history_upstream(
     return result
 
 
-def get_fund_nav_history(
+def get_exchange_fund_nav_history(
     ticker: str,
     asset_type: str = "etf",
     start_date: str = "",
@@ -1096,16 +1090,16 @@ async def async_get_stock_list(*args, **kwargs) -> list[dict]:
     return await asyncio.to_thread(get_stock_list, *args, **kwargs)
 
 
-async def async_get_fund_realtime(*args, **kwargs) -> dict:
-    return await asyncio.to_thread(get_fund_realtime, *args, **kwargs)
+async def async_get_exchange_fund_quote(*args, **kwargs) -> dict:
+    return await asyncio.to_thread(get_exchange_fund_quote, *args, **kwargs)
 
 
-async def async_get_fund_history(*args, **kwargs) -> pd.DataFrame:
-    return await asyncio.to_thread(get_fund_history, *args, **kwargs)
+async def async_get_exchange_fund_history(*args, **kwargs) -> pd.DataFrame:
+    return await asyncio.to_thread(get_exchange_fund_history, *args, **kwargs)
 
 
-async def async_get_fund_nav_history(*args, **kwargs) -> pd.DataFrame:
-    return await asyncio.to_thread(get_fund_nav_history, *args, **kwargs)
+async def async_get_exchange_fund_nav_history(*args, **kwargs) -> pd.DataFrame:
+    return await asyncio.to_thread(get_exchange_fund_nav_history, *args, **kwargs)
 
 
 async def async_get_asset_spot(*args, **kwargs) -> list[dict]:

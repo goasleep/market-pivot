@@ -1,0 +1,13 @@
+id: technical.indicators
+version: 1.0.0
+title: 技术指标
+description: 基于历史价格确定性计算趋势、动量和量价指标。
+domain: shared
+asset_types: [stock, etf, lof]
+intents: [analyze, compare]
+capabilities: [technical.indicators]
+requires: [market.history]
+tools: [compute_technical_indicators]
+evidence_types: [technical]
+validators: [evidence.required]
+tags: [技术, 趋势, 动量]

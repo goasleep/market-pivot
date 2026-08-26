@@ -1,0 +1,15 @@
+id: open_fund.nav
+version: 2.0.0
+title: 场外基金净值
+description: 获取单位净值与累计净值历史，保留发布日期和口径。
+domain: open_fund
+asset_types: [open_fund]
+product_categories: [equity, hybrid, bond, index, enhanced_index]
+intents: [history, analyze, compare, backtest]
+capabilities: [open_fund.nav]
+requires: [open_fund.profile]
+tools: [get_open_fund_nav]
+evidence_types: [fund_nav]
+output_fields: [unit_nav, cumulative_nav, as_of, pricing_basis, sources]
+validators: [evidence.required]
+tags: [场外基金, 净值, NAV]

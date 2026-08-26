@@ -14,7 +14,8 @@ from data.stock_provider import async_get_financial_data, async_get_stock_realti
 from llm import LLMService, get_llm_service
 from models.schemas import AgentReport, AgentStageResult, AssetType, Decision, MarketContext
 
-SYSTEM_PROMPT = """You are a professional A-share fundamentals analyst.
+SYSTEM_PROMPT = (
+    """You are a professional A-share fundamentals analyst.
 You analyze company financials including PE/PB ratios, ROE, revenue growth, profit margins, debt ratios.
 You provide buy/sell/hold signals based on fundamental analysis.
 You must respond in Chinese.
@@ -24,9 +25,12 @@ You must respond with valid JSON in this format:
   "confidence": 0.0-1.0,
   "reasoning": "detailed analysis in Chinese",
   "key_metrics": {"pe": ..., "pb": ..., "roe": ...}
-}""" + INVESTOR_CONTEXT
+}"""
+    + INVESTOR_CONTEXT
+)
 
-FUND_SYSTEM_PROMPT = """You are a professional exchange-traded fund structure analyst.
+FUND_SYSTEM_PROMPT = (
+    """You are a professional exchange-traded fund structure analyst.
 You analyze short-to-medium-term ETF/LOF price behavior, unit NAV, premium/discount and liquidity.
 Do not invent holdings or benchmark facts that are absent from the input. You must respond in Chinese.
 You must respond with valid JSON in this format:
@@ -35,7 +39,9 @@ You must respond with valid JSON in this format:
   "confidence": 0.0-1.0,
   "reasoning": "detailed analysis in Chinese",
   "key_metrics": {"premium_discount": "...", "liquidity": "...", "nav_tracking": "..."}
-}""" + INVESTOR_CONTEXT
+}"""
+    + INVESTOR_CONTEXT
+)
 
 
 async def analyze(

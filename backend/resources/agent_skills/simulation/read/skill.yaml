@@ -1,0 +1,12 @@
+id: simulation.read
+version: 1.0.0
+title: 模拟盘查询
+description: 查询纸面账户、持仓、订单和策略部署。
+domain: shared
+asset_types: [any]
+intents: [simulation_query]
+capabilities: [simulation.read]
+tools: [get_simulation_portfolio, get_simulation_orders, list_simulation_accounts, list_strategy_deployments]
+evidence_types: [simulation]
+validators: [evidence.required]
+tags: [模拟盘, 持仓, 订单]

@@ -1,0 +1,14 @@
+id: backtest.execute
+version: 1.0.0
+title: 策略回测
+description: 设计、执行和比较带成本与基准的历史回测。
+domain: shared
+asset_types: [stock, etf, lof]
+intents: [backtest]
+capabilities: [backtest.execute]
+requires: [market.history]
+tools: [run_backtest, design_and_run_backtest, compare_strategy_backtests, design_and_run_sandbox_strategy]
+evidence_types: [backtest]
+validators: [evidence.required]
+tags: [回测, 策略, 基准]
+cost: high

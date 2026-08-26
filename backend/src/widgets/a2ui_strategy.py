@@ -283,8 +283,7 @@ def render_sandbox_strategy_candidate(
                 "id": "validation",
                 "component": "Collapsible",
                 "title": (
-                    f"沙盒验证明细（{sum(row['status'] == '通过' for row in validation_rows)}"
-                    f"/{len(validation_rows)}）"
+                    f"沙盒验证明细（{sum(row['status'] == '通过' for row in validation_rows)}/{len(validation_rows)}）"
                 ),
                 "defaultExpanded": not validation_passed,
                 "children": validation_children,
@@ -419,9 +418,7 @@ def render_strategy_comparison(
                 "turnover": _number_label(item.get("turnover")),
                 "fees": f"¥{_number_label(item.get('total_fees'))}",
                 "profit": "¥"
-                + _number_label(
-                    float(item.get("final_value") or 0) - float(payload.get("initial_capital") or 0)
-                ),
+                + _number_label(float(item.get("final_value") or 0) - float(payload.get("initial_capital") or 0)),
             }
         )
 
@@ -680,9 +677,7 @@ def render_strategy_comparison(
         {"check": _RESEARCH_GATE_LABELS.get(str(key), str(key)), "status": "通过" if value else "未通过"}
         for key, value in (gate.get("checks") or {}).items()
     ]
-    gate_status = _RESEARCH_GATE_STATUS_LABELS.get(
-        str(gate.get("status")), str(gate.get("status") or "仅限研究")
-    )
+    gate_status = _RESEARCH_GATE_STATUS_LABELS.get(str(gate.get("status")), str(gate.get("status") or "仅限研究"))
     robustness_label = _ROBUSTNESS_LABELS.get(
         str(research_decision.get("robustness_grade")),
         str(research_decision.get("robustness_grade") or "未知"),

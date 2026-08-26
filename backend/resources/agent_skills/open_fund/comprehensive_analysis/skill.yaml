@@ -1,0 +1,15 @@
+id: open_fund.comprehensive_analysis
+version: 2.0.0
+title: 场外基金综合分析
+description: 按产品类别组合身份、净值或货币收益、费率、持仓和事件证据。
+domain: open_fund
+asset_types: [open_fund]
+product_categories: [equity, hybrid, bond, money_market, index, enhanced_index, qdii, fof]
+intents: [analyze]
+capabilities: [open_fund.comprehensive_analysis]
+tools: [get_open_fund_profile, get_open_fund_nav, get_open_fund_money_yield, get_open_fund_fees, get_open_fund_exposure, calculate_open_fund_relative_strength, calculate_money_fund_stability, get_open_fund_event_risk]
+evidence_types: [fund_profile, fund_nav, money_yield, fund_fees, exposure]
+output_fields: [instrument_identity, product_category, pricing_basis, performance, fees, exposure, subscription_redemption, events, data_as_of, sources, limitations]
+validators: [evidence.required, open_fund.comprehensive]
+tags: [场外基金, 综合分析, 净值, 费率, 风险]
+cost: medium

@@ -73,9 +73,7 @@ def evaluate_strategy_intent(
         variable_updates.update(signal.state_updates)
 
     signal_components = [
-        (component, signal)
-        for component, signal in zip(spec.components, signals)
-        if component.role == "signal"
+        (component, signal) for component, signal in zip(spec.components, signals) if component.role == "signal"
     ]
     router_signals = [signal for component, signal in zip(spec.components, signals) if component.role == "router"]
     position_signals = [
@@ -95,9 +93,7 @@ def evaluate_strategy_intent(
         if signal.target_exposure is not None and component.weight > 0
     ]
     if target_hints:
-        raw_target = sum(weight * target for weight, target in target_hints) / sum(
-            weight for weight, _ in target_hints
-        )
+        raw_target = sum(weight * target for weight, target in target_hints) / sum(weight for weight, _ in target_hints)
     else:
         raw_target = max(0.0, fused_score) * position.max_exposure
 
@@ -218,18 +214,14 @@ def decision_from_intent(
 
     stop = current_price * (1 - spec.stop_loss_pct) if intent.decision == Decision.BUY and spec.stop_loss_pct else None
     target = (
-        current_price * (1 + spec.take_profit_pct)
-        if intent.decision == Decision.BUY and spec.take_profit_pct
-        else None
+        current_price * (1 + spec.take_profit_pct) if intent.decision == Decision.BUY and spec.take_profit_pct else None
     )
     return TradeDecision(
         ticker=ticker,
         asset_type=asset_type,
         decision=intent.decision,
         confidence=intent.confidence,
-        reasoning=(
-            f"策略 {spec.name} 目标仓位调整为 {intent.target_exposure:.1%}，融合得分 {intent.score:.3f}。"
-        ),
+        reasoning=(f"策略 {spec.name} 目标仓位调整为 {intent.target_exposure:.1%}，融合得分 {intent.score:.3f}。"),
         plan=TradePlan(
             entry_price=current_price if intent.decision == Decision.BUY else None,
             stop_loss=stop,

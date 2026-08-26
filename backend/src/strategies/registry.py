@@ -21,10 +21,7 @@ class StrategyRegistry:
             return
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-            self._items = {
-                name: StrategySpec.model_validate(spec)
-                for name, spec in payload.items()
-            }
+            self._items = {name: StrategySpec.model_validate(spec) for name, spec in payload.items()}
         except (OSError, ValueError, TypeError):
             self._items = {}
 

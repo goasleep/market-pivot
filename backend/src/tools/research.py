@@ -14,13 +14,13 @@ from application.backtest_experiment import run_backtest_experiment
 from application.backtest_service import run_backtest as execute_backtest
 from application.strategy_candidates import strategy_candidates
 from data.backtest_data import BacktestDataError
-from data.fund_provider import async_get_fund_history
+from data.exchange_fund_provider import async_get_exchange_fund_history
 from data.source_registry import provenance
 from data.stock_provider import async_get_stock_history
 from domain.risk_tools import build_trade_plan as _build_trade_plan
 from domain.risk_tools import calculate_risk_metrics as _calculate_risk_metrics
 from models.schemas import AssetType
-from strategies.skill_manager import list_strategies
+from strategies.strategy_registry import list_strategies
 
 
 def _dump(value: Any) -> str:
@@ -116,11 +116,11 @@ def _compact_snapshot(value: Any) -> dict[str, Any]:
 def _comparison_supervisor_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return only explainable metrics; full curves and trades remain in artifacts."""
     raw_comparisons = payload.get("comparisons")
-    comparisons = [
-        _core_backtest_row(row)
-        for row in raw_comparisons
-        if isinstance(row, dict)
-    ] if isinstance(raw_comparisons, list) else []
+    comparisons = (
+        [_core_backtest_row(row) for row in raw_comparisons if isinstance(row, dict)]
+        if isinstance(raw_comparisons, list)
+        else []
+    )
     cost_scenarios = _compact_cost_scenarios(payload.get("cost_scenarios"))
     artifacts = _compact_artifacts(payload.get("artifacts"))
     conclusion = payload.get("conclusion") if isinstance(payload.get("conclusion"), dict) else {}
@@ -193,7 +193,7 @@ async def compute_technical_indicators(ticker: str, asset_type: str = "stock", l
     frame = (
         await async_get_stock_history(ticker)
         if kind == AssetType.STOCK
-        else await async_get_fund_history(ticker, asset_type=kind.value)
+        else await async_get_exchange_fund_history(ticker, asset_type=kind.value)
     )
     frame = frame.tail(max(20, min(int(limit), 500)))
     indicators = calculate_technical_indicators(frame)

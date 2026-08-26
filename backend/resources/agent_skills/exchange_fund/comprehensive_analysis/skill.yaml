@@ -1,0 +1,42 @@
+id: exchange_fund.comprehensive_analysis
+version: 2.0.0
+title: ETF/LOF 综合分析
+description: 条件式组合产品身份、行情净值、趋势、流动性和风险证据，形成基金专用综合研究结论。
+domain: exchange_fund
+asset_types: [etf, lof]
+intents: [analyze]
+capabilities: [exchange_fund.comprehensive_analysis]
+requires:
+  - market.quote
+  - market.history
+  - exchange_fund.nav
+  - exchange_fund.profile
+  - technical.indicators
+  - risk.metrics
+  - exchange_fund.liquidity_cost
+  - exchange_fund.relative_strength
+tools: []
+composite: true
+composes:
+  - market.quote
+  - market.history
+  - exchange_fund.nav
+  - exchange_fund.profile
+  - technical.indicators
+  - risk.metrics
+  - exchange_fund.liquidity_cost
+  - exchange_fund.relative_strength
+evidence_types: [fund_comprehensive_analysis]
+output_fields:
+  - instrument_identity
+  - market_and_nav_status
+  - trend_and_relative_strength
+  - liquidity_and_cost
+  - risk_and_position_constraints
+  - optional_branch_findings
+  - data_as_of
+  - sources
+  - limitations
+validators: [evidence.required, exchange_fund.comprehensive]
+tags: [ETF, LOF, 综合分析, 趋势, 流动性, 风险]
+cost: medium

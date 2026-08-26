@@ -81,9 +81,7 @@ def render_technical_chart(
 ) -> RenderedFinancialChart:
     """Render candles, moving averages, volume and MACD for the latest 120 sessions."""
     frame = _history_frame(records, limit=120, minimum=20)
-    chart = frame.rename(
-        columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}
-    )
+    chart = frame.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"})
     close = chart["Close"]
     dif = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
     dea = dif.ewm(span=9, adjust=False).mean()
@@ -153,9 +151,7 @@ def calculate_market_risk_metrics(records: list[dict[str, Any]]) -> dict[str, An
     volatility_20 = returns.rolling(20).std() * math.sqrt(252)
     return {
         "return_5d_pct": round(float((close.iloc[-1] / close.iloc[-6] - 1) * 100), 2) if len(close) >= 6 else None,
-        "return_20d_pct": round(float((close.iloc[-1] / close.iloc[-21] - 1) * 100), 2)
-        if len(close) >= 21
-        else None,
+        "return_20d_pct": round(float((close.iloc[-1] / close.iloc[-21] - 1) * 100), 2) if len(close) >= 21 else None,
         "max_drawdown_120d_pct": round(float(drawdown.min() * 100), 2),
         "current_drawdown_pct": round(float(drawdown.iloc[-1] * 100), 2),
         "volatility_20d_annualized_pct": round(float(volatility_20.iloc[-1] * 100), 2)
@@ -222,12 +218,7 @@ def render_fund_structure_chart(
     nav["date"] = pd.to_datetime(nav["date"], errors="coerce")
     prices["close"] = pd.to_numeric(prices["close"], errors="coerce")
     nav["unit_nav"] = pd.to_numeric(nav["unit_nav"], errors="coerce")
-    merged = (
-        prices.merge(nav, on="date", how="inner")
-        .dropna()
-        .sort_values("date")
-        .drop_duplicates("date", keep="last")
-    )
+    merged = prices.merge(nav, on="date", how="inner").dropna().sort_values("date").drop_duplicates("date", keep="last")
     merged = merged[(merged["close"] > 0) & (merged["unit_nav"] > 0)].tail(60).set_index("date")
     if len(merged) < 5:
         raise ChartDataUnavailableError("场内价格与单位净值的有效重叠日期不足 5 日")

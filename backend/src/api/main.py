@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
-from api.routers import artifacts, backtest, chat, config, deployments, health, market, portfolio
+from api.routers import agent, artifacts, backtest, chat, config, deployments, health, market, portfolio
 from application.backtest_jobs import backtest_jobs
 from application.chat_service import chat_store, chat_task_manager
 from data.akshare_provider import get_breaker_status
@@ -18,15 +18,19 @@ from graph.agent_loop import configure_agent_loop
 from graph.checkpointing import checkpoint_manager
 from graph.research_plan import configure_research_plan_graph
 from graph.workflow import configure_workflow
-from strategies.skill_manager import list_strategies as _list
+from harness.graph import configure_harness_graph
+from harness.runtime import harness_status, initialize_harness_registry
+from strategies.strategy_registry import list_strategies as _list
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    initialize_harness_registry()
     await init_database()
     await chat_store.init()
     checkpointer = await checkpoint_manager.start()
     configure_agent_loop(checkpointer)
+    configure_harness_graph(checkpointer)
     configure_research_plan_graph(checkpointer)
     configure_workflow(checkpointer)
     await checkpoint_manager.prune_stale_threads()
@@ -38,11 +42,13 @@ async def lifespan(_app: FastAPI):
         await backtest_jobs.stop()
         await chat_task_manager.stop_worker()
         configure_agent_loop(None)
+        configure_harness_graph(None)
         configure_research_plan_graph(None)
         configure_workflow(None)
         await checkpoint_manager.stop()
         await chat_store.close()
         await close_database()
+
 
 app = FastAPI(
     title="Fund Agent API",
@@ -53,7 +59,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:15173", "http://127.0.0.1:15173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,6 +75,7 @@ async def value_error_handler(request: Request, exc: ValueError):
 async def key_error_handler(request: Request, exc: KeyError):
     return JSONResponse(status_code=404, content={"detail": str(exc).strip("'")})
 
+
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(artifacts.router, prefix="/api/artifacts", tags=["artifacts"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
@@ -77,6 +84,7 @@ app.include_router(deployments.router, prefix="/api/deployments", tags=["deploym
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(config.router, prefix="/api/config", tags=["config"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
+app.include_router(agent.router, prefix="/api/agent", tags=["agent"])
 
 
 @app.get("/api/strategies", tags=["strategies"])
@@ -92,4 +100,8 @@ async def system_status():
         asyncio.to_thread(get_breaker_status),
         asyncio.to_thread(get_history_cache_status),
     )
-    return {"circuit_breakers": circuit_breakers, "history_cache": history_cache}
+    return {
+        "circuit_breakers": circuit_breakers,
+        "history_cache": history_cache,
+        "harness": harness_status(),
+    }

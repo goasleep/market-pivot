@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
-from models.fund_task import FundInstrumentRef, InstrumentResolutionStatus
+from models.fund_task import FundInstrumentRef, FundProductCategory, InstrumentResolutionStatus
 
 _EXPLICIT_CODE = re.compile(
     r"(?:基金代码|代码|ticker|ETF|LOF|场内基金)\s*[:：为是]?\s*([0-9]{6})(?!\d)",
@@ -27,26 +27,38 @@ def resolve_fund_instruments(
     for code in candidates:
         is_etf = code.startswith(_ETF_PREFIXES)
         is_lof = code.startswith(_LOF_PREFIXES)
-        strong_context = code in explicit or asset_type in {"etf", "lof"}
+        strong_context = code in explicit or asset_type in {"etf", "lof", "open_fund"}
+        if asset_type == "open_fund" and strong_context:
+            results.append(
+                FundInstrumentRef(
+                    status=InstrumentResolutionStatus.CANDIDATE,
+                    fund_code=code,
+                    asset_type="open_fund",
+                    trading_venue="otc",
+                    resolution_reason="场外基金代码候选；必须由 OpenFundDataProvider 核验产品存在、名称和类别",
+                )
+            )
+            continue
         if not strong_context or not (is_etf or is_lof):
             results.append(
                 FundInstrumentRef(
                     status=InstrumentResolutionStatus.AMBIGUOUS,
                     fund_code=code,
+                    asset_type=asset_type if asset_type in {"etf", "lof", "open_fund"} else "open_fund",
                     resolution_reason="六位数字缺少可验证的基金代码上下文",
                 )
             )
             continue
-        product_type = "etf" if is_etf else "lof"
+        instrument_type = "etf" if is_etf else "lof"
         results.append(
             FundInstrumentRef(
-                status=InstrumentResolutionStatus.VERIFIED,
+                status=InstrumentResolutionStatus.CANDIDATE,
                 fund_code=code,
                 exchange_ticker=code,
-                product_type=product_type,
+                asset_type=instrument_type,
+                product_category=FundProductCategory.INDEX,
                 trading_venue="exchange",
-                provider_id="exchange-code-rules",
-                resolution_reason="代码前缀与明确的ETF/LOF上下文一致；数据工具仍需核验产品存在性",
+                resolution_reason="代码前缀只生成ETF/LOF候选；必须由 ExchangeFundDataProvider 核验产品存在性",
             )
         )
     return results

@@ -13,7 +13,8 @@ from charts.financial import ChartDataUnavailableError, calculate_market_risk_me
 from llm import LLMService, get_llm_service
 from models.schemas import AgentReport, AgentStageResult, AssetType, Decision, MarketContext
 
-SYSTEM_PROMPT = """You are a professional A-share risk manager.
+SYSTEM_PROMPT = (
+    """You are a professional A-share risk manager.
 You assess risk levels and recommend position sizing, stop-loss, and risk controls.
 You must respond in Chinese.
 You must respond with valid JSON in this format:
@@ -25,7 +26,9 @@ You must respond with valid JSON in this format:
   "max_position_pct": 0.0-1.0,
   "stop_loss_pct": 0.0-1.0,
   "risk_factors": ["factor1", "factor2"]
-}""" + INVESTOR_CONTEXT
+}"""
+    + INVESTOR_CONTEXT
+)
 
 
 async def assess(
@@ -70,9 +73,7 @@ async def assess_stage(
 
     analysis = "\n\n".join(all_reports)
     asset_label = (
-        "股票"
-        if AssetType(asset_type) == AssetType.STOCK
-        else f"{AssetType(asset_type).value.upper()} 场内基金"
+        "股票" if AssetType(asset_type) == AssetType.STOCK else f"{AssetType(asset_type).value.upper()} 场内基金"
     )
     risk_metrics: dict = {}
     if context and context.history:

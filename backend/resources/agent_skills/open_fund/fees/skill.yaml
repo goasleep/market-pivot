@@ -1,0 +1,14 @@
+id: open_fund.fees
+version: 2.0.0
+title: 场外基金费率与申赎规则
+description: 获取运作费、申购费、赎回费、销售服务费和确认规则。
+domain: open_fund
+asset_types: [open_fund]
+intents: [analyze, compare, screen, backtest]
+capabilities: [open_fund.fees]
+requires: [open_fund.profile]
+tools: [get_open_fund_fees]
+evidence_types: [fund_fees]
+output_fields: [management_fee, custody_fee, sales_service_fee, subscription_fee, redemption_fee, confirmation_rule, as_of]
+validators: [evidence.required]
+tags: [费率, 申购, 赎回, 确认日]

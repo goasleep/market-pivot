@@ -8,7 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
-from agents import stock_agent as stock_agent_module
+from agents import financial_harness_agent as harness_agent_module
 from application.chat_service import ChatStore, ChatTaskInput, ChatTaskManager
 from graph import agent_loop as agent_loop_module
 from graph.agent_loop import tool_attempts, tool_timeout_seconds
@@ -33,15 +33,14 @@ class FakeSupervisorModel:
         del kwargs
         self.decisions += 1
         names = {tool.name for tool in tools}
-        assert "lookup_representative_funds" in names
-        assert "run_research_plan" in names
+        assert "get_exchange_fund_profile" in names
         if not any(isinstance(message, ToolMessage) for message in messages):
             return AIMessage(
                 content="先自动选择代表产品并核对比较所需的公开数据。",
                 tool_calls=[
                     {
-                        "name": "lookup_representative_funds",
-                        "args": {"query": "沪深300ETF及ETF联接C"},
+                        "name": "get_exchange_fund_profile",
+                        "args": {"ticker": "510300", "asset_type": "etf"},
                         "id": "representative-1",
                         "type": "tool_call",
                     }
@@ -74,8 +73,9 @@ class FakeSupervisorModel:
 
 @pytest.mark.asyncio
 async def test_complex_fund_comparison_runs_supervisor_to_terminal_outcome(tmp_path, monkeypatch):
-    async def lookup_representative_funds(query: str) -> str:
-        assert "沪深300" in query
+    async def get_exchange_fund_profile(ticker: str, asset_type: str) -> str:
+        assert ticker == "510300"
+        assert asset_type == "etf"
         return json.dumps(
             {
                 "representatives": [
@@ -90,13 +90,13 @@ async def test_complex_fund_comparison_runs_supervisor_to_terminal_outcome(tmp_p
         )
 
     representative_tool = StructuredTool.from_function(
-        coroutine=lookup_representative_funds,
-        name="lookup_representative_funds",
+        coroutine=get_exchange_fund_profile,
+        name="get_exchange_fund_profile",
         description="查找并核验代表性场内与场外基金产品及公开比较数据。",
     )
     monkeypatch.setattr(
-        stock_agent_module,
-        "build_chat_tools",
+        harness_agent_module,
+        "build_named_tools",
         lambda *args, **kwargs: [representative_tool],
     )
     fake_model = FakeSupervisorModel()
@@ -129,7 +129,7 @@ async def test_complex_fund_comparison_runs_supervisor_to_terminal_outcome(tmp_p
         task = await store.get_task("complex-task")
         assert task is not None
         assert task["status"] == "completed"
-        assert task["outcome_status"] == "satisfied"
+        assert task["outcome_status"] == "partial"
         assert task["task_acceptance"]["terminal"] is True
         assert task["task_contract"]["resolve_representative_product"] is True
         conversation = await store.get_conversation("complex-conversation")

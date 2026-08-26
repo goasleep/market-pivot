@@ -4,6 +4,7 @@ import pytest
 
 from application import task_contract as task_contract_module
 from application.task_contract import classify_task_execution, compile_task_contract
+from models.fund_task import FundTaskKind
 from models.supervisor import ExecutionMode, TaskRoutingDecision
 
 
@@ -109,3 +110,31 @@ async def test_routing_failure_defers_to_supervisor_without_keyword_fallback(mon
     assert contract.source_task_spec is None
     assert contract.routing is not None
     assert contract.routing.mode == ExecutionMode.SUPERVISOR_DECIDES
+
+
+@pytest.mark.asyncio
+async def test_fund_universe_screening_cannot_be_downgraded_to_a_tool_free_response(monkeypatch):
+    service = FakeRoutingService(
+        {
+            "mode": "direct_response",
+            "requires_tools": False,
+            "allow_research_plan": False,
+            "deliverables": ["给出首选"],
+            "reason": "误判为普通建议",
+            "confidence": 0.7,
+        }
+    )
+    monkeypatch.setattr(task_contract_module, "get_llm_service", lambda: service)
+
+    decision = await classify_task_execution("挑选适合短线的半导体ETF", asset_type="etf")
+    contract = compile_task_contract(
+        "挑选适合短线的半导体ETF",
+        asset_type="etf",
+        routing_decision=decision,
+    )
+
+    assert decision.mode == ExecutionMode.EVIDENCE_RESEARCH
+    assert decision.requires_tools is True
+    assert contract.requires_tools is True
+    assert contract.source_task_spec is not None
+    assert contract.source_task_spec["task_kind"] == FundTaskKind.UNIVERSE_RESEARCH.value

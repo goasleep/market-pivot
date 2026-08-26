@@ -104,9 +104,7 @@ def compile_financial_task_spec(request: dict, *, as_of: date | None = None) -> 
                 criterion="fields_present",
                 params={"fields": ["ticker", "name", *[str(year) for year in years], "six_year_total"]},
             ),
-            AcceptanceCriterion(
-                criterion="sorted", params={"field": "six_year_total", "descending": True}
-            ),
+            AcceptanceCriterion(criterion="sorted", params={"field": "six_year_total", "descending": True}),
         ],
         output=OutputContract(
             format="table",

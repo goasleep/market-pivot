@@ -12,7 +12,7 @@ import akshare as ak
 import pandas as pd
 
 from data.backtest_data import BacktestDataError, prepare_backtest_data
-from data.fund_provider import async_get_fund_history
+from data.exchange_fund_provider import async_get_exchange_fund_history
 from data.stock_provider import async_get_stock_history
 from models.schemas import AssetType
 from models.strategy_research import CrossValidationReport
@@ -66,7 +66,7 @@ async def _fetch_candidates(
     primary = (
         async_get_stock_history(ticker, start_date=start_date, end_date=end_date, adjust="qfq")
         if asset_type == AssetType.STOCK
-        else async_get_fund_history(
+        else async_get_exchange_fund_history(
             ticker,
             asset_type=asset_type.value,
             start_date=start_date,

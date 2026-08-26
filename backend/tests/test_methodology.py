@@ -3,7 +3,8 @@ import json
 import pytest
 
 import agents.stock_agent as stock_agent_module
-from agents.stock_agent import AssetAgentRequest, AssetIntent, StockAgent
+from agents.stock_agent import AssetAgent as StockAgent
+from agents.stock_agent import AssetAgentRequest, AssetIntent
 from methodology.library import MethodologyLibrary
 from models.supervisor import ExecutionMode, TaskRoutingDecision
 from tools import assets, methodology

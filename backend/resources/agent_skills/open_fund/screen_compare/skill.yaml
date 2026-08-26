@@ -1,0 +1,15 @@
+id: open_fund.screen_compare
+version: 2.0.0
+title: 场外基金同类筛选比较
+description: 按权益、债券或货币类别使用固定权重透明评分，缺失项为零且不重新归一化。
+domain: open_fund
+asset_types: [open_fund]
+product_categories: [equity, hybrid, bond, money_market, index, enhanced_index]
+intents: [screen, compare, recommend]
+capabilities: [open_fund.screen_compare]
+tools: [discover_open_fund_candidates, get_open_fund_profile, get_open_fund_nav, get_open_fund_money_yield, get_open_fund_fees, get_open_fund_exposure, calculate_open_fund_relative_strength, calculate_money_fund_stability, screen_compare_open_funds]
+evidence_types: [fund_universe, fund_profile, screening]
+output_fields: [candidate_pool, product_category, comparison, ranking, primary, alternatives, exclusions, data_as_of, missing]
+validators: [evidence.required, open_fund.screening]
+tags: [场外基金, 筛选, 同类排名, 透明评分]
+cost: medium

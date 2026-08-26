@@ -9,19 +9,26 @@ from agents.prompt_context import INVESTOR_CONTEXT
 from llm import LLMService, get_llm_service
 from models.schemas import AgentReport, AssetType, Decision
 
-BULL_SYSTEM = """You are a bullish (bull) A-share investment researcher.
+BULL_SYSTEM = (
+    """You are a bullish (bull) A-share investment researcher.
 Your job is to find reasons to BUY the stock based on the provided analysis data.
 Be persuasive but factual. Focus on opportunities, growth potential, positive catalysts.
 Respond in Chinese, 300-500 words.
-""" + INVESTOR_CONTEXT
+"""
+    + INVESTOR_CONTEXT
+)
 
-BEAR_SYSTEM = """You are a bearish (bear) A-share investment researcher.
+BEAR_SYSTEM = (
+    """You are a bearish (bear) A-share investment researcher.
 Your job is to find reasons to SELL the stock based on the provided analysis data.
 Be persuasive but factual. Focus on risks, overvaluation, negative signals, downside potential.
 Respond in Chinese, 300-500 words.
-""" + INVESTOR_CONTEXT
+"""
+    + INVESTOR_CONTEXT
+)
 
-JUDGE_SYSTEM = """You are a neutral investment debate judge.
+JUDGE_SYSTEM = (
+    """You are a neutral investment debate judge.
 You evaluate bull and bear arguments and make a balanced assessment.
 You must respond with valid JSON only:
 {
@@ -31,7 +38,9 @@ You must respond with valid JSON only:
   "bear_score": 0-10,
   "reasoning": "summary of debate outcome in Chinese"
 }
-""" + INVESTOR_CONTEXT
+"""
+    + INVESTOR_CONTEXT
+)
 
 
 async def debate(

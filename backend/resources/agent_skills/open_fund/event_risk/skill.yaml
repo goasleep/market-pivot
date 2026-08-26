@@ -1,0 +1,14 @@
+id: open_fund.event_risk
+version: 2.0.0
+title: 场外基金公告与申赎事件
+description: 核对暂停申购赎回、限购、分红、清盘和基金经理变更。
+domain: open_fund
+asset_types: [open_fund]
+intents: [news, analyze, compare]
+capabilities: [open_fund.event_risk]
+requires: [open_fund.profile, news.events]
+tools: [get_open_fund_event_risk]
+evidence_types: [announcement]
+output_fields: [events, subscription_redemption_status, announcement_count, as_of]
+validators: [evidence.required]
+tags: [公告, 暂停申赎, 限购, 清盘, 基金经理]

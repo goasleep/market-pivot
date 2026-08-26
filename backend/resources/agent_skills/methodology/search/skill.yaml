@@ -1,0 +1,11 @@
+id: methodology.search
+version: 1.0.0
+title: 投资方法论
+description: 检索本地版本化方法论与研究摘要。
+domain: shared
+asset_types: [any]
+intents: [education, strategy, analyze, backtest]
+capabilities: [methodology.search]
+tools: [search_methodology]
+evidence_types: [methodology]
+tags: [方法论, 研究, 策略]

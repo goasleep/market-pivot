@@ -51,9 +51,7 @@ async def search_market_data_catalog(query: str, asset_type: str | None = None, 
     )
 
 
-def build_market_data_tools(
-    *, conversation_id: str | None = None, task_id: str | None = None
-) -> list[StructuredTool]:
+def build_market_data_tools(*, conversation_id: str | None = None, task_id: str | None = None) -> list[StructuredTool]:
     async def query_market_data(task_spec: FinancialTaskSpec) -> str:
         """查询一个已解析的数据集，并执行受限变换与验收。"""
         spec = task_spec
@@ -64,11 +62,7 @@ def build_market_data_tools(
         payload = result.model_dump(mode="json")
         if csv_content:
             years = spec.periods
-            name = (
-                f"A股连续分红筛选-{years[0]}-{years[-1]}.csv"
-                if years
-                else "市场数据查询完整结果.csv"
-            )
+            name = f"A股连续分红筛选-{years[0]}-{years[-1]}.csv" if years else "市场数据查询完整结果.csv"
             try:
                 artifacts = await artifact_service.create_user_artifacts(
                     [
@@ -78,7 +72,7 @@ def build_market_data_tools(
                             "content": csv_content,
                             "description": "结构化市场数据查询的完整确定性结果",
                             "artifact_type": "data",
-                            "asset_type": spec.asset_type.value if spec.asset_type.value != "fund" else None,
+                            "asset_type": spec.asset_type.value,
                             "metadata": {
                                 "dataset_id": spec.primary_dataset_id,
                                 "periods": spec.periods,

@@ -21,7 +21,7 @@ from data.tortoise_db import init_database
 from llm.service import get_llm_service
 from models.schemas import AssetType, PortfolioSpec, StrategySpec
 from strategies.compiler import available_indicators, strategy_from_mapping
-from strategies.skill_manager import register_strategy_spec
+from strategies.strategy_registry import register_strategy_spec
 
 STRATEGY_DESIGN_SYSTEM = """你是一个严格的量化策略设计 Agent。请为 A 股股票或场内基金设计可执行的日线策略。
 只允许使用用户提供的目标、日线 OHLCV 数据字段和下方受控指标，不能引用未来数据、实时新闻或当前才知道的财务数据。
@@ -51,10 +51,13 @@ indicator_specs、components、fusion、position_policy、state_policy、stop_lo
 8. state_policy.enabled=true，可按需要设置 cooldown_bars_after_exit；无状态需求时设为 0。
 """
 
-STRATEGY_REPAIR_SYSTEM = STRATEGY_DESIGN_SYSTEM + """
+STRATEGY_REPAIR_SYSTEM = (
+    STRATEGY_DESIGN_SYSTEM
+    + """
 此前生成的策略未通过受控 DSL 校验。请根据 validation_error 修复整个策略 JSON，只修正结构、受控指标名称及其参数，
 不要改变用户的策略目标。必须重新返回完整 JSON，不要解释，不要绕过或删除实现该目标所必需的入场、退出条件。
 """
+)
 
 PORTFOLIO_DESIGN_SYSTEM = """你是一个严格的组合配置 Agent。请为给定的同一资产类型标的池设计可复现的组合规则。
 只能返回 JSON 对象，字段必须符合：allocation_method=equal_weight、rebalance_frequency 为 daily/weekly/monthly/manual、
@@ -107,8 +110,11 @@ class BacktestExperimentStore:
 
     async def list(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         await init_database(db_url=self.db_url)
-        rows = await BacktestExperimentRecord.all().order_by("-created_at").offset(max(0, offset)).limit(
-            max(1, min(limit, 200))
+        rows = (
+            await BacktestExperimentRecord.all()
+            .order_by("-created_at")
+            .offset(max(0, offset))
+            .limit(max(1, min(limit, 200)))
         )
         return [
             {
@@ -306,10 +312,7 @@ def _build_report_markdown(
         "",
         "## 四、成交规则",
         "",
-        *[
-            f"- {key}：{value}"
-            for key, value in (result.get("execution") or {}).items()
-        ],
+        *[f"- {key}：{value}" for key, value in (result.get("execution") or {}).items()],
         "",
         "## 五、数据可追溯性",
         "",
@@ -431,10 +434,7 @@ def _experiment_drawdown_chart(result: dict[str, Any]) -> str:
 def _render_report_html(markdown: str, title: str, result: dict[str, Any] | None = None) -> str:
     chart_tokens = ""
     if result is not None:
-        chart_tokens = (
-            "\n\n[[EXPERIMENT_EQUITY_CHART]]\n\n"
-            "[[EXPERIMENT_DRAWDOWN_CHART]]\n"
-        )
+        chart_tokens = "\n\n[[EXPERIMENT_EQUITY_CHART]]\n\n[[EXPERIMENT_DRAWDOWN_CHART]]\n"
         markdown = markdown.replace("## 二、回测结果", f"## 二、回测结果{chart_tokens}", 1)
     rendered: list[str] = []
     for raw_line in markdown.splitlines():
@@ -490,11 +490,7 @@ def _data_csv(rows: Any) -> str:
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=fields)
     writer.writeheader()
-    writer.writerows(
-        {field: row.get(field) for field in fields}
-        for row in rows
-        if isinstance(row, dict)
-    )
+    writer.writerows({field: row.get(field) for field in fields} for row in rows if isinstance(row, dict))
     return buffer.getvalue()
 
 
@@ -614,31 +610,31 @@ async def run_backtest_experiment(
         "result": result,
     }
     artifact_inputs = [
-            {
-                "name": f"{_slug(spec.name)}-{experiment_id}-回测报告.html",
-                "format": "html",
-                "content": report_html,
-                "description": "Agent 回测实验报告",
-            },
-            {
-                "name": f"{_slug(spec.name)}-{experiment_id}-实验结果.json",
-                "format": "json",
-                "content": _json(run_json),
-                "description": "可重放的策略、数据摘要和回测结果",
-            },
-            {
-                "name": f"{_slug(spec.name)}-{experiment_id}-交易记录.csv",
-                "format": "csv",
-                "content": _trades_csv(result.get("trades", [])),
-                "description": "回测成交记录",
-            },
-            {
-                "name": f"{_slug(spec.name)}-{experiment_id}-报告源.md",
-                "format": "md",
-                "content": report_markdown,
-                "description": "报告的可审计 Markdown 源文件",
-            },
-        ]
+        {
+            "name": f"{_slug(spec.name)}-{experiment_id}-回测报告.html",
+            "format": "html",
+            "content": report_html,
+            "description": "Agent 回测实验报告",
+        },
+        {
+            "name": f"{_slug(spec.name)}-{experiment_id}-实验结果.json",
+            "format": "json",
+            "content": _json(run_json),
+            "description": "可重放的策略、数据摘要和回测结果",
+        },
+        {
+            "name": f"{_slug(spec.name)}-{experiment_id}-交易记录.csv",
+            "format": "csv",
+            "content": _trades_csv(result.get("trades", [])),
+            "description": "回测成交记录",
+        },
+        {
+            "name": f"{_slug(spec.name)}-{experiment_id}-报告源.md",
+            "format": "md",
+            "content": report_markdown,
+            "description": "报告的可审计 Markdown 源文件",
+        },
+    ]
     data_csv = _data_csv(data_rows)
     if data_csv:
         artifact_inputs.append(

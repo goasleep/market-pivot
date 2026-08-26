@@ -1,0 +1,15 @@
+id: exchange_fund.screen_compare
+version: 2.0.0
+title: ETF 筛选比较
+description: 生成候选池、透明评分、首选备选与排除原因。
+domain: exchange_fund
+asset_types: [etf, lof]
+intents: [screen, compare, recommend]
+capabilities: [exchange_fund.screen_compare]
+requires: [exchange_fund.profile, exchange_fund.liquidity_cost, exchange_fund.relative_strength]
+tools: [discover_exchange_fund_candidates, screen_compare_exchange_funds]
+evidence_types: [screening]
+output_fields: [candidate_pool, comparison, ranking, primary, alternatives, exclusions, data_as_of]
+validators: [evidence.required, exchange_fund.screening]
+tags: [筛选, 排名, 首选, 备选]
+cost: medium

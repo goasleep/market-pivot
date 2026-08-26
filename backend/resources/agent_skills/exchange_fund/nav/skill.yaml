@@ -1,0 +1,12 @@
+id: exchange_fund.nav
+version: 2.0.0
+title: 基金净值
+description: 获取ETF或LOF单位净值、累计净值和历史净值序列。
+domain: exchange_fund
+asset_types: [etf, lof]
+intents: [history, analyze, compare]
+capabilities: [exchange_fund.nav]
+tools: [get_exchange_fund_nav_history]
+evidence_types: [fund_nav]
+validators: [evidence.required]
+tags: [净值, NAV]

@@ -1,6 +1,5 @@
 """Shared product and investor context for LLM prompts."""
 
-
 INVESTOR_CONTEXT = """
 
 Product and investor context:

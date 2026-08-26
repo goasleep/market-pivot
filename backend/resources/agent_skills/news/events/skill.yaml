@@ -1,0 +1,13 @@
+id: news.events
+version: 1.0.0
+title: 新闻与公告
+description: 检索最新新闻、公告、政策和市场事件，并抓取需要引用的正文。
+domain: shared
+asset_types: [any]
+intents: [news, analyze, compare]
+capabilities: [news.events]
+tools: [search_web, fetch_web_content]
+evidence_types: [news, web_content]
+validators: [evidence.required]
+tags: [新闻, 公告, 政策, 事件]
+cost: medium

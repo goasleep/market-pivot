@@ -1,0 +1,15 @@
+id: open_fund.money_yield
+version: 2.0.0
+title: 货币基金收益与稳定性
+description: 使用万份收益和七日年化序列分析货币基金，不使用固定净值制造收益率。
+domain: open_fund
+asset_types: [open_fund]
+product_categories: [money_market]
+intents: [history, analyze, compare, screen]
+capabilities: [open_fund.money_yield]
+requires: [open_fund.profile]
+tools: [get_open_fund_money_yield, calculate_money_fund_stability]
+evidence_types: [money_yield]
+output_fields: [yield_per_10k, seven_day_annualized, yield_stability, as_of]
+validators: [evidence.required]
+tags: [货币基金, 万份收益, 七日年化, 稳定性]

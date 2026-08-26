@@ -424,9 +424,7 @@ def _comparison_synthesis_text(payload: dict[str, Any]) -> str:
         )
     if not winner_count:
         lines.append("- 当前数据覆盖或核验状态不足以形成正式优胜者，结果仅作探索性比较。")
-    assessments = [
-        item for item in (payload.get("strategy_assessments") or []) if isinstance(item, dict)
-    ]
+    assessments = [item for item in (payload.get("strategy_assessments") or []) if isinstance(item, dict)]
     if assessments:
         lines.extend(["", "排名靠前策略的情况："])
         for item in assessments[:3]:

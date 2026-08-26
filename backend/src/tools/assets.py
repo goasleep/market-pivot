@@ -12,10 +12,10 @@ from langchain_core.tools import tool
 from loguru import logger
 
 from data.akshare_provider import async_get_asset_spot
-from data.fund_provider import (
-    async_get_fund_history,
-    async_get_fund_nav_history,
-    async_get_fund_realtime,
+from data.exchange_fund_provider import (
+    async_get_exchange_fund_history,
+    async_get_exchange_fund_nav_history,
+    async_get_exchange_fund_quote,
 )
 from data.source_registry import provenance, utc_now
 from data.stock_provider import async_get_financial_data, async_get_stock_history, async_get_stock_realtime
@@ -90,7 +90,7 @@ async def _historical_quote(ticker: str, kind: AssetType) -> dict[str, Any]:
         history = (
             await async_get_stock_history(ticker)
             if kind == AssetType.STOCK
-            else await async_get_fund_history(ticker, asset_type=kind.value)
+            else await async_get_exchange_fund_history(ticker, asset_type=kind.value)
         )
     except Exception as exc:
         logger.warning("Historical quote fallback failed for {}:{}: {}", kind.value, ticker, exc)
@@ -103,7 +103,7 @@ async def _realtime_quote_with_fallback(ticker: str, kind: AssetType) -> tuple[d
         quote = (
             await async_get_stock_realtime(ticker)
             if kind == AssetType.STOCK
-            else await async_get_fund_realtime(ticker, asset_type=kind.value)
+            else await async_get_exchange_fund_quote(ticker, asset_type=kind.value)
         )
     except Exception as exc:
         logger.warning("Realtime quote failed for {}:{}: {}", kind.value, ticker, exc)
@@ -122,6 +122,20 @@ async def _realtime_quote_with_fallback(ticker: str, kind: AssetType) -> tuple[d
 async def get_realtime_quote(ticker: str, asset_type: str = "stock") -> str:
     """获取结构化市场数据：股票、ETF或LOF的当前价格和成交信息。"""
     kind = AssetType(asset_type)
+    if kind == AssetType.OPEN_FUND:
+        return _dump(
+            {
+                "data_type": "market_data",
+                "ticker": ticker,
+                "asset_type": kind.value,
+                "available": False,
+                "data_status": "not_applicable",
+                "message": "场外开放式基金没有实时交易价格；请使用净值快照",
+                "error": {"code": "market_quote_not_applicable", "message": "open_fund 使用 NAV 而非实时行情"},
+                "quote": {},
+                "provenance": [],
+            }
+        )
     quote, status, freshness = await _realtime_quote_with_fallback(ticker, kind)
     as_of = str(quote.get("data_date") or quote.get("date") or "") or None
     if quote and freshness == "realtime" and as_of is None:
@@ -164,6 +178,20 @@ async def get_historical_prices(
 ) -> str:
     """获取股票、ETF或LOF历史日线；指定区间时传 YYYY-MM-DD 格式的 start_date 和 end_date。"""
     kind = AssetType(asset_type)
+    if kind == AssetType.OPEN_FUND:
+        return _dump(
+            {
+                "data_type": "market_data",
+                "ticker": ticker,
+                "asset_type": kind.value,
+                "available": False,
+                "data_status": "not_applicable",
+                "message": "场外开放式基金没有市场价格历史；请使用已公布 NAV 历史",
+                "error": {"code": "market_history_not_applicable", "message": "open_fund 使用 NAV 历史"},
+                "history": [],
+                "provenance": [],
+            }
+        )
     normalized_start = _history_date(start_date, "start_date")
     normalized_end = _history_date(end_date, "end_date")
     if normalized_start and normalized_end and normalized_start > normalized_end:
@@ -172,7 +200,7 @@ async def get_historical_prices(
         history = (
             await async_get_stock_history(ticker, start_date=normalized_start, end_date=normalized_end)
             if kind == AssetType.STOCK
-            else await async_get_fund_history(
+            else await async_get_exchange_fund_history(
                 ticker,
                 asset_type=kind.value,
                 start_date=normalized_start,
@@ -202,12 +230,12 @@ async def get_historical_prices(
 
 
 @tool
-async def get_fund_nav_history(ticker: str, asset_type: str = "etf", limit: int = 60) -> str:
+async def get_exchange_fund_nav_history(ticker: str, asset_type: str = "etf", limit: int = 60) -> str:
     """获取 ETF/LOF 的历史单位净值和累计净值。"""
     kind = AssetType(asset_type)
     if kind not in {AssetType.ETF, AssetType.LOF}:
         raise ValueError("asset_type 必须是 etf 或 lof")
-    frame = await async_get_fund_nav_history(ticker, asset_type=kind.value)
+    frame = await async_get_exchange_fund_nav_history(ticker, asset_type=kind.value)
     records = frame.tail(max(1, min(int(limit), 250))).to_dict("records")
     available = bool(records)
     return _dump(
@@ -218,11 +246,7 @@ async def get_fund_nav_history(ticker: str, asset_type: str = "etf", limit: int 
             "available": available,
             "data_status": "available" if available else "unavailable",
             "message": None if available else "没有可用的基金净值数据",
-            "error": (
-                None
-                if available
-                else {"code": "fund_nav_unavailable", "message": "没有可用的基金净值数据"}
-            ),
+            "error": (None if available else {"code": "fund_nav_unavailable", "message": "没有可用的基金净值数据"}),
             "history": records,
             "provenance": provenance(
                 "akshare",
@@ -258,7 +282,7 @@ async def get_fundamentals(ticker: str, asset_type: str = "stock") -> str:
             }
         )
     realtime, realtime_status, _ = await _realtime_quote_with_fallback(ticker, kind)
-    nav = await async_get_fund_nav_history(ticker, asset_type=kind.value)
+    nav = await async_get_exchange_fund_nav_history(ticker, asset_type=kind.value)
     latest_nav = nav.tail(1).to_dict("records") if not nav.empty else []
     available = bool(realtime or latest_nav)
     return _dump(
@@ -404,7 +428,7 @@ async def screen_assets(
 TOOLS = [
     get_realtime_quote,
     get_historical_prices,
-    get_fund_nav_history,
+    get_exchange_fund_nav_history,
     get_fundamentals,
     compare_quotes,
     screen_assets,

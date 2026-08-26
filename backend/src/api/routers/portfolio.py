@@ -6,7 +6,7 @@ from datetime import date
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from data.fund_provider import async_get_fund_realtime
+from data.exchange_fund_provider import async_get_exchange_fund_quote
 from data.stock_provider import async_get_stock_realtime
 from engine.broker_adapters import (
     SimulationBrokerUnavailableError,
@@ -30,7 +30,7 @@ router = APIRouter()
 async def _quote(ticker: str, asset_type: AssetType):
     if asset_type == AssetType.STOCK:
         return await async_get_stock_realtime(ticker)
-    return await async_get_fund_realtime(ticker, asset_type=asset_type.value)
+    return await async_get_exchange_fund_quote(ticker, asset_type=asset_type.value)
 
 
 class ConfigRequest(BaseModel):
@@ -159,9 +159,7 @@ async def create_account(req: CreateAccountRequest):
 @router.get("/accounts")
 async def list_accounts():
     accounts = await simulation_accounts.list_accounts()
-    daily_pnls = await asyncio.gather(
-        *(simulation_accounts.daily_pnl(account.account_id) for account in accounts)
-    )
+    daily_pnls = await asyncio.gather(*(simulation_accounts.daily_pnl(account.account_id) for account in accounts))
     return {"accounts": [_payload(account, daily_pnl=daily_pnl) for account, daily_pnl in zip(accounts, daily_pnls)]}
 
 
@@ -336,6 +334,8 @@ async def reset_default_account(account_id: str = "default"):
 @router.post("/accounts/{account_id}/orders")
 async def create_order(account_id: str, req: OrderRequest):
     try:
+        if req.asset_type == AssetType.OPEN_FUND:
+            raise ValueError("open_fund 首期不支持模拟申购赎回订单")
         submitted_date = req.trade_date or date.today().isoformat()
         account = await simulation_accounts.get_account(account_id)
         order = await simulation_accounts.create_order(
@@ -454,13 +454,13 @@ async def mark_account(account_id: str, req: MarkRequest):
         if order.status != "pending" or order.ticker not in prices:
             continue
         price = prices[order.ticker]
-        should_fill = order.order_type == "market" or (
-            order.side == Decision.BUY and price <= (order.limit_price or 0)
-        ) or (order.side == Decision.SELL and price >= (order.limit_price or 0))
+        should_fill = (
+            order.order_type == "market"
+            or (order.side == Decision.BUY and price <= (order.limit_price or 0))
+            or (order.side == Decision.SELL and price >= (order.limit_price or 0))
+        )
         if should_fill:
-            filled_orders.append(
-                await simulation_accounts.fill_order(order.order_id, price, snapshot_date)
-            )
+            filled_orders.append(await simulation_accounts.fill_order(order.order_id, price, snapshot_date))
     payload = await _account_payload(account_id)
     for order in filled_orders:
         await _publish_account_update(

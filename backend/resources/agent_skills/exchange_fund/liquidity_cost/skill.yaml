@@ -1,0 +1,14 @@
+id: exchange_fund.liquidity_cost
+version: 2.0.0
+title: ETF 流动性与交易成本
+description: 计算成交活跃度、买卖价差、订单参与率与冲击风险。
+domain: exchange_fund
+asset_types: [etf, lof]
+intents: [analyze, compare, screen, plan]
+capabilities: [exchange_fund.liquidity_cost]
+requires: [exchange_fund.profile, market.quote]
+tools: [calculate_exchange_fund_liquidity]
+evidence_types: [liquidity]
+output_fields: [average_amount, turnover_rate, spread_bps, order_participation_rate, impact_risk]
+validators: [evidence.required]
+tags: [流动性, 价差, 冲击成本]

@@ -1,0 +1,14 @@
+id: exchange_fund.relative_strength
+version: 2.0.0
+title: ETF 相对强弱
+description: 比较区间收益、趋势、基准和同类相对表现。
+domain: exchange_fund
+asset_types: [etf, lof]
+intents: [analyze, compare, screen]
+capabilities: [exchange_fund.relative_strength]
+requires: [exchange_fund.profile, market.history]
+tools: [calculate_exchange_fund_relative_strength]
+evidence_types: [relative_strength]
+output_fields: [return, benchmark_return, excess_return, peer_rank]
+validators: [evidence.required]
+tags: [趋势, 相对强弱, 同类比较]

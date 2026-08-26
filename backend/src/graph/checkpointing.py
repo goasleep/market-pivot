@@ -56,9 +56,7 @@ class CheckpointManager:
             )
             backend = "postgres"
         else:
-            connection = await stack.enter_async_context(
-                aiosqlite.connect(str(settings.checkpoint_file_path))
-            )
+            connection = await stack.enter_async_context(aiosqlite.connect(str(settings.checkpoint_file_path)))
             saver = AsyncSqliteSaver(connection, serde=serializer)
             backend = "sqlite"
         await saver.setup()

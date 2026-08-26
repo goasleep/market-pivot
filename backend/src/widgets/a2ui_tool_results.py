@@ -34,7 +34,7 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
         quote["ticker"] = payload.get("ticker", quote.get("ticker", ""))
         return render_asset_card(quote, surface_id)
 
-    if tool_name == "run_fund_or_stock_analysis":
+    if tool_name == "run_stock_comprehensive_analysis":
         if payload.get("error"):
             return None
         return render_analysis_result(payload, surface_id)
@@ -296,11 +296,14 @@ def render_tool_result(tool_name: str, raw_result: str, surface_id: str | None =
         return _surface(
             surface_id,
             components,
-            {"summary": {
-                "cash": portfolio.get("cash", 0),
-                "total_value": portfolio.get("total_value", 0),
-                "total_return_pct": portfolio.get("total_return_pct", 0),
-            }, "rows": rows},
+            {
+                "summary": {
+                    "cash": portfolio.get("cash", 0),
+                    "total_value": portfolio.get("total_value", 0),
+                    "total_return_pct": portfolio.get("total_return_pct", 0),
+                },
+                "rows": rows,
+            },
         )
 
     if tool_name == "get_simulation_orders":

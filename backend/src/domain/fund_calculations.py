@@ -73,9 +73,13 @@ def calculate_from_question(message: str) -> FundCalculationResult | None:
         c_rate = re.search(r"C类[^%]{0,40}?(\d+(?:\.\d+)?)\s*%", message, re.IGNORECASE)
         months_match = re.search(r"预计持有\s*(\d+)\s*个?月", message)
         chinese_months = {"三个月": 3, "九个月": 9, "六个月": 6}
-        months = int(months_match.group(1)) if months_match else next(
-            (value for key, value in chinese_months.items() if key in message),
-            None,
+        months = (
+            int(months_match.group(1))
+            if months_match
+            else next(
+                (value for key, value in chinese_months.items() if key in message),
+                None,
+            )
         )
         if a_rate and c_rate and months:
             a_pct = float(a_rate.group(1))

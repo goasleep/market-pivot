@@ -69,9 +69,7 @@ class MarketDataCatalog:
 
     @staticmethod
     def supports_dataset_asset_type(dataset: DatasetDefinition, asset_type: str) -> bool:
-        return asset_type in dataset.asset_types or (
-            asset_type == "fund" and any(item in dataset.asset_types for item in ("etf", "lof"))
-        )
+        return asset_type in dataset.asset_types
 
     def search(self, query: str, *, asset_type: str | None = None, limit: int = 5) -> list[DatasetDefinition]:
         """Rank datasets by catalog vocabulary; this selects data, not conversation routes."""

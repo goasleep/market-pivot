@@ -21,7 +21,7 @@ from loguru import logger
 
 from application.research import research_service
 from data.backtest_data import BacktestDataError, prepare_backtest_data
-from data.fund_provider import async_get_fund_history
+from data.exchange_fund_provider import async_get_exchange_fund_history
 from data.market_context import build_market_context
 from data.stock_provider import async_get_stock_history
 from engine.portfolio_allocator import (
@@ -334,8 +334,7 @@ async def run_backtest(
         "total_fees": metrics["total_fees"],
         "total_trades": len(engine.portfolio.trades),
         "price_curve": [
-            {"date": str(row["date"]), "value": round(float(row["close"]), 6)}
-            for _, row in evaluation_frame.iterrows()
+            {"date": str(row["date"]), "value": round(float(row["close"]), 6)} for _, row in evaluation_frame.iterrows()
         ],
         "equity_curve": equity_curve,
         "signal_curve": signal_curve,
@@ -358,7 +357,7 @@ async def prepare_single_backtest_data(
     if kind == AssetType.STOCK:
         frame = await async_get_stock_history(ticker, start_date=start_date, end_date=end_date)
     else:
-        frame = await async_get_fund_history(
+        frame = await async_get_exchange_fund_history(
             ticker,
             asset_type=kind.value,
             start_date=start_date,
@@ -425,7 +424,7 @@ async def run_pool_backtest(
         *(
             async_get_stock_history(symbol, start_date=start_date, end_date=end_date)
             if asset_type == AssetType.STOCK
-            else async_get_fund_history(
+            else async_get_exchange_fund_history(
                 symbol,
                 asset_type=asset_type.value,
                 start_date=start_date,
@@ -765,11 +764,7 @@ def _calc_metrics(equity_curve: list[dict], trades: list, initial_capital: float
     total_fees = 0.0
     for t in trades:
         d = t if isinstance(t, dict) else t.model_dump()
-        total_fees += (
-            float(d.get("commission", 0))
-            + float(d.get("tax", 0))
-            + float(d.get("transfer_fee", 0))
-        )
+        total_fees += float(d.get("commission", 0)) + float(d.get("tax", 0)) + float(d.get("transfer_fee", 0))
         if d["action"] == "buy":
             buy_lots.setdefault(d["ticker"], deque()).append(
                 (

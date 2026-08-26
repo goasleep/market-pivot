@@ -39,6 +39,9 @@ class AssetAgentRequest:
     tickers: tuple[str, ...]
     mode: RequestMode = RequestMode.FINANCIAL_RESEARCH
     asset_type: AssetType = AssetType.STOCK
+    asset_type_explicit: bool = False
+    asset_type_ambiguous: bool = False
+    asset_type_candidates: tuple[AssetType, ...] = ()
     start_date: str | None = None
     end_date: str | None = None
     strategy: str | None = None
@@ -61,13 +64,22 @@ class AssetAgentRequest:
         return replace(self, mode=mode)
 
 
+@dataclass(frozen=True)
+class AssetTypeResolution:
+    """A routing hint, not a Provider-backed product identity."""
+
+    asset_type: AssetType | None
+    candidates: tuple[AssetType, ...] = ()
+    ambiguous: bool = False
+    source: str = "default"
+    matched_terms: tuple[str, ...] = ()
+
+
 class AssetRequestResolver:
     """Route conversational requests to common asset research capabilities."""
 
     _ticker_pattern = re.compile(r"(?<!\d)(?:(?:sh|sz|bj)\s*)?(\d{6})(?!\d)", re.IGNORECASE)
-    _date_pattern = re.compile(
-        r"(?<!\d)(?:(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?|(\d{8}))(?!\d)"
-    )
+    _date_pattern = re.compile(r"(?<!\d)(?:(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?|(\d{8}))(?!\d)")
 
     _keyword_groups = {
         AssetIntent.BACKTEST: ("回测", "回测一下", "策略测试", "历史测试", "backtest"),
@@ -88,6 +100,20 @@ class AssetRequestResolver:
         AssetIntent.COMPARE,
         AssetIntent.BACKTEST,
     }
+    _asset_type_patterns = {
+        AssetType.LOF: re.compile(r"(?<![a-z])lof(?![a-z])", re.IGNORECASE),
+        AssetType.ETF: re.compile(r"(?<![a-z])etf(?![a-z])|交易型(?:开放式指数)?基金", re.IGNORECASE),
+        AssetType.OPEN_FUND: re.compile(
+            r"(?:场外(?:指数)?|开放式|货币(?:型)?|债券(?:型)?|混合(?:型)?|股票(?:型)?|指数增强)基金|基金\s*[ac]\s*类",
+            re.IGNORECASE,
+        ),
+        AssetType.STOCK: re.compile(r"个股|a股|股票(?!型?基金)", re.IGNORECASE),
+    }
+    _follow_up_pattern = re.compile(
+        r"为什么|依据|解释|怎么看|风险|止损|它|这只|这个|该产品|刚才|前面|继续",
+        re.IGNORECASE,
+    )
+    _conceptual_asset_pattern = re.compile(r"是什么|概念|如何分类|怎么分类|有什么区别|哪些类型|支持哪些")
 
     @classmethod
     def extract_tickers(cls, *texts: str) -> tuple[str, ...]:
@@ -138,13 +164,21 @@ class AssetRequestResolver:
             *(item.get("content", "") for item in reversed(history_items)),
         )
         intent = self._infer_intent(message, len(current_tickers))
-        asset_type = AssetType(asset_type) if asset_type else self._infer_asset_type(message, history_items)
+        asset_type_was_explicit = asset_type is not None
+        resolution = (
+            AssetTypeResolution(asset_type=AssetType(asset_type), source="api")
+            if asset_type_was_explicit
+            else self._resolve_asset_type(message, history_items)
+        )
         return AssetAgentRequest(
             message=message,
             history=history_items,
             intent=intent,
             tickers=tickers,
-            asset_type=asset_type,
+            asset_type=resolution.asset_type or AssetType.STOCK,
+            asset_type_explicit=asset_type_was_explicit,
+            asset_type_ambiguous=resolution.ambiguous,
+            asset_type_candidates=resolution.candidates,
             start_date=start_date,
             end_date=end_date,
             strategy=strategy,
@@ -209,6 +243,21 @@ class AssetRequestResolver:
     def resolve_intent(self, request: AssetAgentRequest) -> tuple[AssetAgentRequest, dict[str, Any] | None]:
         """Apply only safety-level routing; the research planner owns task semantics."""
         text = request.message.strip().lower()
+        if self._conceptual_asset_pattern.search(text):
+            return replace(request, intent=AssetIntent.HELP, mode=RequestMode.HELP, intent_confirmed=True), None
+        if request.asset_type_ambiguous and not request.asset_type_explicit:
+            candidates = request.asset_type_candidates or (AssetType.ETF, AssetType.LOF, AssetType.OPEN_FUND)
+            labels = {
+                AssetType.STOCK: "股票",
+                AssetType.ETF: "场内 ETF",
+                AssetType.LOF: "场内 LOF",
+                AssetType.OPEN_FUND: "场外开放式基金",
+            }
+            return request, {
+                "kind": "asset_type_clarification",
+                "question": "当前描述不能唯一确定金融产品类型，请选择产品类型；六位代码前缀不作为身份核验。",
+                "options": [{"id": item.value, "label": labels[item]} for item in candidates],
+            }
         if request.allow_mutating_tools or self._explicitly_requests_mutation(request.message):
             return request.with_mode(RequestMode.SIMULATION_MUTATION), None
         if not text or text in {"帮助", "help", "你能做什么", "有什么功能", "使用说明"}:
@@ -227,21 +276,85 @@ class AssetRequestResolver:
             intent_confirmed=True,
         ), None
 
-    @staticmethod
-    def _infer_asset_type(message: str, history: Sequence[dict[str, str]]) -> AssetType:
-        text = " ".join([message, *(item.get("content", "") for item in history[-6:])]).lower()
-        if any(token in text for token in ("lof", "场内基金", "lof基金")):
-            return AssetType.LOF
-        if any(token in text for token in ("etf", "交易型基金", "指数基金")):
-            return AssetType.ETF
-        if any(token in text for token in ("股票", "个股", "a股")):
-            return AssetType.STOCK
-        tickers = AssetRequestResolver.extract_tickers(text)
-        if any(ticker.startswith(("15", "51", "56", "58")) for ticker in tickers):
-            return AssetType.ETF
-        if any(ticker.startswith(("16", "50")) for ticker in tickers):
-            return AssetType.LOF
-        return AssetType.STOCK
+    @classmethod
+    def _matched_asset_types(cls, text: str) -> tuple[tuple[AssetType, ...], tuple[str, ...]]:
+        normalized = text.lower()
+        compact = re.sub(r"\s+", "", normalized)
+        matched: list[AssetType] = []
+        matched_terms: list[str] = []
+        for asset_type in (AssetType.LOF, AssetType.ETF, AssetType.OPEN_FUND, AssetType.STOCK):
+            terms = [match.group() for match in cls._asset_type_patterns[asset_type].finditer(normalized)]
+            if asset_type == AssetType.STOCK and re.search(r"(?:股票|a股)(?:指数)?(?:etf|lof)", compact):
+                terms = [term for term in terms if term.lower() not in {"股票", "a股"}]
+            if terms:
+                matched.append(asset_type)
+                matched_terms.extend(terms)
+        return tuple(matched), tuple(dict.fromkeys(matched_terms))
+
+    @classmethod
+    def _history_asset_type(cls, history: Sequence[dict[str, str]]) -> AssetType | None:
+        for item in reversed(history[-6:]):
+            matched, _ = cls._matched_asset_types(str(item.get("content", "")))
+            if len(matched) == 1:
+                return matched[0]
+        return None
+
+    @classmethod
+    def _resolve_asset_type(
+        cls,
+        message: str,
+        history: Sequence[dict[str, str]],
+    ) -> AssetTypeResolution:
+        text = message.lower()
+        matched, matched_terms = cls._matched_asset_types(text)
+        if len(matched) == 1:
+            return AssetTypeResolution(
+                asset_type=matched[0],
+                candidates=matched,
+                source="current_message",
+                matched_terms=matched_terms,
+            )
+        if len(matched) > 1:
+            return AssetTypeResolution(
+                asset_type=None,
+                candidates=matched,
+                ambiguous=True,
+                source="current_message_conflict",
+                matched_terms=matched_terms,
+            )
+
+        is_follow_up = bool(cls._follow_up_pattern.search(text))
+        is_generic_fund = "基金" in text
+        if is_follow_up:
+            inherited = cls._history_asset_type(history)
+            if inherited is not None:
+                return AssetTypeResolution(
+                    asset_type=inherited,
+                    candidates=(inherited,),
+                    source="history_follow_up",
+                )
+        if is_generic_fund:
+            candidates = (
+                (AssetType.ETF, AssetType.LOF)
+                if "场内基金" in text
+                else (AssetType.ETF, AssetType.LOF, AssetType.OPEN_FUND)
+            )
+            return AssetTypeResolution(
+                asset_type=None,
+                candidates=candidates,
+                ambiguous=True,
+                source="generic_fund_term",
+                matched_terms=("场内基金",) if "场内基金" in text else ("基金",),
+            )
+        return AssetTypeResolution(asset_type=AssetType.STOCK, candidates=(AssetType.STOCK,), source="default")
+
+    @classmethod
+    def _infer_asset_type(
+        cls,
+        message: str,
+        history: Sequence[dict[str, str]],
+    ) -> AssetType | None:
+        return cls._resolve_asset_type(message, history).asset_type
 
     def prepare(
         self,
@@ -257,16 +370,21 @@ class AssetRequestResolver:
             message,
             *(item.get("content", "") for item in reversed(history_items)),
         )
+        explicit_asset_type = kwargs.get("asset_type")
+        resolution = (
+            AssetTypeResolution(asset_type=AssetType(explicit_asset_type), source="api")
+            if explicit_asset_type
+            else self._resolve_asset_type(message, history_items)
+        )
         return AssetAgentRequest(
             message=message,
             history=history_items,
             intent=AssetIntent.ANALYZE,
             tickers=current_tickers or history_tickers[:1],
-            asset_type=(
-                AssetType(kwargs["asset_type"])
-                if kwargs.get("asset_type")
-                else self._infer_asset_type(message, history_items)
-            ),
+            asset_type=resolution.asset_type or AssetType.STOCK,
+            asset_type_explicit=bool(explicit_asset_type),
+            asset_type_ambiguous=resolution.ambiguous,
+            asset_type_candidates=resolution.candidates,
             start_date=start_date,
             end_date=end_date,
             strategy=kwargs.get("strategy"),
@@ -286,7 +404,10 @@ class AssetRequestResolver:
             "intent": request.intent.value,
             "mode": request.mode.value,
             "tickers": list(request.tickers),
-            "asset_type": request.asset_type.value,
+            "asset_type": None if request.asset_type_ambiguous else request.asset_type.value,
+            "asset_type_explicit": request.asset_type_explicit,
+            "asset_type_ambiguous": request.asset_type_ambiguous,
+            "asset_type_candidates": [item.value for item in request.asset_type_candidates],
             "start_date": request.start_date,
             "end_date": request.end_date,
             "strategy": request.strategy,
@@ -308,13 +429,19 @@ class AssetRequestResolver:
 
     @staticmethod
     def request_from_payload(payload: dict[str, Any]) -> AssetAgentRequest:
+        raw_asset_type = payload.get("asset_type")
         return AssetAgentRequest(
             message=str(payload.get("message", "")),
             history=list(payload.get("history") or []),
             intent=AssetIntent(str(payload.get("intent", AssetIntent.ANALYZE.value))),
             tickers=tuple(str(item) for item in payload.get("tickers", []) if item),
             mode=RequestMode(str(payload.get("mode", RequestMode.FINANCIAL_RESEARCH.value))),
-            asset_type=AssetType(str(payload.get("asset_type", AssetType.STOCK.value))),
+            asset_type=AssetType(str(raw_asset_type or AssetType.STOCK.value)),
+            asset_type_explicit=bool(payload.get("asset_type_explicit", False)),
+            asset_type_ambiguous=bool(payload.get("asset_type_ambiguous", False)),
+            asset_type_candidates=tuple(
+                AssetType(str(item)) for item in payload.get("asset_type_candidates", []) if item
+            ),
             start_date=payload.get("start_date"),
             end_date=payload.get("end_date"),
             strategy=payload.get("strategy"),

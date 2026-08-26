@@ -1,0 +1,15 @@
+id: stock.comprehensive_analysis
+version: 1.0.0
+title: 股票综合多角色分析
+description: 调用固定股票多 Agent 图完成底层股票的综合研究。
+domain: stock
+asset_types: [stock]
+intents: [analyze]
+capabilities: [stock.comprehensive_analysis]
+requires: [market.quote, market.history]
+tools: [run_stock_comprehensive_analysis]
+evidence_types: [analysis]
+output_fields: [market_context, final_decision, risk_assessment]
+validators: [evidence.required]
+tags: [股票, 综合分析, 底层资产]
+cost: high

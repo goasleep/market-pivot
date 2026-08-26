@@ -1,0 +1,12 @@
+id: market.history
+version: 1.0.0
+title: 历史价格
+description: 获取指定区间的股票、ETF或LOF历史日线。
+domain: shared
+asset_types: [stock, etf, lof]
+intents: [history, analyze, compare, backtest]
+capabilities: [market.history]
+tools: [get_historical_prices]
+evidence_types: [market_data]
+validators: [evidence.required]
+tags: [历史, 趋势, K线]

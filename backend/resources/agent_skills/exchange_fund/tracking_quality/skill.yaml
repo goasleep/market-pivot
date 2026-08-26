@@ -1,0 +1,14 @@
+id: exchange_fund.tracking_quality
+version: 2.0.0
+title: ETF 跟踪质量
+description: 计算跟踪差额、跟踪误差并披露样本与基准来源。
+domain: exchange_fund
+asset_types: [etf, lof]
+intents: [analyze, compare, screen]
+capabilities: [exchange_fund.tracking_quality]
+requires: [exchange_fund.profile, market.history]
+tools: [calculate_exchange_fund_tracking_quality]
+evidence_types: [tracking]
+output_fields: [tracking_difference, tracking_error, sample_start, sample_end, benchmark_source]
+validators: [evidence.required]
+tags: [跟踪误差, 跟踪差额, 基准]

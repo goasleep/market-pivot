@@ -7,7 +7,7 @@ import json
 from application.fund_completion import validate_fund_response
 from domain.fund_calculations import calculate_from_question
 from llm.service import get_llm_service
-from models.fund_task import FundTaskAcceptance, FundTaskKind, FundTaskSpec, TaskOutcome
+from models.fund_task import FundAnswerAcceptance, FundIntentSpec, FundTaskKind, TaskOutcome
 
 _SYSTEM = (
     "你是面向小额个人投资者的基金研究与模拟交易助手。"
@@ -21,7 +21,7 @@ _SYSTEM = (
 )
 
 
-def _clarification_answer(spec: FundTaskSpec) -> str:
+def _clarification_answer(spec: FundIntentSpec) -> str:
     missing = "、".join(spec.missing_inputs) or "基金代码或准确名称"
     return (
         f"要完成这项具体基金研究，还需要：{missing}。"
@@ -30,7 +30,7 @@ def _clarification_answer(spec: FundTaskSpec) -> str:
     )
 
 
-def _prompt(message: str, spec: FundTaskSpec, previous_answer: str = "", missing: list[str] | None = None) -> str:
+def _prompt(message: str, spec: FundIntentSpec, previous_answer: str = "", missing: list[str] | None = None) -> str:
     payload = {
         "question": message,
         "task_kind": spec.task_kind.value,
@@ -50,10 +50,10 @@ def _prompt(message: str, spec: FundTaskSpec, previous_answer: str = "", missing
     return f"{instruction}\n\n{json.dumps(payload, ensure_ascii=False)}"
 
 
-async def execute_direct_fund_task(message: str, spec: FundTaskSpec) -> tuple[str, FundTaskAcceptance]:
+async def execute_direct_fund_task(message: str, spec: FundIntentSpec) -> tuple[str, FundAnswerAcceptance]:
     if spec.task_kind == FundTaskKind.CLARIFICATION:
         answer = _clarification_answer(spec)
-        return answer, FundTaskAcceptance(
+        return answer, FundAnswerAcceptance(
             outcome=TaskOutcome.NEEDS_INPUT,
             satisfied=False,
             checks={"missing_inputs_identified": True},

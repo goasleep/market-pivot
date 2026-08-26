@@ -201,8 +201,7 @@ def _build_chart_artifact_tool(*, conversation_id: str | None, task_id: str | No
         coroutine=create_chart_artifact,
         name="create_chart_artifact",
         description=(
-            "把一组 label/value 数据生成使用 ECharts canvas 渲染的 HTML 图表 artifact；"
-            "适合需要独立预览或下载的图表。"
+            "把一组 label/value 数据生成使用 ECharts canvas 渲染的 HTML 图表 artifact；适合需要独立预览或下载的图表。"
         ),
     )
 

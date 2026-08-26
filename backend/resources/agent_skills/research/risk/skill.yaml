@@ -1,0 +1,13 @@
+id: risk.metrics
+version: 1.0.0
+title: 风险与交易计划
+description: 计算波动、回撤和仓位风险，并形成带止损止盈条件的计划。
+domain: shared
+asset_types: [stock, etf, lof]
+intents: [analyze, compare, plan]
+capabilities: [risk.metrics, trade.plan]
+requires: [market.history]
+tools: [calculate_risk_metrics, build_trade_plan]
+evidence_types: [risk, trade_plan]
+validators: [evidence.required]
+tags: [风险, 回撤, 仓位, 止损]

@@ -1,0 +1,14 @@
+id: exchange_fund.event_risk
+version: 2.0.0
+title: ETF 公告与事件风险
+description: 核对限购、申赎、指数调仓、QDII 时差与异常公告。
+domain: exchange_fund
+asset_types: [etf, lof]
+intents: [news, analyze, compare]
+capabilities: [exchange_fund.event_risk]
+requires: [exchange_fund.profile, news.events]
+tools: [get_exchange_fund_event_risk]
+evidence_types: [announcement]
+output_fields: [events, announcement_count, as_of, freshness]
+validators: [evidence.required]
+tags: [公告, 限购, 申赎, 调仓, QDII]

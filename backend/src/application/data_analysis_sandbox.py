@@ -60,7 +60,7 @@ def validate_analysis_source(source: str, policy: DataAnalysisSandboxPolicy | No
             raise SandboxError(f"不允许访问可能产生外部 I/O 的属性: {node.attr}")
 
 
-_ANALYSIS_RUNNER = r'''
+_ANALYSIS_RUNNER = r"""
 import json
 import sys
 import numpy as np
@@ -88,7 +88,7 @@ if isinstance(result, pd.DataFrame):
 elif isinstance(result, pd.Series):
     result = result.where(pd.notna(result), None).to_frame("value").to_dict(orient="records")
 print(json.dumps({"rows": result}, allow_nan=False, default=str))
-'''
+"""
 
 
 def _limit_child(policy: DataAnalysisSandboxPolicy) -> Any:

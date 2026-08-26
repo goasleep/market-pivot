@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 import application.fund_response as fund_response_module
-from agents.stock_agent import StockAgent
+from agents.stock_agent import AssetAgent as StockAgent
 from application.financial_task_planner import compile_financial_task_spec
 from application.fund_instruments import resolve_fund_instruments
 from application.fund_response import execute_direct_fund_task
@@ -84,7 +84,7 @@ def test_arbitrary_six_digit_amount_is_not_verified_as_a_fund():
 
 def test_explicit_etf_code_is_resolved_for_data_research():
     refs = resolve_fund_instruments("分析 ETF 510300 的最新走势", ("510300",), asset_type="etf")
-    assert refs[0].status == InstrumentResolutionStatus.VERIFIED
+    assert refs[0].status == InstrumentResolutionStatus.CANDIDATE
     spec = compile_fund_task("分析 ETF 510300 的最新走势", tickers=("510300",), asset_type="etf")
     assert spec is not None
     assert spec.task_kind == FundTaskKind.INSTRUMENT_RESEARCH
@@ -147,7 +147,7 @@ def test_task_tool_surface_is_allowlisted():
     assert instrument is not None
     names = {tool.name for tool in build_task_tools(instrument, assets.get_realtime_quote, allow_mutating_tools=False)}
     assert "get_realtime_quote" in names
-    assert "get_fund_nav_history" in names
+    assert "get_exchange_fund_nav_history" in names
     assert "screen_assets" not in names
     assert "submit_simulation_order" not in names
 
@@ -169,7 +169,8 @@ def test_etf_universe_task_does_not_expose_an_unavailable_structured_dataset_que
     spec = compile_fund_task("筛选近6年每年都分红的ETF", asset_type="etf")
     assert spec is not None
     assert spec.task_kind == FundTaskKind.UNIVERSE_RESEARCH
-    assert spec.subject.product_type == "etf"
+    assert spec.subject.fund_domain.value == "exchange_fund"
+    assert spec.subject.asset_type == "etf"
 
     names = {tool.name for tool in build_task_tools(spec, assets.get_realtime_quote, allow_mutating_tools=False)}
 

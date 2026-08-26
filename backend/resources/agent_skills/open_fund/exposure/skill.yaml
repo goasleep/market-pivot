@@ -1,0 +1,15 @@
+id: open_fund.exposure
+version: 2.0.0
+title: 场外基金持仓与暴露
+description: 获取股票、债券和行业配置，并披露报告期及陈旧状态。
+domain: open_fund
+asset_types: [open_fund]
+product_categories: [equity, hybrid, bond, index, enhanced_index]
+intents: [analyze, compare, screen]
+capabilities: [open_fund.exposure]
+requires: [open_fund.profile]
+tools: [get_open_fund_exposure]
+evidence_types: [exposure]
+output_fields: [stock_holdings, bond_holdings, industry_allocation, concentration, report_date]
+validators: [evidence.required]
+tags: [持仓, 行业, 信用暴露, 报告期]

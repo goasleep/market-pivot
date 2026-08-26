@@ -7,10 +7,10 @@ from typing import Any
 
 import pandas as pd
 
-from data.fund_provider import (
-    async_get_fund_history,
-    async_get_fund_nav_history,
-    async_get_fund_realtime,
+from data.exchange_fund_provider import (
+    async_get_exchange_fund_history,
+    async_get_exchange_fund_nav_history,
+    async_get_exchange_fund_quote,
 )
 from data.serper_provider import async_search_web_parallel
 from data.source_registry import provenance_for_labels
@@ -142,7 +142,7 @@ async def build_market_context(
         if asset_type == AssetType.STOCK:
             history_df = await async_get_stock_history(ticker, start_date="", end_date=as_of_date or "")
         else:
-            history_df = await async_get_fund_history(
+            history_df = await async_get_exchange_fund_history(
                 ticker,
                 asset_type=asset_type.value,
                 start_date="",
@@ -193,10 +193,10 @@ async def build_market_context(
         realtime, financial, news = await asyncio.gather(realtime_task, financial_task, news_task)
         nav_history = []
     else:
-        realtime = await async_get_fund_realtime(ticker, asset_type=asset_type.value)
+        realtime = await async_get_exchange_fund_quote(ticker, asset_type=asset_type.value)
         financial = {"ticker": ticker, "not_applicable": "场内基金不适用个股财务指标"}
         news = []
-        nav_df = await async_get_fund_nav_history(ticker, asset_type=asset_type.value)
+        nav_df = await async_get_exchange_fund_nav_history(ticker, asset_type=asset_type.value)
         nav_history = nav_df.to_dict("records") if not nav_df.empty else []
     asset_label = "股票" if asset_type == AssetType.STOCK else f"{asset_type.value.upper()} 场内基金"
     web_search = await async_search_web_parallel(

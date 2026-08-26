@@ -1,0 +1,13 @@
+id: exchange_fund.profile
+version: 2.0.0
+title: ETF/LOF 产品核验
+description: 通过结构化 Provider 核验场内基金身份、市场、类型与产品资料。
+domain: exchange_fund
+asset_types: [etf, lof]
+intents: [analyze, compare, screen]
+capabilities: [exchange_fund.profile]
+tools: [get_exchange_fund_profile]
+evidence_types: [fund_profile]
+output_fields: [ticker, name, exchange, asset_type, is_qdii, verified, tracking_index, fees, size]
+validators: [evidence.required]
+tags: [ETF, LOF, 产品资料, 核验]

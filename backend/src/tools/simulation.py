@@ -173,9 +173,7 @@ async def submit_simulation_order(
     execution_key: str | None = None,
 ) -> str:
     """创建一笔待成交的纸面交易订单；只有用户明确要求下单时调用。"""
-    deterministic_order_id = (
-        f"sim-{hashlib.sha256(execution_key.encode()).hexdigest()[:24]}" if execution_key else None
-    )
+    deterministic_order_id = f"sim-{hashlib.sha256(execution_key.encode()).hexdigest()[:24]}" if execution_key else None
     order = await simulation_accounts.create_order(
         account_id=account_id,
         ticker=ticker,
