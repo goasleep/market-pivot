@@ -1,7 +1,5 @@
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
-from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -128,10 +126,9 @@ def test_etf_history_uses_sina_when_eastmoney_returns_empty(monkeypatch):
     }
 
 
-def test_sina_etf_decoder_is_serialized_across_worker_threads(monkeypatch):
+def test_sina_etf_history_delegates_decoding_from_worker_threads(monkeypatch):
     state_lock = threading.Lock()
-    active_decoders = 0
-    maximum_active_decoders = 0
+    decoded_payloads = []
 
     class FakeResponse:
         text = 'var data="encoded";'
@@ -140,35 +137,22 @@ def test_sina_etf_decoder_is_serialized_across_worker_threads(monkeypatch):
         def raise_for_status():
             return None
 
-    class FakeMiniRacer:
-        def eval(self, _source):
-            nonlocal active_decoders, maximum_active_decoders
-            with state_lock:
-                active_decoders += 1
-                maximum_active_decoders = max(maximum_active_decoders, active_decoders)
-            time.sleep(0.03)
-
-        def call(self, _name, _encoded):
-            nonlocal active_decoders
-            with state_lock:
-                active_decoders -= 1
-            return [
-                {
-                    "date": "2025-08-18",
-                    "open": 1.0,
-                    "high": 1.1,
-                    "low": 0.9,
-                    "close": 1.05,
-                    "volume": 100,
-                }
-            ]
+    def fake_decode(encoded):
+        with state_lock:
+            decoded_payloads.append(encoded)
+        return [
+            {
+                "date": "2025-08-18",
+                "open": 1.0,
+                "high": 1.1,
+                "low": 0.9,
+                "close": 1.05,
+                "volume": 100,
+            }
+        ]
 
     monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: FakeResponse())
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "py_mini_racer",
-        SimpleNamespace(MiniRacer=FakeMiniRacer),
-    )
+    monkeypatch.setattr(provider, "decode_sina_payload", fake_decode)
 
     with ThreadPoolExecutor(max_workers=3) as executor:
         frames = list(
@@ -178,7 +162,7 @@ def test_sina_etf_decoder_is_serialized_across_worker_threads(monkeypatch):
             )
         )
 
-    assert maximum_active_decoders == 1
+    assert decoded_payloads == ["encoded", "encoded", "encoded"]
     assert [len(frame) for frame in frames] == [1, 1, 1]
 
 

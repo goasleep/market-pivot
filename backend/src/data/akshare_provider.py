@@ -30,11 +30,7 @@ from loguru import logger
 
 from config import settings
 from data.history_cache import HistorySeries, history_cache
-
-# py_mini_racer initializes process-global V8 state. Creating several runtimes
-# concurrently from asyncio worker threads can abort the entire Python process
-# instead of raising an exception, so only the decoder section is serialized.
-_SINA_ETF_DECODER_LOCK = threading.Lock()
+from data.sina_decoder import decode_sina_payload
 
 # ---------------------------------------------------------------------------
 # Circuit Breaker
@@ -286,19 +282,12 @@ def _fetch_etf_history_sina(ticker: str, start_date: str, end_date: str) -> pd.D
     used directly inside the provider's bounded retry loop.  Reuse its public
     response decoder, but keep the network request under our own timeout.
     """
-    # py_mini_racer is platform-specific; keep this optional fallback dependency isolated.
-    import py_mini_racer
-    from akshare.stock.cons import hk_js_decode
-
     market = "sh" if ticker.startswith(("5", "6", "9")) else "sz"
     url = f"https://finance.sina.com.cn/realstock/company/{market}{ticker}/hisdata_klc2/klc_kl.js"
     response = requests.get(url, timeout=UPSTREAM_TIMEOUT_SECONDS)
     response.raise_for_status()
     encoded = response.text.split("=", 1)[1].split(";", 1)[0].replace('"', "")
-    with _SINA_ETF_DECODER_LOCK:
-        js_code = py_mini_racer.MiniRacer()
-        js_code.eval(hk_js_decode)
-        rows = js_code.call("d", encoded)
+    rows = decode_sina_payload(encoded)
     frame = pd.DataFrame(rows)
     if frame.empty:
         return frame
