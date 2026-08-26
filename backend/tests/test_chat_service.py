@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 
@@ -6,7 +7,7 @@ import pytest_asyncio
 
 from application import chat_service
 from application.chat_service import ChatStore, ChatTaskInput, ChatTaskManager
-from data.chat_models import ChatMessageSearch
+from data.chat_models import ChatMessage, ChatMessageSearch
 
 
 def _markdown_texts(events):
@@ -72,6 +73,52 @@ async def test_chat_store_clears_stale_error_when_task_is_reclaimed(store):
     assert task is not None
     assert task["status"] == "running"
     assert task["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_interrupted_chat_remains_loading_until_worker_reclaims_it(store):
+    await store.prepare_task(
+        conversation_id="conversation-interrupted",
+        task_id="task-interrupted",
+        message="执行长任务",
+    )
+    await store.update_task("task-interrupted", "interrupted", "节点重启")
+
+    conversation = await store.get_conversation("conversation-interrupted")
+    assert conversation is not None
+    assert conversation["messages"][-1]["status"] == "interrupted"
+    assert conversation["messages"][-1]["loading"] is True
+
+    manager = ChatTaskManager(store)
+    next_event = asyncio.create_task(anext(manager.subscribe("task-interrupted")))
+    await asyncio.sleep(0.02)
+    assert not next_event.done()
+
+    await store.update_task("task-interrupted", "completed")
+    assert await asyncio.wait_for(next_event, timeout=1) == {"event": "done", "data": "{}"}
+
+
+@pytest.mark.asyncio
+async def test_chat_conversation_payload_normalizes_legacy_non_finite_numbers(store):
+    _, assistant_id = await store.prepare_task(
+        conversation_id="conversation-non-finite",
+        task_id="task-non-finite",
+        message="执行回测",
+    )
+    await ChatMessage.filter(message_id=assistant_id).update(
+        parts_json='[{"type":"a2ui","content":{"metric":NaN,"upper":Infinity}}]'
+    )
+
+    conversations = await store.list_conversations()
+    conversation = await store.get_conversation("conversation-non-finite")
+
+    assert conversation is not None
+    assert conversation["messages"][-1]["parts"][0]["content"] == {
+        "metric": None,
+        "upper": None,
+    }
+    json.dumps(conversations, allow_nan=False)
+    json.dumps(conversation, allow_nan=False)
 
 
 @pytest.mark.asyncio

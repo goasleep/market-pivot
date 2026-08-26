@@ -164,7 +164,8 @@ export function isRunningTaskMessage(message: ChatMessageData): boolean {
       message.taskId &&
       (message.loading ||
         message.status === "pending" ||
-        message.status === "running"),
+        message.status === "running" ||
+        message.status === "interrupted"),
   );
 }
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,17 @@ def _now() -> str:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
+    return json.dumps(_json_safe(value), ensure_ascii=False, allow_nan=False, default=str)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def _text_part(content: str) -> dict[str, str]:
@@ -166,17 +177,20 @@ class ChatStore:
         outcome: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         status = row["status"]
-        return {
+        return _json_safe({
             "id": row["message_id"],
             "role": row["role"],
             "parts": json.loads(row["parts_json"]),
             "created_at": row.get("created_at"),
             "status": status,
             "task_id": row["task_id"],
-            "loading": status in {"pending", "running"},
+            # ``interrupted`` is a durable hand-off state. The background
+            # worker automatically reclaims it, so the UI must keep showing
+            # the task as active instead of exposing terminal controls.
+            "loading": status in {"pending", "running", "interrupted"},
             "references": references or [],
             "outcome": outcome,
-        }
+        })
 
     async def _sync_search(
         self,
@@ -221,7 +235,7 @@ class ChatStore:
             active = (
                 await ChatTask.filter(
                     conversation_id=conversation_id,
-                    status__in=["pending", "running", "cancel_requested", "waiting_user"],
+                    status__in=["pending", "running", "interrupted", "cancel_requested", "waiting_user"],
                 )
                 .using_db(connection)
                 .order_by("-created_at")
@@ -452,12 +466,12 @@ class ChatStore:
         task = await ChatTask.filter(task_id=task_id).first()
         if task is None:
             return None
-        if task.status not in {"pending", "running", "cancel_requested", "waiting_user"}:
+        if task.status not in {"pending", "running", "interrupted", "cancel_requested", "waiting_user"}:
             return task.status
         timestamp = _now()
         await ChatTask.filter(
             task_id=task_id,
-            status__in=["pending", "running", "cancel_requested", "waiting_user"],
+            status__in=["pending", "running", "interrupted", "cancel_requested", "waiting_user"],
         ).update(status="cancel_requested", updated_at=timestamp)
         await ChatMessage.filter(message_id=task.message_id).update(status="cancel_requested", updated_at=timestamp)
         await ChatTaskInteraction.filter(task_id=task_id, status="pending").update(

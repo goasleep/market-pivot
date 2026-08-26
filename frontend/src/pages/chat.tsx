@@ -59,11 +59,11 @@ const TERMINAL_TASK_STATUSES = new Set([
   "completed",
   "failed",
   "cancelled",
-  "interrupted",
   "waiting_user",
   "superseded",
 ]);
 const MAX_MISSING_TASK_RETRIES = 10;
+const SSE_IDLE_TIMEOUT_MS = 30_000;
 
 function terminalMessageStatus(
   status: string | null,
@@ -90,6 +90,30 @@ function waitForReconnect(delayMs: number, signal: AbortSignal): Promise<void> {
       resolve();
     }, delayMs);
     signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function readSseChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array> | null> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (
+      result: ReadableStreamReadResult<Uint8Array> | null,
+      error?: unknown,
+    ) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      if (error !== undefined) reject(error);
+      else resolve(result);
+    };
+    const onAbort = () => finish(null, new DOMException("请求已取消", "AbortError"));
+    const timer = window.setTimeout(() => finish(null), SSE_IDLE_TIMEOUT_MS);
+    signal.addEventListener("abort", onAbort, { once: true });
+    void reader.read().then((result) => finish(result), (error) => finish(null, error));
   });
 }
 
@@ -206,10 +230,21 @@ export function ChatPage() {
                 conversation.conversationId ===
                 serverConversation.conversationId,
             );
+            const localRunningTask = localConversation?.messages.find(
+              isRunningTaskMessage,
+            );
+            const serverTask = localRunningTask?.taskId
+              ? serverConversation.messages.find(
+                  (message) => message.taskId === localRunningTask.taskId,
+                )
+              : undefined;
             // A live task owns its local message until its stream finishes. The
             // initial server-history request may otherwise replace it with a
-            // snapshot, after which the same SSE events are appended again.
-            return localConversation && hasRunningTask(localConversation)
+            // snapshot, after which the same SSE events are appended again. A
+            // terminal server record is authoritative over stale local state.
+            return localConversation &&
+              localRunningTask &&
+              (!serverTask || isRunningTaskMessage(serverTask))
               ? localConversation
               : serverConversation;
           });
@@ -754,7 +789,12 @@ export function ChatPage() {
           let buffer = "";
           let pendingEventId: number | null = null;
           while (!abortController.signal.aborted) {
-            const { done, value } = await reader.read();
+            const chunk = await readSseChunk(reader, abortController.signal);
+            if (!chunk) {
+              await reader.cancel();
+              break;
+            }
+            const { done, value } = chunk;
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split("\n");
@@ -992,7 +1032,12 @@ export function ChatPage() {
           let buffer = "";
           let pendingEventId: number | null = null;
           while (!disposed && !reconnectController.signal.aborted) {
-            const { done, value } = await reader.read();
+            const chunk = await readSseChunk(reader, reconnectController.signal);
+            if (!chunk) {
+              await reader.cancel();
+              break;
+            }
+            const { done, value } = chunk;
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split("\n");

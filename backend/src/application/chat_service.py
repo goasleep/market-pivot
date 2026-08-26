@@ -168,7 +168,7 @@ class ChatTaskManager:
             terminal = bool(
                 record
                 and record["status"]
-                in {"completed", "failed", "cancelled", "interrupted", "waiting_user", "superseded"}
+                in {"completed", "failed", "cancelled", "waiting_user", "superseded"}
             )
             if terminal and not events:
                 if cursor == 0:
