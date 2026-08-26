@@ -1,3 +1,8 @@
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 import requests
@@ -121,6 +126,60 @@ def test_etf_history_uses_sina_when_eastmoney_returns_empty(monkeypatch):
         "cache": "miss",
         "fallback_reason": "etf history returned no rows",
     }
+
+
+def test_sina_etf_decoder_is_serialized_across_worker_threads(monkeypatch):
+    state_lock = threading.Lock()
+    active_decoders = 0
+    maximum_active_decoders = 0
+
+    class FakeResponse:
+        text = 'var data="encoded";'
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    class FakeMiniRacer:
+        def eval(self, _source):
+            nonlocal active_decoders, maximum_active_decoders
+            with state_lock:
+                active_decoders += 1
+                maximum_active_decoders = max(maximum_active_decoders, active_decoders)
+            time.sleep(0.03)
+
+        def call(self, _name, _encoded):
+            nonlocal active_decoders
+            with state_lock:
+                active_decoders -= 1
+            return [
+                {
+                    "date": "2025-08-18",
+                    "open": 1.0,
+                    "high": 1.1,
+                    "low": 0.9,
+                    "close": 1.05,
+                    "volume": 100,
+                }
+            ]
+
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: FakeResponse())
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "py_mini_racer",
+        SimpleNamespace(MiniRacer=FakeMiniRacer),
+    )
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        frames = list(
+            executor.map(
+                lambda ticker: provider._fetch_etf_history_sina(ticker, "20250101", "20251231"),
+                ("159934", "159937", "518880"),
+            )
+        )
+
+    assert maximum_active_decoders == 1
+    assert [len(frame) for frame in frames] == [1, 1, 1]
 
 
 def test_etf_nav_accepts_eastmoney_rows_with_fourteen_fields(monkeypatch):

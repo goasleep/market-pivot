@@ -31,6 +31,11 @@ from loguru import logger
 from config import settings
 from data.history_cache import HistorySeries, history_cache
 
+# py_mini_racer initializes process-global V8 state. Creating several runtimes
+# concurrently from asyncio worker threads can abort the entire Python process
+# instead of raising an exception, so only the decoder section is serialized.
+_SINA_ETF_DECODER_LOCK = threading.Lock()
+
 # ---------------------------------------------------------------------------
 # Circuit Breaker
 # ---------------------------------------------------------------------------
@@ -290,9 +295,10 @@ def _fetch_etf_history_sina(ticker: str, start_date: str, end_date: str) -> pd.D
     response = requests.get(url, timeout=UPSTREAM_TIMEOUT_SECONDS)
     response.raise_for_status()
     encoded = response.text.split("=", 1)[1].split(";", 1)[0].replace('"', "")
-    js_code = py_mini_racer.MiniRacer()
-    js_code.eval(hk_js_decode)
-    rows = js_code.call("d", encoded)
+    with _SINA_ETF_DECODER_LOCK:
+        js_code = py_mini_racer.MiniRacer()
+        js_code.eval(hk_js_decode)
+        rows = js_code.call("d", encoded)
     frame = pd.DataFrame(rows)
     if frame.empty:
         return frame
