@@ -11,8 +11,6 @@ from application.fund_task_compiler import compile_fund_task, uses_direct_fund_e
 from data.market_data_catalog import market_data_catalog
 from domain.fund_calculations import calculate_from_question
 from models.fund_task import FundTaskKind, InstrumentResolutionStatus
-from tools import assets
-from tools.registry import build_task_tools
 
 QUESTIONS = Path(__file__).parent / "fixtures" / "fund_agent_questions.txt"
 
@@ -61,7 +59,6 @@ def test_former_safety_questions_keep_normal_task_semantics_without_preemptive_r
         kinds.add(spec.task_kind)
         assert spec.allowed_capabilities == []
         assert uses_direct_fund_executor(spec)
-        assert build_task_tools(spec, assets.get_realtime_quote, allow_mutating_tools=False) == []
     assert FundTaskKind.EDUCATION in kinds
     assert FundTaskKind.SCENARIO_PLAN in kinds
 
@@ -116,46 +113,6 @@ def test_deterministic_fund_fee_calculations():
     )
     assert share_class is not None
     assert "C类费用较低" in share_class.result
-
-
-def test_task_tool_surface_is_allowlisted():
-    _, education = _compile(1)
-    assert build_task_tools(education, assets.get_realtime_quote, allow_mutating_tools=False) == []
-
-    instrument = compile_fund_task("分析 ETF 510300 的最新走势", tickers=("510300",), asset_type="etf")
-    assert instrument is not None
-    names = {tool.name for tool in build_task_tools(instrument, assets.get_realtime_quote, allow_mutating_tools=False)}
-    assert "get_realtime_quote" in names
-    assert "get_exchange_fund_nav_history" in names
-    assert "screen_assets" not in names
-    assert "submit_simulation_order" not in names
-
-    mutation = compile_fund_task(
-        "按这个基金方案提交模拟订单",
-        tickers=("510300",),
-        asset_type="etf",
-        mutation_requested=True,
-    )
-    assert mutation is not None
-    mutation_names = {
-        tool.name for tool in build_task_tools(mutation, assets.get_realtime_quote, allow_mutating_tools=True)
-    }
-    assert "submit_simulation_order" in mutation_names
-    assert "get_realtime_quote" not in mutation_names
-
-
-def test_etf_universe_task_does_not_expose_an_unavailable_structured_dataset_query():
-    spec = compile_fund_task("筛选近6年每年都分红的ETF", asset_type="etf")
-    assert spec is not None
-    assert spec.task_kind == FundTaskKind.UNIVERSE_RESEARCH
-    assert spec.subject.fund_domain.value == "exchange_fund"
-    assert spec.subject.asset_type == "etf"
-
-    names = {tool.name for tool in build_task_tools(spec, assets.get_realtime_quote, allow_mutating_tools=False)}
-
-    assert "search_market_data_catalog" in names
-    assert "screen_assets" in names
-    assert "query_market_data" not in names
 
 
 @pytest.mark.asyncio

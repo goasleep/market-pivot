@@ -36,7 +36,6 @@ MAX_EXECUTION_MINUTES = 30
 MAX_EXECUTION_SECONDS = MAX_EXECUTION_MINUTES * 60
 LLM_TIMEOUT_SECONDS = MAX_EXECUTION_SECONDS
 TOOL_TIMEOUT_SECONDS = MAX_EXECUTION_SECONDS
-RESEARCH_PLAN_TIMEOUT_SECONDS = MAX_EXECUTION_SECONDS
 LONG_RUNNING_TOOL_TIMEOUT_SECONDS = MAX_EXECUTION_SECONDS
 _UNFINISHED_ANSWER = re.compile(r"下一步(?:需要|要)|进一步(?:校准|确认)?需|仍需(?:查询|查找|核对)|待(?:查询|核对|确认)")
 _TOOL_OBSERVATION_LIMIT = 6000
@@ -105,8 +104,6 @@ def compact_tool_observation(result: str, *, limit: int = _TOOL_OBSERVATION_LIMI
 
 def tool_timeout_seconds(name: str) -> int:
     """Return the execution budget for a tool invocation."""
-    if name == "run_research_plan":
-        return RESEARCH_PLAN_TIMEOUT_SECONDS
     if name in {
         "run_stock_comprehensive_analysis",
         "run_backtest",
@@ -122,7 +119,6 @@ def tool_timeout_seconds(name: str) -> int:
 def tool_attempts(name: str) -> int:
     """Return retry count without duplicating expensive or mutating work."""
     if name in {
-        "run_research_plan",
         "run_stock_comprehensive_analysis",
         "run_backtest",
         "design_and_run_backtest",
@@ -246,24 +242,6 @@ def _fund_screening_acceptance(contract: dict[str, Any], candidate: str):
     return spec, validate_fund_response(spec, candidate)
 
 
-def _screened_candidate_count(tool_events: list[dict[str, Any]]) -> int | None:
-    counts: list[int] = []
-    for event in tool_events:
-        if event.get("name") != "screen_assets" or event.get("status") != "completed":
-            continue
-        try:
-            payload = json.loads(str(event.get("result") or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict) and isinstance(payload.get("count"), int):
-            counts.append(payload["count"])
-    return max(counts) if counts else None
-
-
-def _candidate_shortage_is_disclosed(candidate: str) -> bool:
-    return bool(re.search(r"(?:只有|仅有|仅|不足|没有更多|暂无更多).{0,16}(?:只|个|候选|符合|合格)", candidate))
-
-
 def _message_objects(messages: list[Any]) -> list[Any]:
     """Normalize the app's role dictionaries before checkpoint serialization."""
     normalized: list[Any] = []
@@ -374,26 +352,14 @@ async def judge_completion(state: AgentLoopState) -> dict[str, Any]:
     else:
         deterministic_acceptance = _fund_screening_acceptance(contract, candidate)
         if deterministic_acceptance is not None and not deterministic_acceptance[1].satisfied:
-            spec, acceptance = deterministic_acceptance
-            selection = spec.selection_requirements
-            screened_count = _screened_candidate_count(tool_events)
-            disclosed_shortage = bool(
-                selection is not None
-                and screened_count is not None
-                and screened_count < selection.minimum_candidates
-                and _candidate_shortage_is_disclosed(candidate)
-            )
+            _, acceptance = deterministic_acceptance
             result = CompletionResult(
                 outcome=SupervisorOutcome.PARTIAL,
                 satisfied=False,
-                terminal=budget_exhausted or disclosed_shortage,
+                terminal=budget_exhausted,
                 missing=acceptance.missing,
                 next_action="补充候选池、横向对比、首选与备选、排除原因及数据日期；候选必须达到合同要求的数量",
-                reason=(
-                    f"结构化筛选仅返回 {screened_count} 个候选，少于合同要求，答案已明确披露数据不足"
-                    if disclosed_shortage
-                    else "基金筛选答案未通过确定性交付校验"
-                ),
+                reason="基金筛选答案未通过确定性交付校验",
             )
         else:
             prompt = json.dumps(

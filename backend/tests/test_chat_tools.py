@@ -31,7 +31,7 @@ from models.schemas import AssetType, Decision, MarketContext, TradeDecision
 from tools import artifacts as artifact_tools
 from tools import assets, data, research, simulation
 from tools.policies import tool_requires_confirmation
-from tools.registry import build_chat_tools
+from tools.registry import build_artifact_tools, build_named_tools
 from widgets.a2ui import render_activity, render_tool_result
 
 
@@ -95,7 +95,7 @@ def test_analysis_tool_requires_and_validates_asset_type():
 
 
 def test_chat_agent_exposes_only_provider_agnostic_web_search():
-    names = {tool.name for tool in build_chat_tools(assets.get_realtime_quote)}
+    names = {tool.name for tool in build_named_tools({"search_web"}, assets.get_realtime_quote)}
     assert "search_web" in names
     assert "search_web_anysearch" not in names
     assert "search_web_ddgs" not in names
@@ -103,26 +103,15 @@ def test_chat_agent_exposes_only_provider_agnostic_web_search():
 
 
 def test_chat_agent_hides_mutating_tools_without_explicit_execution_request():
-    readonly_names = {
-        tool.name
-        for tool in build_chat_tools(assets.get_realtime_quote, allow_mutating_tools=False)
-    }
-    assert "submit_simulation_order" not in readonly_names
-    assert "cancel_simulation_order" not in readonly_names
-    assert "create_simulation_account" not in readonly_names
-    assert "deploy_backtest_experiment" not in readonly_names
-    assert "set_strategy_deployment_status" not in readonly_names
-    assert "list_simulation_accounts" in readonly_names
-    assert "list_strategy_deployments" in readonly_names
+    requested = {"submit_simulation_order", "create_simulation_account"}
+    with pytest.raises(ValueError, match="无法构建"):
+        build_named_tools(requested, assets.get_realtime_quote, allow_mutating_tools=False)
 
     execution_names = {
         tool.name
-        for tool in build_chat_tools(assets.get_realtime_quote, allow_mutating_tools=True)
+        for tool in build_named_tools(requested, assets.get_realtime_quote, allow_mutating_tools=True)
     }
-    assert "submit_simulation_order" in execution_names
-    assert "create_simulation_account" in execution_names
-    assert "deploy_backtest_experiment" in execution_names
-    assert "set_strategy_deployment_status" in execution_names
+    assert execution_names == requested
 
 
 def test_deployment_chat_tools_require_explicit_language_and_confirmation():
@@ -218,7 +207,14 @@ def test_chat_agent_exposes_artifact_tool_and_persists_multiple_files(monkeypatc
     )
     monkeypatch.setattr(artifact_tools, "artifact_service", service)
 
-    names = {tool.name for tool in build_chat_tools(assets.get_realtime_quote)}
+    names = {
+        tool.name
+        for tool in build_named_tools(
+            {"save_artifacts"},
+            assets.get_realtime_quote,
+            artifact_tools=build_artifact_tools(),
+        )
+    }
     assert "save_artifacts" in names
 
     result = asyncio.run(
@@ -254,8 +250,7 @@ def test_artifact_execution_key_reuses_stable_sequence_ids(monkeypatch, tmp_path
 
 
 def test_chat_agent_exposes_atomic_research_tools():
-    names = {tool.name for tool in build_chat_tools(assets.get_realtime_quote)}
-    assert {
+    requested = {
         "fetch_web_content",
         "get_exchange_fund_nav_history",
         "get_fundamentals",
@@ -264,7 +259,16 @@ def test_chat_agent_exposes_atomic_research_tools():
         "build_trade_plan",
         "run_backtest",
         "save_artifacts",
-    }.issubset(names)
+    }
+    names = {
+        tool.name
+        for tool in build_named_tools(
+            requested,
+            assets.get_realtime_quote,
+            artifact_tools=build_artifact_tools(),
+        )
+    }
+    assert names == requested
 
 
 def test_risk_and_trade_plan_tools_return_traceable_calculations():

@@ -18,7 +18,6 @@ class ToolCatalog:
 
     def __init__(self) -> None:
         self._descriptors: dict[str, ToolDescriptor] = {}
-        self._tools: dict[str, StructuredTool] = {}
 
     def register_descriptor(self, descriptor: ToolDescriptor) -> None:
         existing = self._descriptors.get(descriptor.name)
@@ -29,17 +28,10 @@ class ToolCatalog:
             raise ValueError(f"工具 {descriptor.name} 有副作用，不能声明为 read_only")
         self._descriptors[descriptor.name] = descriptor
 
-    def register(self, tool: StructuredTool, descriptor: ToolDescriptor) -> None:
-        if tool.name != descriptor.name:
-            raise ValueError(f"工具名称不一致: {tool.name} != {descriptor.name}")
-        self.register_descriptor(descriptor)
-        self._tools[tool.name] = tool
-
     def bind(self, tools: Iterable[StructuredTool]) -> "ToolCatalog":
         for tool in tools:
             if tool.name not in self._descriptors:
                 raise ValueError(f"请求绑定了未登记工具: {tool.name}")
-            self._tools[tool.name] = tool
         return self
 
     def has_descriptor(self, name: str) -> bool:
@@ -50,24 +42,6 @@ class ToolCatalog:
             return self._descriptors[name]
         except KeyError as exc:
             raise ValueError(f"未知工具: {name}") from exc
-
-    def tool(self, name: str) -> StructuredTool:
-        try:
-            return self._tools[name]
-        except KeyError as exc:
-            raise ValueError(f"工具尚未绑定到当前请求: {name}") from exc
-
-    def tools_for_skills(self, skills: Iterable[SkillManifest]) -> list[StructuredTool]:
-        names: list[str] = []
-        for skill in skills:
-            for name in skill.tools:
-                if name not in names:
-                    names.append(name)
-        return [self.tool(name) for name in names]
-
-    def public_status(self) -> dict[str, int]:
-        return {"descriptors": len(self._descriptors), "bound_tools": len(self._tools)}
-
 
 class SkillRegistry:
     def __init__(

@@ -111,7 +111,6 @@ DEFAULT_TOOL_DESCRIPTORS = (
         data_types=("analysis",),
         cost="high",
     ),
-    _descriptor("run_research_plan", "research.plan", data_types=("research",), cost="high"),
     _descriptor(
         "discover_exchange_fund_candidates",
         "exchange_fund.screen_compare",

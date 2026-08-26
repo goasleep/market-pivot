@@ -4,7 +4,7 @@ import pytest
 
 from methodology.library import MethodologyLibrary
 from tools import assets, methodology
-from tools.registry import build_chat_tools
+from tools.registry import build_named_tools
 
 
 def test_methodology_library_loads_seed_documents():
@@ -54,6 +54,6 @@ def test_methodology_tool_returns_citations_and_usage_note():
 
 
 def test_chat_tools_register_methodology_search():
-    names = {tool.name for tool in build_chat_tools(assets.get_realtime_quote)}
+    names = {tool.name for tool in build_named_tools({"search_methodology"}, assets.get_realtime_quote)}
 
     assert "search_methodology" in names

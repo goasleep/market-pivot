@@ -32,8 +32,7 @@ def _write_skill(root: Path, body: str, instructions: str = "使用结构化数�
 
 def test_skill_registry_loads_instructions_and_dependency_closure(tmp_path):
     catalog = ToolCatalog()
-    catalog.register(
-        read_value,
+    catalog.register_descriptor(
         ToolDescriptor(
             name="read_value",
             capability_id="data.read",
@@ -41,6 +40,7 @@ def test_skill_registry_loads_instructions_and_dependency_closure(tmp_path):
             data_types=("market_data",),
         ),
     )
+    catalog.bind([read_value])
     _write_skill(
         tmp_path,
         """
@@ -62,7 +62,6 @@ validators: [evidence.required]
     skill = registry.get("data.read")
     assert skill.instructions == "使用结构化数据。"
     assert registry.resolve_capabilities(("data.read",), asset_type="etf") == (skill,)
-    assert catalog.tools_for_skills((skill,)) == [read_value]
 
 
 def test_skill_registry_rejects_unknown_tool_and_validator(tmp_path):
@@ -85,8 +84,7 @@ validators: [missing.validator]
 
 def test_skill_registry_rejects_unacknowledged_side_effect_tool(tmp_path):
     catalog = ToolCatalog()
-    catalog.register(
-        submit_simulation_order,
+    catalog.register_descriptor(
         ToolDescriptor(
             name="submit_simulation_order",
             capability_id="simulation.write",

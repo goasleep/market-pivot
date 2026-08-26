@@ -172,37 +172,3 @@ async def test_deterministic_screening_acceptance_overrides_a_false_positive_llm
     assert completion["completion_result"]["terminal"] is False
     assert "minimum_candidates" in completion["completion_result"]["missing"]
     assert completion["final_response"] == ""
-
-
-@pytest.mark.asyncio
-async def test_disclosed_candidate_shortage_finishes_as_terminal_partial_without_looping(monkeypatch):
-    spec = _screening_spec("筛选适合短线交易的半导体ETF")
-    monkeypatch.setattr(agent_loop_module, "get_llm_service", lambda: AlwaysSatisfiedJudge())
-
-    completion = await judge_completion(
-        {
-            "messages": [],
-            "candidate_response": (
-                "按当前筛选条件只有2只符合：588170、159516。首选588170，备选159516；"
-                "两者已做成交活跃度对比。数据截至2026-08-25，暂无更多合格候选。"
-            ),
-            "task_contract": {
-                "requires_tools": True,
-                "source_task_spec": spec.model_dump(mode="json"),
-            },
-            "tool_events": [
-                {
-                    "name": "screen_assets",
-                    "status": "completed",
-                    "result": json.dumps({"count": 2, "results": [{}, {}]}),
-                }
-            ],
-            "step": 2,
-            "max_steps": 4,
-        }
-    )
-
-    assert completion["completion_result"]["outcome"] == "partial"
-    assert completion["completion_result"]["satisfied"] is False
-    assert completion["completion_result"]["terminal"] is True
-    assert completion["final_response"].startswith("按当前筛选条件只有2只符合")
