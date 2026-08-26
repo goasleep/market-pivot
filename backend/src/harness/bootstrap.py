@@ -85,7 +85,7 @@ DEFAULT_TOOL_DESCRIPTORS = (
     ),
     _descriptor(
         "design_and_run_sandbox_strategy",
-        "backtest.execute",
+        "strategy.sandbox_research",
         asset_types=("stock", "etf", "lof"),
         data_types=("backtest",),
         cost="high",

@@ -1,0 +1,15 @@
+id: strategy.sandbox_research
+version: 1.0.0
+title: 代码策略沙箱研究
+description: 生成受限目标仓位函数，完成沙箱验证，并交由可信交易引擎执行历史回放。
+domain: shared
+asset_types: [stock, etf, lof]
+intents: [backtest]
+capabilities: [strategy.sandbox_research]
+requires: [market.history]
+tools: [design_and_run_sandbox_strategy]
+evidence_types: [backtest, sandbox_validation, source_code]
+output_fields: [source_code, sandbox_validation, deterministic_replay, backtest]
+validators: [evidence.required]
+tags: [Python, 代码策略, 沙箱, 回测]
+cost: high
