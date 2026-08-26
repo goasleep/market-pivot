@@ -26,8 +26,8 @@ From the repository root:
 pnpm install                         # Install JavaScript dependencies
 cd backend && uv sync              # Install Python dependencies
 pnpm dev                             # Run frontend and backend together
-pnpm dev:frontend                    # Run Vite at port 5173
-pnpm dev:backend                     # Run FastAPI with reload at port 8000
+pnpm dev:frontend                    # Run Vite at port 15173
+pnpm dev:backend                     # Run FastAPI with reload at port 18000
 pnpm build:frontend                  # Type-check and build the frontend
 pnpm lint                            # Run frontend ESLint
 pnpm format                          # Format frontend TypeScript/TSX

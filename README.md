@@ -2,7 +2,7 @@
 
 A 股 AI Agent 模拟交易系统 — 基于多智能体协作的回测 + 纸上交易框架。
 
-当前产品定位是面向短中期基金交易研究的辅助工具。系统使用股票或 ETF 的底层资产数据进行研究和模拟，不执行真实交易，也不把股票分析直接等同于基金专项分析。
+当前产品定位是面向短中期基金交易研究的辅助工具。统一支持股票、场内 ETF、场内 LOF 和场外开放式公募基金；不执行真实交易，也不允许股票、场内基金和场外基金的结论或数据口径互相替代。
 
 ## 技术栈
 
@@ -150,13 +150,15 @@ make dev
 pnpm dev
 
 # 或分别启动
-pnpm dev:frontend   # 前端 -> http://localhost:5173
-pnpm dev:backend    # 后端 -> http://localhost:8000
+pnpm dev:frontend   # 前端 -> http://localhost:15173
+pnpm dev:backend    # 后端 -> http://localhost:18000
 ```
 
 ### Agent 研究与交易
 
-Chat 页面支持股票、ETF 和 LOF 的行情查询、Agent Analysis 和 Backtest。用户可以直接在对话中描述标的、持有周期、风险约束或回测目标，Agent 会在对话里展示结构化分析、回测指标、资金曲线和研究报告。当前股票会接入基本面和新闻分析，场内基金主要使用实时/历史行情和技术分析。
+Chat 页面通过 Financial Harness 支持四类产品：`stock`、`etf`、`lof` 和 `open_fund`。股票使用独立股票研究结论；ETF/LOF 使用场内价格、流动性、跟踪和折溢价证据；场外基金使用产品核验、净值、费率、持仓、申赎状态和同类筛选证据。QDII、FOF 首期只保证识别并诚实披露能力缺口。
+
+`fund` 只表示“基金产品家族”，不是可路由的 `asset_type`。场内基金能力统一使用 `exchange_fund.*`，场外开放式基金能力使用 `open_fund.*`。六位代码前缀只能产生候选，正式结论必须由对应 Provider 核验。
 
 对话会保存在当前浏览器本机，并支持从“历史”恢复；切换“新对话”可以开始新的会话。示例：
 
@@ -166,9 +168,11 @@ Chat 页面支持股票、ETF 和 LOF 的行情查询、Agent Analysis 和 Backt
 查看它最近的新闻
 分析 ETF 510300
 对比 ETF 510300 159915
+筛选债券基金，比较回撤、净值稳定性、费率和申赎状态
+比较两只货币基金的万份收益与七日年化稳定性
 ```
 
-场内基金使用 AkShare 的 `fund_etf_*` 或 `fund_lof_*` 接口；股票仍使用股票行情接口。默认分析和订单均为研究/模拟用途；实盘需额外配置并通过独立安全门禁。
+场内基金由 `ExchangeFundDataProvider` 提供交易价格、成交、NAV/IOPV 和流动性；场外基金由 `OpenFundDataProvider` 提供净值、费率、规模、持仓与申赎状态。场外基金没有实时价格、盘口、价差、换手率、IOPV 或折溢价，这些字段返回“不适用”而不是零。货币基金使用万份收益和七日年化。默认分析和订单均为研究/模拟用途；首期不支持场外基金模拟申购赎回。
 
 研究报告接口包括：
 
@@ -229,8 +233,8 @@ make logs
 make down
 ```
 
-Docker 启动后访问 http://localhost:5173，后端健康检查地址为
-http://localhost:8000/api/health。`DATABASE_URL` 为空时，会话历史、任务状态和其他持久化数据
+Docker 启动后访问 http://localhost:15173，后端健康检查地址为
+http://localhost:18000/api/health。`DATABASE_URL` 为空时，会话历史、任务状态和其他持久化数据
 使用本地 SQLite，适合单节点部署；设置 `DATABASE_URL` 后，聊天数据、任务协调、事件日志和
 账户、研究产物索引、缓存、配置和 Agent checkpoint 统一使用 PostgreSQL，例如：
 `postgres://postgres:password@localhost:5432/a_share_agent`。可通过 `FRONTEND_PORT` 和
