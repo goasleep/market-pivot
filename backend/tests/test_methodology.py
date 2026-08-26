@@ -2,11 +2,7 @@ import json
 
 import pytest
 
-import agents.stock_agent as stock_agent_module
-from agents.stock_agent import AssetAgent as StockAgent
-from agents.stock_agent import AssetAgentRequest, AssetIntent
 from methodology.library import MethodologyLibrary
-from models.supervisor import ExecutionMode, TaskRoutingDecision
 from tools import assets, methodology
 from tools.registry import build_chat_tools
 
@@ -61,55 +57,3 @@ def test_chat_tools_register_methodology_search():
     names = {tool.name for tool in build_chat_tools(assets.get_realtime_quote)}
 
     assert "search_methodology" in names
-
-
-def test_stock_agent_prompt_and_tool_surface_include_methodology(monkeypatch):
-    captured: dict[str, object] = {}
-
-    async def fake_stream(messages, tools, *, max_steps, config, **kwargs):
-        captured["messages"] = messages
-        captured["tool_names"] = {tool.name for tool in tools}
-        captured["max_steps"] = max_steps
-        captured["config"] = config
-        captured["task_contract"] = kwargs["task_contract"]
-        yield {
-            "judge": {
-                "final_response": "已完成方法论检索。",
-                "completion_result": {
-                    "outcome": "satisfied",
-                    "satisfied": True,
-                    "terminal": True,
-                },
-            }
-        }
-
-    async def route_to_research(*args, **kwargs):
-        del args, kwargs
-        return TaskRoutingDecision(
-            mode=ExecutionMode.EVIDENCE_RESEARCH,
-            requires_tools=True,
-            allow_research_plan=True,
-            deliverables=["解释方法论"],
-            confidence=1.0,
-        )
-
-    monkeypatch.setattr(stock_agent_module, "stream_agent_loop", fake_stream)
-    monkeypatch.setattr(stock_agent_module, "classify_task_execution", route_to_research)
-    request = AssetAgentRequest(
-        message="请解释趋势跟踪的投资理念",
-        history=[],
-        intent=AssetIntent.HELP,
-        tickers=(),
-        intent_confirmed=True,
-    )
-
-    events = __import__("asyncio").run(_collect_events(StockAgent().chat(request)))
-
-    system_prompt = captured["messages"][0]["content"]
-    assert "search_methodology" in system_prompt
-    assert "search_methodology" in captured["tool_names"]
-    assert events[-1] == {"type": "text", "text": "已完成方法论检索。"}
-
-
-async def _collect_events(stream):
-    return [event async for event in stream]

@@ -7,10 +7,10 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
 import graph.agent_loop as agent_loop_module
+from agents.asset_requests import AssetRequestResolver
 from agents.report_compaction import compact_generated_report
 from agents.sentiment_analyst import analyze as analyze_sentiment
-from agents.stock_agent import AssetAgent as StockAgent
-from agents.stock_agent import _select_tools_for_routing
+from agents.stock_analysis import StockAnalysisRuntime
 from application import strategy_comparison
 from application.research import research_service
 from artifacts.service import ArtifactService
@@ -28,7 +28,6 @@ from graph.agent_loop import (
 )
 from llm.context import ContextWindowExceededError
 from models.schemas import AssetType, Decision, MarketContext, TradeDecision
-from models.supervisor import ExecutionMode, TaskRoutingDecision
 from tools import artifacts as artifact_tools
 from tools import assets, data, research, simulation
 from tools.policies import tool_requires_confirmation
@@ -85,7 +84,7 @@ def test_simulation_order_execution_key_is_idempotent(monkeypatch, tmp_path):
 
 
 def test_analysis_tool_requires_and_validates_asset_type():
-    tool = StockAgent()._analysis_tool()
+    tool = StockAnalysisRuntime().build_tool()
     schema = tool.args_schema.model_json_schema()
 
     assert "asset_type" in schema["required"]
@@ -127,7 +126,7 @@ def test_chat_agent_hides_mutating_tools_without_explicit_execution_request():
 
 
 def test_deployment_chat_tools_require_explicit_language_and_confirmation():
-    agent = StockAgent()
+    agent = AssetRequestResolver()
     assert agent._explicitly_requests_mutation("把这个回测部署到模拟盘") is True
     assert agent._explicitly_requests_mutation("暂停部署 deploy-123") is True
     assert agent._explicitly_requests_mutation("查看有哪些模拟盘") is False
@@ -631,38 +630,6 @@ def test_strategy_comparison_returns_core_metrics_without_full_curves_or_trades(
     assert "不要调用 read_artifact" in compact["supervisor_summary"]["instruction"]
 
 
-def test_backtest_routing_hides_read_artifact_from_supervisor():
-    def placeholder():
-        return "ok"
-
-    read_tool = StructuredTool.from_function(
-        func=placeholder,
-        name="read_artifact",
-        description="Read artifact",
-    )
-    backtest_tool = StructuredTool.from_function(
-        func=placeholder,
-        name="compare_strategy_backtests",
-        description="Run comparison",
-    )
-    tools = [read_tool, backtest_tool]
-
-    for mode in (ExecutionMode.BACKTEST_EXECUTION, ExecutionMode.MIXED_WORKFLOW):
-        selected = _select_tools_for_routing(
-            tools,
-            [read_tool],
-            TaskRoutingDecision(mode=mode, requires_tools=True),
-        )
-        assert [tool.name for tool in selected] == ["compare_strategy_backtests"]
-
-    research_selected = _select_tools_for_routing(
-        tools,
-        [read_tool],
-        TaskRoutingDecision(mode=ExecutionMode.EVIDENCE_RESEARCH, requires_tools=True),
-    )
-    assert [tool.name for tool in research_selected] == ["read_artifact", "compare_strategy_backtests"]
-
-
 def test_strategy_comparison_without_history_returns_completed_observation(monkeypatch):
     async def no_history(*_args, **_kwargs):
         raise BacktestDataError("159999 所有历史行情源均不可用")
@@ -906,7 +873,7 @@ def test_sentiment_prompt_contains_fetched_content(monkeypatch):
 
 
 def test_analysis_tool_passes_asset_type_to_workflow(monkeypatch):
-    agent = StockAgent()
+    agent = StockAnalysisRuntime()
     captured = {}
 
     async def fake_analyze(request, *, config=None):
@@ -925,14 +892,14 @@ def test_analysis_tool_passes_asset_type_to_workflow(monkeypatch):
 
     monkeypatch.setattr(agent, "analyze", fake_analyze)
     monkeypatch.setattr(research_service, "create_artifacts", no_artifacts)
-    result = asyncio.run(agent._analysis_tool().ainvoke({"ticker": "510300", "asset_type": "etf"}))
+    result = asyncio.run(agent.build_tool().ainvoke({"ticker": "510300", "asset_type": "etf"}))
 
     assert json.loads(result)["asset_type"] == "etf"
     assert captured == {"ticker": "510300", "asset_type": AssetType.ETF}
 
 
 def test_analysis_tool_returns_decision_when_report_generation_fails(monkeypatch):
-    agent = StockAgent()
+    agent = StockAnalysisRuntime()
 
     async def fake_analyze(request, *, config=None):
         return {}, {
@@ -950,7 +917,7 @@ def test_analysis_tool_returns_decision_when_report_generation_fails(monkeypatch
     monkeypatch.setattr(agent, "analyze", fake_analyze)
     monkeypatch.setattr(research_service, "create_artifacts", failed_artifacts)
 
-    result = asyncio.run(agent._analysis_tool().ainvoke({"ticker": "510300", "asset_type": "etf"}))
+    result = asyncio.run(agent.build_tool().ainvoke({"ticker": "510300", "asset_type": "etf"}))
     payload = json.loads(result)
 
     assert payload["asset_type"] == "etf"

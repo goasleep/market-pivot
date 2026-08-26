@@ -114,11 +114,11 @@ def test_multiple_explicit_product_types_require_scoping_and_api_override_wins()
 
 
 def test_only_asset_agent_is_public_and_legacy_alias_modules_are_removed():
-    import agents.stock_agent as stock_module
+    from agents.asset_agent import AssetAgent
     from agents.financial_harness_agent import FinancialHarnessAgent
 
     assert not Path("src/agents/fund_agent.py").exists()
-    assert "StockAgent" not in vars(stock_module)
+    assert AssetAgent.__bases__ == (FinancialHarnessAgent,)
     assert FinancialHarnessAgent.__bases__ == (AssetRequestResolver,)
 
 

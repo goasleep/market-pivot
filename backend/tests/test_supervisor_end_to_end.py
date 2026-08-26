@@ -11,18 +11,12 @@ from langchain_core.tools import StructuredTool
 from agents import financial_harness_agent as harness_agent_module
 from application.chat_service import ChatStore, ChatTaskInput, ChatTaskManager
 from graph import agent_loop as agent_loop_module
-from graph.agent_loop import tool_attempts, tool_timeout_seconds
 
 COMPLEX_QUESTION = (
     "我计划每月投入3000元持续六个月，请在场内沪深300ETF和场外沪深300ETF联接C之间比较。"
     "自动选择代表产品，查询可获得的最新费率、成交活跃度、价差、基金规模、跟踪情况和申赎规则，"
     "比较费用、资金利用率、操作便利性和适用条件；缺失的公开数据请继续查找，无法获得时说明原因。"
 )
-
-
-def test_research_plan_tool_has_thirty_minute_single_attempt_budget():
-    assert tool_timeout_seconds("run_research_plan") == 1800
-    assert tool_attempts("run_research_plan") == 1
 
 
 class FakeSupervisorModel:

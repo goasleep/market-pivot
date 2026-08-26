@@ -3,14 +3,13 @@ from pathlib import Path
 import pytest
 
 import application.fund_response as fund_response_module
-from agents.stock_agent import AssetAgent as StockAgent
+from agents.asset_requests import AssetRequestResolver
 from application.financial_task_planner import compile_financial_task_spec
 from application.fund_instruments import resolve_fund_instruments
 from application.fund_response import execute_direct_fund_task
 from application.fund_task_compiler import compile_fund_task, uses_direct_fund_executor
 from data.market_data_catalog import market_data_catalog
 from domain.fund_calculations import calculate_from_question
-from graph.research_planning import normalize_steps
 from models.fund_task import FundTaskKind, InstrumentResolutionStatus
 from tools import assets
 from tools.registry import build_task_tools
@@ -20,7 +19,7 @@ QUESTIONS = Path(__file__).parent / "fixtures" / "fund_agent_questions.txt"
 
 def _compile(index: int):
     question = QUESTIONS.read_text().splitlines()[index - 1]
-    request = StockAgent().prepare(question)
+    request = AssetRequestResolver().prepare(question)
     spec = compile_fund_task(
         question,
         tickers=request.tickers,
@@ -117,26 +116,6 @@ def test_deterministic_fund_fee_calculations():
     )
     assert share_class is not None
     assert "C类费用较低" in share_class.result
-
-
-def test_planner_normalizes_common_llm_schema_drift():
-    steps = normalize_steps(
-        {
-            "steps": [
-                {
-                    "id": "risk",
-                    "kind": "risk",
-                    "title": "风险",
-                    "success_criteria": "形成风险结论",
-                    "max_attempts": 3,
-                }
-            ]
-        },
-        {"intent": "quote", "asset_type": "stock"},
-        "quick",
-    )
-    assert steps[0]["success_criteria"] == ["形成风险结论"]
-    assert steps[0]["max_attempts"] == 2
 
 
 def test_task_tool_surface_is_allowlisted():

@@ -1,9 +1,9 @@
-from agents.stock_agent import AssetAgent as StockAgent
+from agents.asset_requests import AssetRequestResolver
 from models.schemas import AssetType
 
 
 def test_stock_agent_routes_fund_and_follow_up_context():
-    agent = StockAgent()
+    agent = AssetRequestResolver()
 
     fund_request = agent.resolve("分析 ETF 510300")
     assert fund_request.asset_type == AssetType.ETF
@@ -19,7 +19,7 @@ def test_stock_agent_routes_fund_and_follow_up_context():
 
 
 def test_request_resolver_does_not_verify_product_type_from_ticker_prefix():
-    agent = StockAgent()
+    agent = AssetRequestResolver()
 
     assert agent.prepare("回测 510300").asset_type == AssetType.STOCK
     assert agent.prepare("分析 159915").asset_type == AssetType.STOCK
@@ -28,7 +28,7 @@ def test_request_resolver_does_not_verify_product_type_from_ticker_prefix():
 
 
 def test_backtest_takes_precedence_over_comparison_wording():
-    agent = StockAgent()
+    agent = AssetRequestResolver()
     request = agent.prepare("给 510300 执行几个策略回测，并对比盈利情况")
 
     resolved, interaction = agent.resolve_intent(request)
@@ -38,13 +38,13 @@ def test_backtest_takes_precedence_over_comparison_wording():
 
 
 def test_stock_agent_routes_lof():
-    request = StockAgent().resolve("查看 LOF 166009 历史走势")
+    request = AssetRequestResolver().resolve("查看 LOF 166009 历史走势")
     assert request.asset_type == AssetType.LOF
     assert request.intent.value == "history"
 
 
 def test_stock_agent_uses_coarse_research_gate_and_gates_mutations():
-    agent = StockAgent()
+    agent = AssetRequestResolver()
 
     request = agent.prepare("510300")
     resolved, interaction = agent.resolve_intent(request)

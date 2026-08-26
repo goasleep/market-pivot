@@ -16,7 +16,6 @@ from data.history_cache import get_history_cache_status
 from data.tortoise_db import close_database, init_database
 from graph.agent_loop import configure_agent_loop
 from graph.checkpointing import checkpoint_manager
-from graph.research_plan import configure_research_plan_graph
 from graph.workflow import configure_workflow
 from harness.graph import configure_harness_graph
 from harness.runtime import harness_status, initialize_harness_registry
@@ -31,7 +30,6 @@ async def lifespan(_app: FastAPI):
     checkpointer = await checkpoint_manager.start()
     configure_agent_loop(checkpointer)
     configure_harness_graph(checkpointer)
-    configure_research_plan_graph(checkpointer)
     configure_workflow(checkpointer)
     await checkpoint_manager.prune_stale_threads()
     await chat_task_manager.start_worker()
@@ -43,7 +41,6 @@ async def lifespan(_app: FastAPI):
         await chat_task_manager.stop_worker()
         configure_agent_loop(None)
         configure_harness_graph(None)
-        configure_research_plan_graph(None)
         configure_workflow(None)
         await checkpoint_manager.stop()
         await chat_store.close()
