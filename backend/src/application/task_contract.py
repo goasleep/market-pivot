@@ -26,6 +26,21 @@ _SANDBOX_NON_EXECUTION = re.compile(
     r"(?:不(?:要|用|必|要求).{0,12}(?:执行|运行|回测)|只(?:需|要|想)?(?:解释|审查|评审|检查|讨论))",
     re.IGNORECASE,
 )
+_MARKET_DATASET_SCOPE = re.compile(
+    r"(?:全市场|(?:全部|所有)\s*(?:a股|股票)|a股(?:中|市场)|股票池)",
+    re.IGNORECASE,
+)
+_MARKET_DATASET_OPERATION = re.compile(r"(?:筛选|选股|找出|排名|排行|排序|聚合|统计)", re.IGNORECASE)
+_MARKET_DATASET_FINANCIAL = re.compile(
+    r"(?:分红|股息|财务|盈利|营收|净利润|现金流|roe|负债)",
+    re.IGNORECASE,
+)
+_MARKET_DATASET_MULTI_PERIOD = re.compile(
+    r"(?:连续\s*\d+\s*年|跨年度|多年|近\s*\d+\s*年)",
+    re.IGNORECASE,
+)
+_STRATEGY_CATALOG_CONTEXT = re.compile(r"(?:系统|平台|内置|当前|目前|可用)", re.IGNORECASE)
+_STRATEGY_CATALOG_REQUEST = re.compile(r"(?:支持哪些|有哪些|可用策略|策略清单|策略列表|已登记)", re.IGNORECASE)
 _OUTPUT_LABELS = {
     "candidate_pool": "候选基金池",
     "comparison": "候选对比",
@@ -47,6 +62,26 @@ def requests_sandbox_execution(message: str) -> bool:
     ):
         return False
     return any(pattern.search(normalized) for pattern in _SANDBOX_EXECUTION_PATTERNS)
+
+
+def requests_market_dataset(message: str, *, asset_type: str = "stock") -> bool:
+    """Recognize structured whole-market or multi-period stock research."""
+    normalized = (message or "").strip()
+    if asset_type != "stock" or not normalized or not _MARKET_DATASET_FINANCIAL.search(normalized):
+        return False
+    scoped_operation = _MARKET_DATASET_SCOPE.search(normalized) and _MARKET_DATASET_OPERATION.search(normalized)
+    return bool(scoped_operation or _MARKET_DATASET_MULTI_PERIOD.search(normalized))
+
+
+def requests_strategy_catalog(message: str) -> bool:
+    """Recognize requests for the system's configured executable strategies."""
+    normalized = (message or "").strip()
+    return bool(
+        normalized
+        and "策略" in normalized
+        and _STRATEGY_CATALOG_CONTEXT.search(normalized)
+        and _STRATEGY_CATALOG_REQUEST.search(normalized)
+    )
 
 
 async def classify_task_execution(
@@ -109,6 +144,15 @@ async def classify_task_execution(
                     "requires_tools": True,
                     "allow_research_plan": True,
                     "reason": "基金候选筛选需要全市场结构化数据",
+                }
+            )
+        if requests_market_dataset(message, asset_type=asset_type) or requests_strategy_catalog(message):
+            decision = decision.model_copy(
+                update={
+                    "mode": ExecutionMode.EVIDENCE_RESEARCH,
+                    "requires_tools": True,
+                    "allow_research_plan": False,
+                    "reason": "请求依赖系统当前登记的结构化数据或策略配置",
                 }
             )
         if requests_sandbox_execution(message) and (

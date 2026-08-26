@@ -1,0 +1,12 @@
+id: strategy.list
+version: 1.0.0
+title: 系统策略清单
+description: 列出系统当前配置并可用于研究或回测的交易策略。
+domain: shared
+asset_types: [any]
+intents: [strategy, help]
+capabilities: [strategy.list]
+tools: [list_trading_strategies]
+evidence_types: [strategy_configuration]
+output_fields: [strategies, provenance, limitations]
+tags: [策略, 配置, 能力清单]

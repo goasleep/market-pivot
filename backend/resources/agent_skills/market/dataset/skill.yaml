@@ -1,0 +1,14 @@
+id: market.dataset
+version: 1.0.0
+title: 结构化市场数据查询
+description: 解析并查询全市场筛选、排序、聚合或跨期财务研究所需的结构化 A 股数据集。
+domain: shared
+asset_types: [stock]
+intents: [screen, rank, aggregate, compare, analyze]
+capabilities: [market.dataset]
+tools: [search_market_data_catalog, query_market_data]
+evidence_types: [dataset_catalog, market_dataset]
+output_fields: [dataset_id, coverage, acceptance, preview, provenance, limitations]
+validators: [evidence.required]
+tags: [市场数据, 全市场筛选, 聚合, 财务]
+cost: high

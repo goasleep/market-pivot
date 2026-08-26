@@ -208,3 +208,31 @@ async def test_fund_universe_screening_cannot_be_downgraded_to_a_tool_free_respo
     assert contract.requires_tools is True
     assert contract.source_task_spec is not None
     assert contract.source_task_spec["task_kind"] == FundTaskKind.UNIVERSE_RESEARCH.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "asset_type"),
+    [
+        ("筛选连续5年都有现金分红的全部A股，并按累计分红排序", "stock"),
+        ("系统目前支持哪些交易策略？", "stock"),
+    ],
+)
+async def test_p0_skill_requests_cannot_be_downgraded_to_tool_free_responses(monkeypatch, message, asset_type):
+    service = FakeRoutingService(
+        {
+            "mode": "direct_response",
+            "requires_tools": False,
+            "allow_research_plan": False,
+            "deliverables": ["直接回答"],
+            "reason": "误判为静态知识",
+            "confidence": 0.7,
+        }
+    )
+    monkeypatch.setattr(task_contract_module, "get_llm_service", lambda: service)
+
+    decision = await classify_task_execution(message, asset_type=asset_type)
+
+    assert decision.mode == ExecutionMode.EVIDENCE_RESEARCH
+    assert decision.requires_tools is True
+    assert decision.allow_research_plan is False

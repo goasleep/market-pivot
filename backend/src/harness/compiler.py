@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from agents.asset_requests import AssetAgentRequest, AssetIntent, RequestMode
-from application.task_contract import compile_task_contract, requests_sandbox_execution
+from application.task_contract import (
+    compile_task_contract,
+    requests_market_dataset,
+    requests_sandbox_execution,
+    requests_strategy_catalog,
+)
 from harness.models import HarnessTaskContract
 from models.fund_task import FundTaskKind
 from models.supervisor import ExecutionMode as LegacyExecutionMode
@@ -82,11 +87,20 @@ class HarnessTaskCompiler:
         pricing_basis = str(task_spec.get("subject", {}).get("pricing_basis") or "market_price")
         required = list(_COMMON_FUND_TASK_CAPABILITIES.get(task_kind, ())) if needs_tools else []
         sandbox_research = _requests_sandbox_research(request, needs_tools=needs_tools)
+        market_dataset_research = needs_tools and requests_market_dataset(
+            request.message,
+            asset_type=request.asset_type.value,
+        )
+        strategy_catalog_research = needs_tools and requests_strategy_catalog(request.message)
         if sandbox_research:
             required = [
                 "market.history",
                 "strategy.sandbox_research",
             ]
+        elif market_dataset_research:
+            required = ["market.dataset"]
+        elif strategy_catalog_research:
+            required = ["strategy.list"]
         elif needs_tools and request.intent == AssetIntent.BACKTEST and request.asset_type.value != "open_fund":
             required = ["market.history", "backtest.execute"]
         elif needs_tools and task_kind == FundTaskKind.INSTRUMENT_RESEARCH:
@@ -102,7 +116,12 @@ class HarnessTaskCompiler:
         if needs_tools:
             if not required:
                 required.extend(_INTENT_CAPABILITIES.get(request.intent, ()))
-            if request.intent == AssetIntent.ANALYZE and task_kind != FundTaskKind.UNIVERSE_RESEARCH:
+            if (
+                request.intent == AssetIntent.ANALYZE
+                and task_kind != FundTaskKind.UNIVERSE_RESEARCH
+                and not market_dataset_research
+                and not strategy_catalog_research
+            ):
                 if request.asset_type.value in {"etf", "lof"}:
                     required = ["exchange_fund.comprehensive_analysis"]
                 elif request.asset_type.value == "open_fund":

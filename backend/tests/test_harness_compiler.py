@@ -40,6 +40,45 @@ def test_stock_analysis_can_use_comprehensive_skill():
     assert "stock.comprehensive_analysis" in contract.required_capabilities
 
 
+def test_structured_stock_universe_query_uses_market_dataset_skill():
+    contract = harness_task_compiler.compile(
+        _request(
+            "筛选连续5年都有现金分红的全部A股，并按累计分红排序",
+            asset_type=AssetType.STOCK,
+            intent=AssetIntent.ANALYZE,
+        ),
+        _routing(),
+    )
+
+    assert contract.required_capabilities == ("market.dataset",)
+    registry = load_default_skills(catalog=build_default_catalog())
+    skills = skill_selector.select(contract, registry)
+    assert [skill.id for skill in skills] == ["market.dataset"]
+    assert skills[0].tools == ("search_market_data_catalog", "query_market_data")
+
+
+def test_system_strategy_catalog_request_uses_strategy_list_skill():
+    contract = harness_task_compiler.compile(
+        _request("系统目前支持哪些交易策略？", asset_type=AssetType.STOCK, intent=AssetIntent.STRATEGIES),
+        _routing(),
+    )
+
+    assert contract.required_capabilities == ("strategy.list",)
+    registry = load_default_skills(catalog=build_default_catalog())
+    skills = skill_selector.select(contract, registry)
+    assert [skill.id for skill in skills] == ["strategy.list"]
+    assert skills[0].tools == ("list_trading_strategies",)
+
+
+def test_general_strategy_question_keeps_methodology_skill():
+    contract = harness_task_compiler.compile(
+        _request("解释趋势跟踪策略的方法论", asset_type=AssetType.STOCK, intent=AssetIntent.STRATEGIES),
+        _routing(),
+    )
+
+    assert contract.required_capabilities == ("methodology.search",)
+
+
 def test_etf_universe_research_uses_screen_dependency_closure_only():
     contract = harness_task_compiler.compile(
         _request(
