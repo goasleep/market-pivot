@@ -5,16 +5,15 @@ delegating analysis to the existing multi-agent LangGraph workflow.
 """
 
 import json
-import re
 from dataclasses import replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal
 
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
-from loguru import logger
 
-from agents.asset_requests import AssetAgentRequest, AssetIntent, AssetRequestResolver
-from application.research import research_service
+from agents.asset_requests import AssetAgentRequest, AssetIntent
+from agents.report_compaction import compact_generated_report as _compact_generated_report
+from agents.stock_analysis import StockAnalysisRuntime
 from application.research_plan import research_plan_service
 from application.task_contract import classify_task_execution, compile_task_contract
 from graph.agent_loop import (
@@ -30,86 +29,6 @@ from models.schemas import AssetType
 from models.supervisor import ExecutionMode, TaskRoutingDecision
 from observability import build_trace_config
 from tools.registry import build_artifact_tools, build_chat_tools
-
-_HTML_SOURCE_BLOCK = re.compile(
-    r"```(?:html|xhtml)?\s*(?:<!doctype\s+html|<html\b).*?```",
-    flags=re.IGNORECASE | re.DOTALL,
-)
-_RAW_HTML_SOURCE = re.compile(r"(?:<!doctype\s+html|<html\b).*", flags=re.IGNORECASE | re.DOTALL)
-
-
-_GENERIC_ARTIFACT_NOTICE = re.compile(r"完整\s*HTML\s*报告已生成文件产物", flags=re.IGNORECASE)
-
-_ARTIFACT_MARKDOWN_LINK = re.compile(
-    r"\[(?P<label>[^\]\n]+)\]\(\s*/api/artifacts/[A-Za-z0-9_-]+/(?:preview|download)\s*\)",
-    flags=re.IGNORECASE,
-)
-_ARTIFACT_LINK_ONLY_LINE = re.compile(
-    r"^\s*(?:[-*+]\s+|\d+\.\s+)?"
-    r"\[[^\]\n]+\]\(\s*/api/artifacts/[A-Za-z0-9_-]+/(?:preview|download)\s*\)\s*$",
-    flags=re.IGNORECASE,
-)
-_ARTIFACT_SECTION_HEADING = re.compile(
-    r"^\s*(?:#{1,6}\s*)?(?:完整(?:文件|内容|成果包?)|附件(?:文件|下载|列表)?)[：:]?\s*$",
-    flags=re.IGNORECASE,
-)
-
-
-def _artifact_label(artifact: dict[str, Any]) -> str:
-    mime_type = str(artifact.get("mime_type") or "")
-    return {
-        "text/markdown": "Markdown",
-        "text/html": "HTML",
-        "application/pdf": "PDF",
-        "text/csv": "CSV",
-        "application/json": "JSON",
-    }.get(mime_type, "文件")
-
-
-def _remove_embedded_artifact_links(text: str) -> str:
-    """Remove duplicated internal artifact links from model-authored prose."""
-    lines = text.splitlines()
-    removed_indexes: set[int] = set()
-    for index, line in enumerate(lines):
-        if not _ARTIFACT_LINK_ONLY_LINE.fullmatch(line):
-            continue
-        removed_indexes.add(index)
-        previous = index - 1
-        while previous >= 0 and not lines[previous].strip():
-            previous -= 1
-        if previous >= 0 and _ARTIFACT_SECTION_HEADING.fullmatch(lines[previous]):
-            removed_indexes.add(previous)
-
-    cleaned = "\n".join(line for index, line in enumerate(lines) if index not in removed_indexes)
-    cleaned = _ARTIFACT_MARKDOWN_LINK.sub(lambda match: match.group("label"), cleaned)
-    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-
-
-def _compact_generated_report(text: str, artifacts: list[dict[str, Any]] | None = None) -> str:
-    """Remove embedded source while retaining a useful chat-native conclusion."""
-    artifacts = artifacts or []
-    artifact = artifacts[0] if artifacts else {}
-    name = str(artifact.get("name") or "完整报告")
-    label = _artifact_label(artifact)
-    metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
-    description = str(metadata.get("description") or "").strip()
-    match = _HTML_SOURCE_BLOCK.search(text) or _RAW_HTML_SOURCE.search(text)
-    if match is not None:
-        lead = text[: match.start()].strip()
-        tail = text[match.end() :].strip()
-        text = "\n\n".join(part for part in (lead, tail) if part)
-    text = _remove_embedded_artifact_links(text)
-    if _GENERIC_ARTIFACT_NOTICE.search(text) and len(text.strip()) < 200:
-        text = description
-    if len(text) > 1800:
-        prefix = text[:1600]
-        boundary = max(prefix.rfind("\n\n"), prefix.rfind("。"), prefix.rfind("；"))
-        text = prefix[: boundary + 1].strip() if boundary >= 400 else prefix.rstrip()
-        text = f"{text}\n\n（正文已节选，完整内容保存在附件中。）"
-    if not text.strip():
-        text = description or "报告已经生成，核心结论和完整明细请查看附件。"
-    notice = f"完整内容见下方附件：{name}（{label}），可直接预览或下载。"
-    return "\n\n".join(part for part in (text.strip(), notice) if part)
 
 
 def _select_tools_for_routing(
@@ -127,75 +46,8 @@ def _select_tools_for_routing(
     return list(all_tools)
 
 
-class AssetAgent(AssetRequestResolver):
+class AssetAgent(StockAnalysisRuntime):
     """Route conversational requests to common asset research capabilities."""
-
-    def _analysis_tool(
-        self,
-        progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
-        *,
-        conversation_id: str | None = None,
-        task_id: str | None = None,
-    ) -> StructuredTool:
-        async def run_analysis(
-            ticker: str,
-            config: RunnableConfig,
-            asset_type: Literal["stock", "etf", "lof"],
-            strategy: str | None = None,
-        ) -> str:
-            """运行综合研究分析，适合用户要求趋势、买卖、风险或交易建议时使用。"""
-            normalized_tickers = self.extract_tickers(ticker)
-            if len(normalized_tickers) != 1:
-                raise ValueError("ticker 必须是单个六位 A 股代码，例如 600519 或 510300")
-            try:
-                normalized_asset_type = AssetType(asset_type)
-            except ValueError as exc:
-                raise ValueError("asset_type 必须是 stock、etf 或 lof") from exc
-            request = self.prepare(
-                f"分析 {normalized_tickers[0]}",
-                strategy=strategy,
-                asset_type=normalized_asset_type.value,
-                conversation_id=conversation_id,
-                task_id=task_id,
-            )
-            if progress_callback is None:
-                _, result = await self.analyze(request, config=config)
-            else:
-                result: dict[str, Any] = {}
-                async for update in self.analyze_stream(
-                    request,
-                    config=config,
-                    progress_callback=progress_callback,
-                ):
-                    result = update.get("state", result)
-            decision = result.get("final_decision")
-            if decision is None:
-                return "{}"
-            market_context = result.get("market_context")
-            try:
-                report_artifacts = await research_service.create_artifacts(
-                    decision,
-                    market_context,
-                    source="chat-tool-analysis",
-                    conversation_id=request.conversation_id,
-                    task_id=request.task_id,
-                    execution_key=f"{request.task_id}:comprehensive-report" if request.task_id else None,
-                )
-            except Exception as exc:
-                logger.warning("Analysis report artifact generation failed; returning decision only: {}", exc)
-                report_artifacts = []
-            artifacts = [*(result.get("visual_artifacts") or []), *report_artifacts]
-            payload = research_service.decision_payload(decision, market_context, artifacts=artifacts)
-            return json.dumps(payload, ensure_ascii=False)
-
-        return StructuredTool.from_function(
-            coroutine=run_analysis,
-            name="run_stock_comprehensive_analysis",
-            description=(
-                "运行短中期股票、ETF或LOF研究分析。只有用户明确需要分析、判断、策略或风险建议时调用。"
-                "必须同时传入 ticker 和 asset_type；asset_type 只能是 stock、etf 或 lof。"
-            ),
-        )
 
     def _research_plan_tool(
         self,
@@ -783,101 +635,6 @@ class AssetAgent(AssetRequestResolver):
                 ).model_dump(mode="json"),
                 "acceptance": completion_result,
             }
-
-    async def analyze(
-        self,
-        request: AssetAgentRequest,
-        *,
-        config: RunnableConfig | None = None,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run the multi-agent stock analysis workflow with tracing metadata."""
-        if not request.ticker:
-            raise ValueError("A stock code is required for analysis")
-
-        ticker = request.ticker
-        run_config = self._analysis_trace_config(request, config)
-        result = await research_service.run(
-            ticker,
-            strategy=request.strategy,
-            asset_type=request.asset_type,
-            conversation_history=request.history,
-            conversation_id=request.conversation_id,
-            task_id=request.task_id,
-            trace_config=run_config,
-        )
-        context = result.get("market_context")
-        return context.realtime if context else {}, result
-
-    async def analyze_stream(
-        self,
-        request: AssetAgentRequest,
-        *,
-        config: RunnableConfig | None = None,
-        progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
-        """Stream actual LangGraph node updates for the chat UI."""
-        if not request.ticker:
-            raise ValueError("A stock code is required for analysis")
-
-        ticker = request.ticker
-        run_config = self._analysis_trace_config(request, config)
-        async for update in research_service.stream(
-            ticker,
-            strategy=request.strategy,
-            asset_type=request.asset_type,
-            conversation_history=request.history,
-            conversation_id=request.conversation_id,
-            task_id=request.task_id,
-            trace_config=run_config,
-        ):
-            context = update.get("state", {}).get("market_context")
-            event = {
-                **update,
-                "realtime": context.realtime if context else {},
-                "data_status": context.data_status if context else {},
-            }
-            if progress_callback is not None:
-                await progress_callback(event)
-            yield event
-
-    @staticmethod
-    def _analysis_trace_config(
-        request: AssetAgentRequest,
-        config: RunnableConfig | None,
-    ) -> RunnableConfig:
-        """Reuse the parent chat trace when analysis is invoked as a tool."""
-        if config is None:
-            trace_config = build_trace_config(
-                "asset-agent-analysis",
-                tags=["asset-agent", "chat", request.intent.value],
-                metadata={
-                    "ticker": request.ticker or "",
-                    "intent": request.intent.value,
-                    "strategy": request.strategy or "auto",
-                    "conversation_id": request.conversation_id or "",
-                },
-                session_id=request.conversation_id,
-            )
-        else:
-            trace_config = {
-                **config,
-                "run_name": "asset-agent-analysis",
-                "tags": [*config.get("tags", []), "asset-agent", "analysis"],
-                "metadata": {
-                    **config.get("metadata", {}),
-                    "ticker": request.ticker or "",
-                    "intent": request.intent.value,
-                    "strategy": request.strategy or "auto",
-                    "conversation_id": request.conversation_id or "",
-                },
-            }
-        if request.task_id and checkpoint_manager.saver is not None:
-            return checkpoint_manager.graph_config(
-                f"{request.task_id}:research:comprehensive",
-                trace_config,
-            )
-        return trace_config
-
 
 StockIntent = AssetIntent
 StockAgentRequest = AssetAgentRequest

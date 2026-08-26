@@ -7,9 +7,10 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
 import graph.agent_loop as agent_loop_module
+from agents.report_compaction import compact_generated_report
 from agents.sentiment_analyst import analyze as analyze_sentiment
 from agents.stock_agent import AssetAgent as StockAgent
-from agents.stock_agent import _compact_generated_report, _select_tools_for_routing
+from agents.stock_agent import _select_tools_for_routing
 from application import strategy_comparison
 from application.research import research_service
 from artifacts.service import ArtifactService
@@ -1162,7 +1163,7 @@ def test_chat_renders_backtest_result_with_curve_and_trades():
 
 
 def test_generated_html_source_is_compacted_when_a_file_artifact_exists():
-    response = _compact_generated_report(
+    response = compact_generated_report(
         "报告已生成。\n\n```html\n<!doctype html><html><body>完整报告</body></html>\n```",
         [{"name": "研究报告.html", "mime_type": "text/html", "metadata": {"description": "完整研究结论"}}],
     )
@@ -1173,7 +1174,7 @@ def test_generated_html_source_is_compacted_when_a_file_artifact_exists():
 
 
 def test_long_generated_report_is_compacted_when_artifact_exists():
-    response = _compact_generated_report(
+    response = compact_generated_report(
         "标题\n" + ("很长的分析内容。\n" * 200),
         [{"name": "验证方案.md", "mime_type": "text/markdown", "metadata": {"description": "完整验证方案"}}],
     )
@@ -1185,7 +1186,7 @@ def test_long_generated_report_is_compacted_when_artifact_exists():
 
 
 def test_generic_artifact_notice_is_replaced_with_description():
-    response = _compact_generated_report(
+    response = compact_generated_report(
         "完整 HTML 报告已生成文件产物，请点击下方卡片预览或下载。",
         [
             {
@@ -1202,7 +1203,7 @@ def test_generic_artifact_notice_is_replaced_with_description():
 
 
 def test_internal_artifact_markdown_links_are_removed_from_generated_report():
-    response = _compact_generated_report(
+    response = compact_generated_report(
         """结论仍然值得保留。
 
 完整文件：
@@ -1221,7 +1222,7 @@ def test_internal_artifact_markdown_links_are_removed_from_generated_report():
 
 
 def test_inline_internal_artifact_markdown_link_keeps_only_its_label():
-    response = _compact_generated_report(
+    response = compact_generated_report(
         "请[下载完整数据](/api/artifacts/artifact-data/download)后复核。",
         [{"name": "数据.csv", "mime_type": "text/csv"}],
     )

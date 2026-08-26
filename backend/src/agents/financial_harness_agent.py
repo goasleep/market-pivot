@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 from langchain_core.tools import StructuredTool
 
 from agents.asset_requests import AssetAgentRequest, AssetRequestResolver
-from agents.stock_agent import _compact_generated_report
+from agents.report_compaction import compact_generated_report
 from agents.stock_executor import stock_comprehensive_executor
 from application.task_contract import classify_task_execution
 from graph.agent_loop import resume_native_agent_loop, stream_agent_loop
@@ -377,7 +377,7 @@ class FinancialHarnessAgent(AssetRequestResolver):
         if final_response:
             yield {
                 "type": "text",
-                "text": _compact_generated_report(final_response, generated_artifacts)
+                "text": compact_generated_report(final_response, generated_artifacts)
                 if generated_artifacts
                 else final_response,
             }
