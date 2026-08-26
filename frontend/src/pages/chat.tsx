@@ -17,6 +17,7 @@ import {
   hasRunningTask,
   hydrateServerConversation,
   isArtifactEmbeddedInA2UI,
+  isRunningTaskMessage,
   latestConversationReferences,
   loadStore,
   newConversation,
@@ -62,6 +63,15 @@ const TERMINAL_TASK_STATUSES = new Set([
   "waiting_user",
   "superseded",
 ]);
+const MAX_MISSING_TASK_RETRIES = 10;
+
+function terminalMessageStatus(
+  status: string | null,
+): ChatMessageData["status"] | null {
+  return status && TERMINAL_TASK_STATUSES.has(status)
+    ? (status as ChatMessageData["status"])
+    : null;
+}
 
 function waitForReconnect(delayMs: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -145,10 +155,7 @@ export function ChatPage() {
     ...(activeConversation?.messages || []),
   ]
     .reverse()
-    .find(
-      (message) =>
-        message.role === "assistant" && message.loading && message.taskId,
-    )?.taskId;
+    .find(isRunningTaskMessage)?.taskId;
   const activeConversationSending = Boolean(activeConversationTaskId);
 
   const selectedReferences = activeConversation
@@ -376,6 +383,7 @@ export function ChatPage() {
         if (!assistant || assistant.role !== "assistant") return item;
         // Keep the assistant loading state until the stream sends its final status.
         // A2UI surfaces can arrive progressively while the Agent is still working.
+        assistant.loading = true;
         assistant.status = "running";
         if (
           part.type === "text" &&
@@ -500,6 +508,7 @@ export function ChatPage() {
         if (messageIndex < 0) return item;
         const messages = [...item.messages];
         const assistant = messages[messageIndex];
+        assistant.loading = true;
         assistant.status = "running";
         const previous = assistant.parts[assistant.parts.length - 1];
         if (part.type === "text" && previous?.type === "text") {
@@ -792,6 +801,7 @@ export function ChatPage() {
           return (await response.json()) as { status?: string };
         };
 
+        let initialTaskAccepted = false;
         try {
           const initialResponse = await fetch("/api/chat/send", {
             method: "POST",
@@ -811,25 +821,37 @@ export function ChatPage() {
           });
           if (!initialResponse.ok)
             throw new Error(`请求失败（${initialResponse.status}）`);
+          initialTaskAccepted = true;
           await consumeStream(initialResponse);
         } catch (error) {
           if (abortController.signal.aborted) throw error;
           // The task is durable on the server. If the first stream drops, resume it below.
           const task = await getTaskStatus();
-          if (!task) throw error;
-          taskStatus = task.status || null;
+          if (!task && !initialTaskAccepted) throw error;
+          taskStatus = task?.status || null;
         }
 
         let reconnectAttempt = 0;
+        let missingTaskRetries = 0;
         while (!abortController.signal.aborted) {
           try {
             const task = await getTaskStatus();
             taskStatus = task?.status || null;
-            if (
-              !task ||
-              (task.status && TERMINAL_TASK_STATUSES.has(task.status))
-            )
-              break;
+            if (!task) {
+              missingTaskRetries += 1;
+              if (missingTaskRetries >= MAX_MISSING_TASK_RETRIES) {
+                taskStatus = "interrupted";
+                break;
+              }
+              await waitForReconnect(
+                Math.min(250 * 2 ** reconnectAttempt, 3000),
+                abortController.signal,
+              );
+              reconnectAttempt = Math.min(reconnectAttempt + 1, 4);
+              continue;
+            }
+            missingTaskRetries = 0;
+            if (terminalMessageStatus(taskStatus)) break;
 
             await waitForReconnect(
               Math.min(250 * 2 ** reconnectAttempt, 3000),
@@ -870,6 +892,9 @@ export function ChatPage() {
           });
         }
       } finally {
+        const terminalStatus = abortController.signal.aborted
+          ? "cancelled"
+          : terminalMessageStatus(taskStatus) || "interrupted";
         updateConversation(conversationId, (item) => ({
           ...item,
           messages: item.messages.map((message, index) =>
@@ -877,17 +902,7 @@ export function ChatPage() {
               ? {
                   ...message,
                   loading: false,
-                  status: abortController.signal.aborted
-                    ? "cancelled"
-                    : taskStatus === "failed"
-                      ? "failed"
-                      : taskStatus === "cancelled"
-                        ? "cancelled"
-                        : taskStatus === "interrupted"
-                          ? "interrupted"
-                          : taskStatus === "waiting_user"
-                            ? "waiting_user"
-                            : "completed",
+                  status: terminalStatus,
                 }
               : message,
           ),
@@ -927,10 +942,7 @@ export function ChatPage() {
   const resumedTaskId = useMemo(() => {
     const pendingMessage = [...(activeConversation?.messages || [])]
       .reverse()
-      .find(
-        (message) =>
-          message.role === "assistant" && message.loading && message.taskId,
-      );
+      .find(isRunningTaskMessage);
     return pendingMessage?.taskId || null;
   }, [activeConversation?.messages]);
 
@@ -945,6 +957,7 @@ export function ChatPage() {
     abortControllerRef.current = reconnectController;
     let disposed = false;
     let lastEventId = taskEventCursorRef.current[resumedTaskId] || 0;
+    let missingTaskRetries = 0;
 
     const waitBeforeReconnect = () =>
       new Promise<void>((resolve) => window.setTimeout(resolve, 1000));
@@ -963,9 +976,15 @@ export function ChatPage() {
             },
           );
           if (response.status === 404) {
-            terminalStatus = "interrupted";
-            break;
+            missingTaskRetries += 1;
+            if (missingTaskRetries >= MAX_MISSING_TASK_RETRIES) {
+              terminalStatus = "interrupted";
+              break;
+            }
+            await waitBeforeReconnect();
+            continue;
           }
+          missingTaskRetries = 0;
           if (!response.ok) throw new Error(`重连失败（${response.status}）`);
           const reader = response.body?.getReader();
           if (!reader) throw new Error("重连没有收到流式响应");
@@ -1050,11 +1069,17 @@ export function ChatPage() {
             { signal: reconnectController.signal },
           );
           if (taskResponse.status === 404) {
-            terminalStatus = "interrupted";
-            break;
+            missingTaskRetries += 1;
+            if (missingTaskRetries >= MAX_MISSING_TASK_RETRIES) {
+              terminalStatus = "interrupted";
+              break;
+            }
+            await waitBeforeReconnect();
+            continue;
           }
           if (!taskResponse.ok)
             throw new Error(`任务状态查询失败（${taskResponse.status}）`);
+          missingTaskRetries = 0;
           const task = (await taskResponse.json()) as { status?: string };
           if (task.status && TERMINAL_TASK_STATUSES.has(task.status)) {
             terminalStatus = task.status as ChatMessageData["status"];
@@ -1508,7 +1533,7 @@ export function ChatPage() {
                     void sendMessage(input);
                   }
                 }}
-                placeholder="问我行情、历史、新闻，或让 Agent 分析一个股票 / ETF / LOF"
+                placeholder="分析股票、ETF/LOF，或查询场外基金净值、费率与同类筛选"
                 disabled={sending}
                 className="border-0 shadow-none focus-visible:ring-0"
               />

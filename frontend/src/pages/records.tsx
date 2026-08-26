@@ -24,6 +24,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader, PageShell } from "@/components/layout/Page";
+import { assetTypeLabel } from "@/lib/assets";
 
 function formatDate(value: string) {
   const date = new Date(value);
@@ -308,7 +309,7 @@ export function RecordsPage() {
                       )}
                       {artifact.asset_type && (
                         <Badge variant="outline">
-                          {artifact.asset_type.toUpperCase()}
+                          {assetTypeLabel(artifact.asset_type)}
                         </Badge>
                       )}
                       <span>{reportSource(artifact.source)}</span>

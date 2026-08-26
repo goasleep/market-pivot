@@ -155,9 +155,16 @@ export function normalizeConversation(
 }
 
 export function hasRunningTask(conversation: Conversation): boolean {
-  return conversation.messages.some(
-    (message) =>
-      message.role === "assistant" && message.loading && message.taskId,
+  return conversation.messages.some(isRunningTaskMessage);
+}
+
+export function isRunningTaskMessage(message: ChatMessageData): boolean {
+  return Boolean(
+    message.role === "assistant" &&
+      message.taskId &&
+      (message.loading ||
+        message.status === "pending" ||
+        message.status === "running"),
   );
 }
 

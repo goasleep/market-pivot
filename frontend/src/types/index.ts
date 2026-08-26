@@ -1,4 +1,4 @@
-export type AssetType = "stock" | "etf" | "lof";
+export type AssetType = "stock" | "etf" | "lof" | "open_fund";
 
 export interface AnalysisResult {
   ticker: string;

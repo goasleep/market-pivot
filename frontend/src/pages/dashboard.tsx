@@ -28,6 +28,7 @@ import {
   type StrategyInfo,
 } from "@/api";
 import type { AssetType, Portfolio } from "@/types";
+import { assetTypeLabel } from "@/lib/assets";
 
 interface WatchItem {
   ticker: string;
@@ -193,7 +194,7 @@ export function DashboardPage() {
         <CardHeader>
           <CardTitle className="text-base">自选标的</CardTitle>
           <CardDescription>
-            保存股票、ETF 或 LOF 代码，作为后续分析和提醒入口。
+            保存股票、ETF 或 LOF 代码，作为场内分析和价格提醒入口；场外基金请在对话中研究。
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -243,7 +244,7 @@ export function DashboardPage() {
                     <div>
                       <span className="font-medium">{item.ticker}</span>
                       <span className="ml-2 text-xs text-muted-foreground">
-                        {item.assetType.toUpperCase()}
+                        {assetTypeLabel(item.assetType)}
                       </span>
                       {item.alertPrice && (
                         <span className="ml-2 text-xs text-muted-foreground">

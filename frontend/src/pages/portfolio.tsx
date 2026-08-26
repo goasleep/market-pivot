@@ -33,18 +33,13 @@ import {
 } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { MetricCard, PageHeader, PageShell } from "@/components/layout/Page";
+import { assetTypeLabel } from "@/lib/assets";
 import type { Portfolio, SimulationSnapshot } from "@/types";
 
 const currency = (value: number, maximumFractionDigits = 2) =>
   `¥${value.toLocaleString(undefined, { maximumFractionDigits })}`;
 
 const percent = (value: number) => `${(value * 100).toFixed(2)}%`;
-
-const assetLabel = (value?: string) => {
-  if (value === "etf") return "ETF";
-  if (value === "lof") return "LOF";
-  return "股票";
-};
 
 const orderStatusLabel: Record<string, string> = {
   pending: "待成交",
@@ -321,7 +316,7 @@ export function PortfolioPage() {
                       <td className="py-3 pr-4">
                         <span className="font-medium">{position.ticker}</span>
                         <span className="ml-2 text-xs text-muted-foreground">
-                          {assetLabel(position.asset_type)}
+                          {assetTypeLabel(position.asset_type)}
                         </span>
                       </td>
                       <td className="py-3 pr-4 text-right">

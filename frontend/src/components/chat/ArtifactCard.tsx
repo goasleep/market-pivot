@@ -17,17 +17,17 @@ interface ArtifactCardProps {
   artifact: Artifact;
 }
 
-function iconFor(mimeType: string) {
+export function artifactIcon(mimeType: string, className = "h-7 w-7") {
   if (mimeType === "text/html")
-    return <FileCode2 className="h-7 w-7 text-sky-600" />;
+    return <FileCode2 className={`${className} text-sky-600`} />;
   if (mimeType.startsWith("image/"))
-    return <Image className="h-7 w-7 text-violet-600" />;
+    return <Image className={`${className} text-violet-600`} />;
   if (mimeType.startsWith("video/"))
-    return <Film className="h-7 w-7 text-fuchsia-600" />;
-  return <FileText className="h-7 w-7 text-blue-600" />;
+    return <Film className={`${className} text-fuchsia-600`} />;
+  return <FileText className={`${className} text-blue-600`} />;
 }
 
-function formatSize(size: number) {
+export function formatArtifactSize(size: number) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
@@ -78,7 +78,7 @@ function parseCsv(text: string): string[][] {
   return rows;
 }
 
-function formatArtifactType(mimeType: string) {
+export function formatArtifactType(mimeType: string) {
   if (mimeType === "text/html") return "HTML";
   if (mimeType === "text/markdown") return "Markdown";
   if (mimeType === "text/csv") return "CSV";
@@ -416,7 +416,7 @@ function TextArtifactPreview({ artifact }: { artifact: Artifact }) {
   );
 }
 
-function previewContent(artifact: Artifact) {
+export function ArtifactPreview({ artifact }: { artifact: Artifact }) {
   if (
     artifact.mime_type === "text/markdown" ||
     artifact.mime_type === "text/csv" ||
@@ -463,7 +463,7 @@ export function ArtifactCard({ artifact }: ArtifactCardProps) {
     <>
       <div className="flex w-full max-w-md items-center gap-3 rounded-xl border bg-background p-3 shadow-sm">
         <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-muted">
-          {iconFor(artifact.mime_type)}
+          {artifactIcon(artifact.mime_type)}
         </div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold" title={artifact.name}>
@@ -472,7 +472,7 @@ export function ArtifactCard({ artifact }: ArtifactCardProps) {
           <div className="mt-0.5 text-xs text-muted-foreground">
             {formatArtifactType(artifact.mime_type)}
             {" · "}
-            {formatSize(artifact.size_bytes)}
+            {formatArtifactSize(artifact.size_bytes)}
           </div>
           <div className="mt-2 flex items-center gap-3 text-xs">
             <button
@@ -507,7 +507,7 @@ export function ArtifactCard({ artifact }: ArtifactCardProps) {
             <aside className="absolute inset-y-0 right-0 flex w-[min(92vw,920px)] flex-col border-l bg-background shadow-2xl">
               <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted">
-                  {iconFor(artifact.mime_type)}
+                  {artifactIcon(artifact.mime_type)}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div
@@ -540,7 +540,7 @@ export function ArtifactCard({ artifact }: ArtifactCardProps) {
                 </button>
               </header>
               <div className="min-h-0 flex-1 bg-white">
-                {previewContent(artifact)}
+                <ArtifactPreview artifact={artifact} />
               </div>
             </aside>
           </div>,

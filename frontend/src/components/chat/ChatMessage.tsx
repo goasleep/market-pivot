@@ -8,6 +8,7 @@ import {
 } from "./A2UIRenderer";
 import { WidgetRenderer } from "./WidgetRenderer";
 import { LazyArtifactCard } from "./LazyArtifactCard";
+import { LazyArtifactCollection } from "./LazyArtifactCollection";
 import type { Artifact } from "@/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -54,11 +55,23 @@ export interface ChatReference {
 }
 
 export interface TaskOutcomeData {
-  outcome: "satisfied" | "partial" | "needs_input" | "data_unavailable" | "failed";
+  outcome:
+    "satisfied" | "partial" | "needs_input" | "data_unavailable" | "failed";
   satisfied: boolean;
   terminal: boolean;
   missing?: string[];
   reason?: string;
+  validator_results?: Array<{
+    validator_id: string;
+    satisfied: boolean;
+    missing?: string[];
+    reason?: string;
+  }>;
+  evidence_coverage?: {
+    required?: string[];
+    covered?: string[];
+    record_count?: number;
+  };
 }
 
 export interface ChatMessageData {
@@ -171,14 +184,24 @@ export function ChatMessage({
   onInteraction,
 }: ChatMessageProps) {
   const isUser = message.role === "user";
-  const [copyStatus, setCopyStatus] = useState<
-    "idle" | "copied" | "failed"
-  >("idle");
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">(
+    "idle",
+  );
   const references = (message.references || []).filter(
     (reference) => reference.url,
   );
   const timestamp = formatMessageTime(message.createdAt);
   const copyContent = messageText(message);
+
+  const contiguousArtifactsAt = (startIndex: number) => {
+    const artifacts: Artifact[] = [];
+    for (let index = startIndex; index < message.parts.length; index += 1) {
+      const candidate = message.parts[index];
+      if (candidate.type !== "artifact") break;
+      artifacts.push(candidate.content as Artifact);
+    }
+    return artifacts;
+  };
 
   const copyMessage = async () => {
     if (!copyContent) return;
@@ -294,12 +317,18 @@ export function ChatMessage({
                 );
               }
               if (part.type === "artifact") {
+                if (message.parts[i - 1]?.type === "artifact") return null;
+                const artifacts = contiguousArtifactsAt(i);
                 return (
                   <div
                     key={i}
                     className="w-full min-w-0 max-w-full overflow-hidden rounded-lg"
                   >
-                    <LazyArtifactCard artifact={part.content as Artifact} />
+                    {artifacts.length > 1 ? (
+                      <LazyArtifactCollection artifacts={artifacts} />
+                    ) : (
+                      <LazyArtifactCard artifact={part.content as Artifact} />
+                    )}
                   </div>
                 );
               }
