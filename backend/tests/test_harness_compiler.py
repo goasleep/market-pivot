@@ -77,6 +77,70 @@ def test_direct_explanation_does_not_load_financial_tools():
     assert contract.allowed_capabilities == ()
 
 
+def test_explicit_code_backtest_selects_only_sandbox_execution_tool():
+    contract = harness_task_compiler.compile(
+        _request(
+            "用 Python 生成代码策略并回测 510300",
+            asset_type=AssetType.ETF,
+            intent=AssetIntent.BACKTEST,
+        ),
+        _routing(ExecutionMode.BACKTEST_EXECUTION),
+    )
+
+    assert contract.required_capabilities == ("market.history", "strategy.sandbox_research")
+    registry = load_default_skills(catalog=build_default_catalog())
+    skills = skill_selector.select(contract, registry)
+    tools = {tool_name for skill in skills for tool_name in skill.tools}
+    assert "design_and_run_sandbox_strategy" in tools
+    assert {
+        "run_backtest",
+        "design_and_run_backtest",
+        "compare_strategy_backtests",
+    }.isdisjoint(tools)
+
+
+def test_plain_backtest_excludes_sandbox_execution_tool():
+    contract = harness_task_compiler.compile(
+        _request("回测 510300", asset_type=AssetType.ETF, intent=AssetIntent.BACKTEST),
+        _routing(ExecutionMode.BACKTEST_EXECUTION),
+    )
+
+    assert contract.required_capabilities == ("market.history", "backtest.execute")
+    registry = load_default_skills(catalog=build_default_catalog())
+    skills = skill_selector.select(contract, registry)
+    tools = {tool_name for skill in skills for tool_name in skill.tools}
+    assert "design_and_run_sandbox_strategy" not in tools
+    assert "run_backtest" in tools
+
+
+def test_sandbox_execution_does_not_depend_on_legacy_backtest_intent():
+    contract = harness_task_compiler.compile(
+        _request(
+            "用代码实现 RSI 策略并在沙箱运行",
+            asset_type=AssetType.ETF,
+            intent=AssetIntent.STRATEGIES,
+        ),
+        _routing(ExecutionMode.BACKTEST_EXECUTION),
+    )
+
+    assert contract.required_capabilities == ("market.history", "strategy.sandbox_research")
+    assert contract.budget_profile == "deep"
+
+
+def test_code_backtest_explanation_does_not_execute_sandbox():
+    contract = harness_task_compiler.compile(
+        _request(
+            "只解释这段 Python 回测代码，不要执行",
+            asset_type=AssetType.ETF,
+            intent=AssetIntent.BACKTEST,
+        ),
+        TaskRoutingDecision(mode=ExecutionMode.DIRECT_RESPONSE, requires_tools=False),
+    )
+
+    assert contract.required_capabilities == ()
+    assert contract.allowed_capabilities == ()
+
+
 def test_simulation_write_requires_explicit_mutation():
     request = _request("查看模拟盘持仓", asset_type=AssetType.ETF, intent=AssetIntent.PORTFOLIO)
     contract = harness_task_compiler.compile(request, _routing())

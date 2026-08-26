@@ -185,6 +185,12 @@ class FinancialHarnessAgent(AssetRequestResolver):
                 "只有该工具返回 ranking_is_formal=true 才能宣称正式排名或任务已满足；"
                 "否则必须明确标为条件性比较/部分结果。"
             )
+        if "strategy.sandbox_research" in contract.required_capabilities:
+            system += (
+                "\n本任务明确要求代码策略沙箱研究，必须调用 design_and_run_sandbox_strategy。"
+                "必须展示生成源码、沙箱验证和可信交易引擎回放结果；不得改用普通回测工具，"
+                "不得把研究回放描述为模拟盘部署或实盘执行。"
+            )
         system_message = {"role": "system", "content": system}
         user_message = {"role": "user", "content": request.message}
         history = select_conversation_history(

@@ -14,6 +14,18 @@ from models.fund_task import FundTaskKind
 from models.supervisor import ExecutionMode, TaskContract, TaskRoutingDecision
 
 _REPRESENTATIVE_WORDS = re.compile(r"代表产品|自动选择|场内.*场外|ETF.*联接|联接.*ETF", re.IGNORECASE)
+_SANDBOX_CODE_SUBJECT = r"(?:python|代码策略|策略代码|代码|沙盒|自定义因子|仓位函数)"
+_SANDBOX_CODE_ACTION = r"(?:执行|运行|生成|编写|写(?:一个|一段)?|设计|实现|创建)"
+_SANDBOX_STRATEGY_CONTEXT = re.compile(r"(?:回测|backtest|策略|因子|仓位)", re.IGNORECASE)
+_SANDBOX_EXECUTION_PATTERNS = (
+    re.compile(rf"{_SANDBOX_CODE_ACTION}.{{0,24}}{_SANDBOX_CODE_SUBJECT}", re.IGNORECASE),
+    re.compile(rf"{_SANDBOX_CODE_SUBJECT}.{{0,24}}(?:{_SANDBOX_CODE_ACTION}|回测|backtest)", re.IGNORECASE),
+    re.compile(r"回测(?:一下|这段|以下|该|上面(?:的)?)\s*(?:python\s*)?代码", re.IGNORECASE),
+)
+_SANDBOX_NON_EXECUTION = re.compile(
+    r"(?:不(?:要|用|必|要求).{0,12}(?:执行|运行|回测)|只(?:需|要|想)?(?:解释|审查|评审|检查|讨论))",
+    re.IGNORECASE,
+)
 _OUTPUT_LABELS = {
     "candidate_pool": "候选基金池",
     "comparison": "候选对比",
@@ -23,6 +35,18 @@ _OUTPUT_LABELS = {
     "exclusions": "未选候选及排除原因",
     "data_as_of": "数据日期与来源",
 }
+
+
+def requests_sandbox_execution(message: str) -> bool:
+    """Return whether the user explicitly requests executable strategy code research."""
+    normalized = (message or "").strip()
+    if (
+        not normalized
+        or not _SANDBOX_STRATEGY_CONTEXT.search(normalized)
+        or _SANDBOX_NON_EXECUTION.search(normalized)
+    ):
+        return False
+    return any(pattern.search(normalized) for pattern in _SANDBOX_EXECUTION_PATTERNS)
 
 
 async def classify_task_execution(
@@ -85,6 +109,19 @@ async def classify_task_execution(
                     "requires_tools": True,
                     "allow_research_plan": True,
                     "reason": "基金候选筛选需要全市场结构化数据",
+                }
+            )
+        if requests_sandbox_execution(message) and (
+            not decision.requires_tools
+            or decision.mode not in {ExecutionMode.BACKTEST_EXECUTION, ExecutionMode.MIXED_WORKFLOW}
+        ):
+            decision = decision.model_copy(
+                update={
+                    "mode": ExecutionMode.BACKTEST_EXECUTION,
+                    "requires_tools": True,
+                    "allow_research_plan": False,
+                    "deliverables": ["生成的策略源码", "沙箱验证结果", "可信交易引擎回测结果"],
+                    "reason": "用户明确要求生成或执行代码策略，必须进入受控沙箱研究",
                 }
             )
         if mutation_requested and not decision.requires_tools:

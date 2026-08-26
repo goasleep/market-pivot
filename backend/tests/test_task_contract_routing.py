@@ -89,6 +89,76 @@ async def test_model_classifies_real_backtest_as_backtest_execution(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_explicit_sandbox_execution_cannot_be_downgraded_to_direct_response(monkeypatch):
+    service = FakeRoutingService(
+        {
+            "mode": "direct_response",
+            "requires_tools": False,
+            "allow_research_plan": False,
+            "deliverables": ["给出代码示例"],
+            "reason": "误判为代码示例",
+            "confidence": 0.7,
+        }
+    )
+    monkeypatch.setattr(task_contract_module, "get_llm_service", lambda: service)
+
+    decision = await classify_task_execution(
+        "用 Python 生成代码策略并回测 510300",
+        tickers=("510300",),
+        asset_type="etf",
+    )
+
+    assert decision.mode == ExecutionMode.BACKTEST_EXECUTION
+    assert decision.requires_tools is True
+    assert decision.allow_research_plan is False
+    assert decision.deliverables == ["生成的策略源码", "沙箱验证结果", "可信交易引擎回测结果"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_non_execution_language_keeps_code_explanation_direct(monkeypatch):
+    service = FakeRoutingService(
+        {
+            "mode": "direct_response",
+            "requires_tools": False,
+            "allow_research_plan": False,
+            "deliverables": ["解释代码"],
+            "reason": "用户明确要求不执行",
+            "confidence": 0.99,
+        }
+    )
+    monkeypatch.setattr(task_contract_module, "get_llm_service", lambda: service)
+
+    decision = await classify_task_execution(
+        "只解释这段 Python 回测代码，不要执行",
+        tickers=("510300",),
+        asset_type="etf",
+    )
+
+    assert decision.mode == ExecutionMode.DIRECT_RESPONSE
+    assert decision.requires_tools is False
+
+
+@pytest.mark.asyncio
+async def test_non_strategy_python_generation_does_not_trigger_sandbox(monkeypatch):
+    service = FakeRoutingService(
+        {
+            "mode": "direct_response",
+            "requires_tools": False,
+            "allow_research_plan": False,
+            "deliverables": ["给出图表代码"],
+            "reason": "不涉及策略执行",
+            "confidence": 0.99,
+        }
+    )
+    monkeypatch.setattr(task_contract_module, "get_llm_service", lambda: service)
+
+    decision = await classify_task_execution("生成一段 Python 图表代码", asset_type="etf")
+
+    assert decision.mode == ExecutionMode.DIRECT_RESPONSE
+    assert decision.requires_tools is False
+
+
+@pytest.mark.asyncio
 async def test_routing_failure_defers_to_supervisor_without_keyword_fallback(monkeypatch):
     service = FakeRoutingService(RuntimeError("routing unavailable"))
     monkeypatch.setattr(task_contract_module, "get_llm_service", lambda: service)

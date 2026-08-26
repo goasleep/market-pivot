@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from agents.asset_requests import AssetAgentRequest, AssetIntent, RequestMode
-from application.task_contract import compile_task_contract
+from application.task_contract import compile_task_contract, requests_sandbox_execution
 from harness.models import HarnessTaskContract
 from models.fund_task import FundTaskKind
 from models.supervisor import ExecutionMode as LegacyExecutionMode
@@ -41,9 +41,17 @@ _LEGACY_MODE_MAP = {
     LegacyExecutionMode.SUPERVISOR_DECIDES: "evidence_research",
 }
 
-
 def _dedupe(items: Iterable[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for item in items if item))
+
+
+def _requests_sandbox_research(request: AssetAgentRequest, *, needs_tools: bool) -> bool:
+    """Recognize explicit executable code-strategy backtests, never explanations."""
+    if not needs_tools:
+        return False
+    if request.asset_type.value not in {"stock", "etf", "lof"}:
+        return False
+    return requests_sandbox_execution(request.message)
 
 
 class HarnessTaskCompiler:
@@ -73,7 +81,15 @@ class HarnessTaskCompiler:
         product_category = str(task_spec.get("subject", {}).get("product_category") or "unknown")
         pricing_basis = str(task_spec.get("subject", {}).get("pricing_basis") or "market_price")
         required = list(_COMMON_FUND_TASK_CAPABILITIES.get(task_kind, ())) if needs_tools else []
-        if needs_tools and task_kind == FundTaskKind.INSTRUMENT_RESEARCH:
+        sandbox_research = _requests_sandbox_research(request, needs_tools=needs_tools)
+        if sandbox_research:
+            required = [
+                "market.history",
+                "strategy.sandbox_research",
+            ]
+        elif needs_tools and request.intent == AssetIntent.BACKTEST and request.asset_type.value != "open_fund":
+            required = ["market.history", "backtest.execute"]
+        elif needs_tools and task_kind == FundTaskKind.INSTRUMENT_RESEARCH:
             if fund_domain == "exchange_fund":
                 required = ["exchange_fund.comprehensive_analysis"]
             elif fund_domain == "open_fund":
@@ -218,7 +234,7 @@ class HarnessTaskCompiler:
             allow_mutations=request.allow_mutating_tools and request.asset_type.value != "open_fund",
             budget_profile=(
                 "deep"
-                if request.intent == AssetIntent.BACKTEST or len(optional_fund_branches) >= 3
+                if sandbox_research or request.intent == AssetIntent.BACKTEST or len(optional_fund_branches) >= 3
                 else "standard"
             ),
             acceptance_profile=(
